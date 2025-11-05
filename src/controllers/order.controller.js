@@ -1,0 +1,193 @@
+const OrderService = require("../services/order.service");
+
+/**
+ * Order Controller
+ * Handles HTTP requests for order operations
+ */
+class OrderController {
+  /**
+   * Get all orders with optional filtering and pagination
+   * GET /api/orders
+   *
+   * Query Parameters:
+   * - page: Page number (default: 1)
+   * - limit: Items per page (default: 10)
+   * - status: Filter by status
+   * - education_level: Filter by education level
+   * - student_id: Filter by student ID
+   * - search: Search by order number, student name, or email
+   */
+  async getOrders(req, res) {
+    try {
+      const { page, limit, ...filters } = req.query;
+      const result = await OrderService.getOrders(
+        filters,
+        parseInt(page) || 1,
+        parseInt(limit) || 10
+      );
+      res.json(result);
+    } catch (error) {
+      console.error("Get orders error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to fetch orders",
+      });
+    }
+  }
+
+  /**
+   * Get single order by ID
+   * GET /api/orders/:id
+   */
+  async getOrderById(req, res) {
+    try {
+      const { id } = req.params;
+      const result = await OrderService.getOrderById(id);
+      res.json(result);
+    } catch (error) {
+      console.error("Get order by ID error:", error);
+      res.status(404).json({
+        success: false,
+        message: error.message || "Order not found",
+      });
+    }
+  }
+
+  /**
+   * Get order by order number
+   * GET /api/orders/number/:orderNumber
+   */
+  async getOrderByNumber(req, res) {
+    try {
+      const { orderNumber } = req.params;
+      const result = await OrderService.getOrderByNumber(orderNumber);
+      res.json(result);
+    } catch (error) {
+      console.error("Get order by number error:", error);
+      res.status(404).json({
+        success: false,
+        message: error.message || "Order not found",
+      });
+    }
+  }
+
+  /**
+   * Create new order
+   * POST /api/orders
+   *
+   * Request Body:
+   * {
+   *   order_number: string (required),
+   *   student_id: string (optional),
+   *   student_name: string (required),
+   *   student_email: string (required),
+   *   education_level: string (required),
+   *   items: array (required),
+   *   total_amount: number (required),
+   *   qr_code_data: string (optional),
+   *   notes: string (optional)
+   * }
+   */
+  async createOrder(req, res) {
+    try {
+      const result = await OrderService.createOrder(req.body);
+      res.status(201).json(result);
+    } catch (error) {
+      console.error("Create order error:", error);
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to create order",
+      });
+    }
+  }
+
+  /**
+   * Update order status
+   * PATCH /api/orders/:id/status
+   *
+   * Request Body:
+   * {
+   *   status: string (required) - "pending", "paid", "claimed", "cancelled"
+   * }
+   */
+  async updateOrderStatus(req, res) {
+    try {
+      const { id } = req.params;
+      const { status } = req.body;
+
+      if (!status) {
+        return res.status(400).json({
+          success: false,
+          message: "Status is required",
+        });
+      }
+
+      const result = await OrderService.updateOrderStatus(id, status);
+      res.json(result);
+    } catch (error) {
+      console.error("Update order status error:", error);
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to update order status",
+      });
+    }
+  }
+
+  /**
+   * Update order
+   * PUT /api/orders/:id
+   *
+   * Request Body: Same as create, all fields optional
+   */
+  async updateOrder(req, res) {
+    try {
+      const { id } = req.params;
+      const result = await OrderService.updateOrder(id, req.body);
+      res.json(result);
+    } catch (error) {
+      console.error("Update order error:", error);
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to update order",
+      });
+    }
+  }
+
+  /**
+   * Delete order (soft delete)
+   * DELETE /api/orders/:id
+   */
+  async deleteOrder(req, res) {
+    try {
+      const { id } = req.params;
+      const result = await OrderService.deleteOrder(id);
+      res.json(result);
+    } catch (error) {
+      console.error("Delete order error:", error);
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to delete order",
+      });
+    }
+  }
+
+  /**
+   * Get order statistics
+   * GET /api/orders/stats
+   */
+  async getOrderStats(req, res) {
+    try {
+      const result = await OrderService.getOrderStats();
+      res.json(result);
+    } catch (error) {
+      console.error("Get order stats error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to fetch order statistics",
+      });
+    }
+  }
+}
+
+module.exports = new OrderController();
+

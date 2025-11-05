@@ -23,15 +23,28 @@ passport.use(
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
-        const email =
-          profile.emails && profile.emails[0] && profile.emails[0].value;
+        console.log("Google profile:", JSON.stringify(profile, null, 2));
+
+        if (!profile.emails || !profile.emails[0]) {
+          console.error("No emails in profile:", profile);
+          return done(new Error("No email returned from Google"));
+        }
+
+        const email = profile.emails[0].value;
         const name = profile.displayName || profile.name?.givenName || "";
 
-        if (!email) return done(new Error("No email returned from Google"));
+        console.log("Processing email:", email);
 
         const isStudent = email.endsWith("@student.laverdad.edu.ph");
         const isAdmin = email.endsWith("@laverdad.edu.ph");
-        const role = isAdmin ? "admin" : isStudent ? "student" : "staff";
+
+        if (!isStudent && !isAdmin) {
+          console.error("Invalid email domain:", email);
+          return done(new Error("Email domain not allowed"));
+        }
+
+        const role = isAdmin ? "admin" : "student";
+        console.log("Assigned role:", role);
 
         const userRow = {
           email,
@@ -41,16 +54,28 @@ passport.use(
           provider_id: profile.id,
         };
 
+        console.log("Upserting user:", userRow);
+
         const { data, error } = await supabase
           .from("users")
           .upsert(userRow, { onConflict: ["email"] })
           .select()
           .single();
 
-        if (error) return done(error);
+        if (error) {
+          console.error("Supabase error:", error);
+          return done(error);
+        }
 
+        if (!data) {
+          console.error("No data returned from Supabase");
+          return done(new Error("Failed to create/update user"));
+        }
+
+        console.log("Success - returning user:", data);
         return done(null, data);
       } catch (err) {
+        console.error("Passport strategy error:", err);
         return done(err);
       }
     }
