@@ -146,6 +146,7 @@ class OrderService {
         throw new Error("Order must contain at least one item");
       }
 
+      // Step 1: Create the order
       const { data, error } = await supabase
         .from("orders")
         .insert([orderData])
@@ -154,10 +155,82 @@ class OrderService {
 
       if (error) throw error;
 
+      // Step 2: Automatically reduce inventory for all items in the order
+      const inventoryUpdates = [];
+      const items = orderData.items || [];
+
+      for (const item of items) {
+        try {
+          // Find inventory item by name and education level
+          const { data: inventoryItems, error: searchError } = await supabase
+            .from("inventory")
+            .select("*")
+            .ilike("name", item.name)
+            .eq("education_level", orderData.education_level)
+            .eq("is_active", true)
+            .limit(1);
+
+          if (searchError) {
+            console.error(
+              `Failed to find inventory for ${item.name}:`,
+              searchError
+            );
+            continue;
+          }
+
+          if (!inventoryItems || inventoryItems.length === 0) {
+            console.error(`Inventory item not found: ${item.name}`);
+            continue;
+          }
+
+          const inventoryItem = inventoryItems[0];
+
+          // Calculate new stock (reduce by ordered quantity)
+          const newStock = Math.max(0, inventoryItem.stock - item.quantity);
+
+          // Update inventory stock
+          const { data: updatedItem, error: updateError } = await supabase
+            .from("inventory")
+            .update({ stock: newStock })
+            .eq("id", inventoryItem.id)
+            .select()
+            .single();
+
+          if (updateError) {
+            console.error(
+              `Failed to update inventory for ${item.name}:`,
+              updateError
+            );
+            continue;
+          }
+
+          inventoryUpdates.push({
+            item: item.name,
+            quantity: item.quantity,
+            previousStock: inventoryItem.stock,
+            newStock: newStock,
+            success: true,
+          });
+
+          console.log(
+            `Inventory reduced: ${item.name} from ${inventoryItem.stock} to ${newStock} (ordered: ${item.quantity})`
+          );
+        } catch (itemError) {
+          console.error(`Error processing item ${item.name}:`, itemError);
+          inventoryUpdates.push({
+            item: item.name,
+            quantity: item.quantity,
+            success: false,
+            error: itemError.message,
+          });
+        }
+      }
+
       return {
         success: true,
         data,
-        message: "Order created successfully",
+        inventoryUpdates,
+        message: "Order created successfully and inventory updated",
       };
     } catch (error) {
       console.error("Create order error:", error);
@@ -286,7 +359,10 @@ class OrderService {
         pending_orders: data.filter((o) => o.status === "pending").length,
         paid_orders: data.filter((o) => o.status === "paid").length,
         claimed_orders: data.filter((o) => o.status === "claimed").length,
-        total_revenue: data.reduce((sum, o) => sum + parseFloat(o.total_amount || 0), 0),
+        total_revenue: data.reduce(
+          (sum, o) => sum + parseFloat(o.total_amount || 0),
+          0
+        ),
       };
 
       return {
@@ -301,4 +377,3 @@ class OrderService {
 }
 
 module.exports = new OrderService();
-
