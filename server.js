@@ -31,10 +31,6 @@ app.use(express.urlencoded({ limit: "10mb", extended: true }));
 // Passport initialization
 app.use(passport.initialize());
 
-// Serve static files from uploads directory
-const path = require("path");
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
-
 //API ROUTES
 app.use("/api", routes);
 

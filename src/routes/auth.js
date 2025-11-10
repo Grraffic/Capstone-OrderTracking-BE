@@ -122,38 +122,6 @@ router.post("/profile/upload-image", verifyToken, async (req, res) => {
   }
 });
 
-/* OLD LOCAL FILE STORAGE CODE - REPLACED WITH CLOUDINARY
-// This code has been replaced with Cloudinary cloud storage
-// Keeping for reference during transition period
-//
-// // Extract base64 data
-// const base64Data = image.replace(/^data:image\/\w+;base64,/, "");
-// const buffer = Buffer.from(base64Data, "base64");
-//
-// // Generate unique filename
-// const fileExt = fileName.split(".").pop();
-// const uniqueFileName = `profile-${Date.now()}-${Math.random()
-//   .toString(36)
-//   .substring(7)}.${fileExt}`;
-//
-// // Store in backend uploads directory
-// const fs = require("fs");
-// const path = require("path");
-// const uploadsDir = path.join(__dirname, "../../uploads/profile-images");
-//
-// // Create directory if it doesn't exist
-// if (!fs.existsSync(uploadsDir)) {
-//   fs.mkdirSync(uploadsDir, { recursive: true });
-// }
-//
-// const filePath = path.join(uploadsDir, uniqueFileName);
-// fs.writeFileSync(filePath, buffer);
-//
-// // Return public URL
-// const baseUrl = process.env.BACKEND_URL || "http://localhost:5000";
-// const imageUrl = `${baseUrl}/uploads/profile-images/${uniqueFileName}`;
-*/
-
 // Update profile endpoint - updates user profile information
 router.put("/profile", verifyToken, async (req, res) => {
   try {
