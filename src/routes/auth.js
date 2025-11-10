@@ -56,10 +56,11 @@ router.get("/profile", verifyToken, async (req, res) => {
   }
 });
 
-// Upload profile image endpoint - uploads image and returns URL
+// Upload profile image endpoint - uploads image to Cloudinary and returns URL
 router.post("/profile/upload-image", verifyToken, async (req, res) => {
   try {
     const { image, fileName } = req.body;
+    const tokenUser = req.user; // from JWT payload
 
     if (!image || !fileName) {
       return res
@@ -67,39 +68,91 @@ router.post("/profile/upload-image", verifyToken, async (req, res) => {
         .json({ message: "Image and fileName are required" });
     }
 
-    // Extract base64 data
-    const base64Data = image.replace(/^data:image\/\w+;base64,/, "");
-    const buffer = Buffer.from(base64Data, "base64");
+    // Import Cloudinary service
+    const {
+      uploadProfileImage,
+      deleteOldProfileImage,
+    } = require("../services/cloudinary.service");
+    const supabase = require("../config/supabase");
 
-    // Generate unique filename
-    const fileExt = fileName.split(".").pop();
-    const uniqueFileName = `profile-${Date.now()}-${Math.random()
-      .toString(36)
-      .substring(7)}.${fileExt}`;
+    // Get user's current photo URL to delete old image
+    const { data: userData } = await supabase
+      .from("users")
+      .select("photo_url")
+      .eq("email", tokenUser.email)
+      .maybeSingle();
 
-    // Store in backend uploads directory
-    const fs = require("fs");
-    const path = require("path");
-    const uploadsDir = path.join(__dirname, "../../uploads/profile-images");
+    const oldPhotoUrl = userData?.photo_url;
 
-    // Create directory if it doesn't exist
-    if (!fs.existsSync(uploadsDir)) {
-      fs.mkdirSync(uploadsDir, { recursive: true });
+    // Upload image to Cloudinary
+    console.log(`📤 Uploading profile image for user: ${tokenUser.email}`);
+    const uploadResult = await uploadProfileImage(image, tokenUser.id);
+
+    if (!uploadResult.success) {
+      return res.status(500).json({
+        message: "Failed to upload image to Cloudinary",
+        details: uploadResult.error || "Unknown error",
+      });
     }
 
-    const filePath = path.join(uploadsDir, uniqueFileName);
-    fs.writeFileSync(filePath, buffer);
+    // Delete old image from Cloudinary if it exists
+    if (oldPhotoUrl) {
+      console.log(`🗑️ Attempting to delete old profile image...`);
+      await deleteOldProfileImage(oldPhotoUrl);
+      // Don't fail the request if deletion fails - new image is already uploaded
+    }
 
-    // Return public URL
-    const baseUrl = process.env.BACKEND_URL || "http://localhost:5000";
-    const imageUrl = `${baseUrl}/uploads/profile-images/${uniqueFileName}`;
+    console.log(`✅ Profile image uploaded successfully: ${uploadResult.url}`);
 
-    return res.json({ imageUrl });
+    // Return Cloudinary URL
+    return res.json({ imageUrl: uploadResult.url });
   } catch (err) {
-    console.error("Image upload error:", err);
-    return res.status(500).json({ message: "Failed to upload image" });
+    console.error("❌ Image upload error:", err);
+
+    // Provide more specific error messages
+    let errorMessage = "Failed to upload image";
+    if (err.message) {
+      errorMessage = err.message;
+    }
+
+    return res.status(500).json({
+      message: errorMessage,
+      details: err.message || "Unknown error",
+    });
   }
 });
+
+/* OLD LOCAL FILE STORAGE CODE - REPLACED WITH CLOUDINARY
+// This code has been replaced with Cloudinary cloud storage
+// Keeping for reference during transition period
+//
+// // Extract base64 data
+// const base64Data = image.replace(/^data:image\/\w+;base64,/, "");
+// const buffer = Buffer.from(base64Data, "base64");
+//
+// // Generate unique filename
+// const fileExt = fileName.split(".").pop();
+// const uniqueFileName = `profile-${Date.now()}-${Math.random()
+//   .toString(36)
+//   .substring(7)}.${fileExt}`;
+//
+// // Store in backend uploads directory
+// const fs = require("fs");
+// const path = require("path");
+// const uploadsDir = path.join(__dirname, "../../uploads/profile-images");
+//
+// // Create directory if it doesn't exist
+// if (!fs.existsSync(uploadsDir)) {
+//   fs.mkdirSync(uploadsDir, { recursive: true });
+// }
+//
+// const filePath = path.join(uploadsDir, uniqueFileName);
+// fs.writeFileSync(filePath, buffer);
+//
+// // Return public URL
+// const baseUrl = process.env.BACKEND_URL || "http://localhost:5000";
+// const imageUrl = `${baseUrl}/uploads/profile-images/${uniqueFileName}`;
+*/
 
 // Update profile endpoint - updates user profile information
 router.put("/profile", verifyToken, async (req, res) => {
