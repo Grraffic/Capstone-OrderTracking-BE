@@ -22,7 +22,9 @@ router.get("/profile", verifyToken, async (req, res) => {
     // Try to fetch user details from users table for richer profile
     const { data, error } = await supabase
       .from("users")
-      .select("email, name, role, avatar_url, photo_url")
+      .select(
+        "email, name, role, avatar_url, photo_url, course_year_level, student_number, education_level"
+      )
       .eq("email", tokenUser.email)
       .maybeSingle();
 
@@ -47,6 +49,9 @@ router.get("/profile", verifyToken, async (req, res) => {
       role: tokenUser.role,
       name: data?.name || null,
       photoURL: data?.photo_url || data?.avatar_url || null,
+      courseYearLevel: data?.course_year_level || null,
+      studentNumber: data?.student_number || null,
+      educationLevel: data?.education_level || null,
     };
 
     return res.json(profile);
@@ -127,18 +132,18 @@ router.put("/profile", verifyToken, async (req, res) => {
   try {
     const supabase = require("../config/supabase");
     const tokenUser = req.user; // from JWT payload
-    const { name, photoURL } = req.body;
-
-    // Validate input
-    if (!name || typeof name !== "string" || name.trim().length === 0) {
-      return res.status(400).json({ message: "Name is required" });
-    }
+    const { name, photoURL, courseYearLevel, studentNumber, educationLevel } =
+      req.body;
 
     // Prepare update data
     const updateData = {
-      name: name.trim(),
       updated_at: new Date().toISOString(),
     };
+
+    // Add name if provided (for admin updates)
+    if (name && typeof name === "string" && name.trim().length > 0) {
+      updateData.name = name.trim();
+    }
 
     // Add photo URL if provided
     if (photoURL) {
@@ -146,12 +151,27 @@ router.put("/profile", verifyToken, async (req, res) => {
       updateData.avatar_url = photoURL; // Keep both fields in sync
     }
 
+    // Add student-specific fields if provided
+    if (courseYearLevel !== undefined) {
+      updateData.course_year_level = courseYearLevel;
+    }
+
+    if (studentNumber !== undefined) {
+      updateData.student_number = studentNumber;
+    }
+
+    if (educationLevel !== undefined) {
+      updateData.education_level = educationLevel;
+    }
+
     // Update user in database
     const { data, error } = await supabase
       .from("users")
       .update(updateData)
       .eq("email", tokenUser.email)
-      .select("email, name, role, avatar_url, photo_url")
+      .select(
+        "email, name, role, avatar_url, photo_url, course_year_level, student_number, education_level"
+      )
       .single();
 
     if (error) {
@@ -173,6 +193,9 @@ router.put("/profile", verifyToken, async (req, res) => {
       role: data.role,
       name: data.name,
       photoURL: data.photo_url || data.avatar_url,
+      courseYearLevel: data.course_year_level,
+      studentNumber: data.student_number,
+      educationLevel: data.education_level,
     };
 
     return res.json(profile);
