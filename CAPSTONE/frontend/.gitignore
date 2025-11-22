@@ -27,4 +27,3 @@ dist-ssr
 .env
 .env.local
 # Keep .env.development and .env.production for reference
-.vercel
