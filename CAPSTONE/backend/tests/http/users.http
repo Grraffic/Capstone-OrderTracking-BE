@@ -1,0 +1,35 @@
+### Login (get token)
+POST http://localhost:5000/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "admin@example.com",
+  "password": "Password123!"
+}
+
+### Submit contact (public)
+POST http://localhost:5000/api/contact
+Content-Type: application/json
+
+{
+  "name": "Jane Example",
+  "email": "jane@gmail.com",
+  "message": "Hi — I have a question about my recent order."
+}
+
+### Get contact submissions (admin - requires token)
+GET http://localhost:5000/api/contact
+Authorization: Bearer {{authToken}}
+
+### Mark a contact as read (admin - requires token)
+# Replace {{contactId}} with an actual id from the Get response
+PUT http://localhost:5000/api/contact/{{contactId}}/read
+Authorization: Bearer {{authToken}}
+### Get contact submissions (admin - requires token)
+GET http://localhost:5000/api/contact
+Authorization: Bearer {{authToken}}
+
+### Mark a contact as read (admin - requires token)
+# Replace {{contactId}} with an actual id from the Get response
+PUT http://localhost:5000/api/contact/{{contactId}}/read
+Authorization: Bearer {{authToken}}
