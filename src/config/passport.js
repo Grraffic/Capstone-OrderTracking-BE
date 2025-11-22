@@ -6,11 +6,19 @@ require("dotenv").config();
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const CALLBACK_URL = "http://localhost:5000/api/auth/google/callback"; // Hardcoded for development
+const CALLBACK_URL =
+  process.env.GOOGLE_CALLBACK_URL ||
+  "http://localhost:5000/api/auth/google/callback";
 
 if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
   console.warn(
     "Google OAuth env vars not set: GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET"
+  );
+}
+
+if (!process.env.GOOGLE_CALLBACK_URL) {
+  console.warn(
+    "⚠️  GOOGLE_CALLBACK_URL not set, using localhost (development mode)"
   );
 }
 
