@@ -12,7 +12,7 @@ const CALLBACK_URL =
 
 if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
   console.warn(
-    "Google OAuth env vars not set: GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET"
+    "Google OAuth env vars not set: GOOGLE_CLIENT_ID /gfi GOOGLE_CLIENT_SECRET"
   );
 }
 
