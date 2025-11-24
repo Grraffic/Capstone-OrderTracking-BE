@@ -28,9 +28,17 @@ class OrderController {
       res.json(result);
     } catch (error) {
       console.error("Get orders error:", error);
-      res.status(500).json({
+
+      // Check if it's a database timeout error
+      const isTimeout = error.code === '57014' || error.message?.includes('timeout');
+      const statusCode = isTimeout ? 504 : 500; // 504 Gateway Timeout
+
+      res.status(statusCode).json({
         success: false,
-        message: error.message || "Failed to fetch orders",
+        message: isTimeout
+          ? "Database query timeout. Please try again or contact support."
+          : (error.message || "Failed to fetch orders"),
+        errorCode: error.code,
       });
     }
   }
@@ -123,6 +131,29 @@ class OrderController {
       }
 
       const result = await OrderService.updateOrderStatus(id, status);
+
+      // Emit Socket.IO event for real-time updates
+      const io = req.app.get("io");
+      if (io) {
+        io.emit("order:updated", {
+          orderId: id,
+          status: status,
+          order: result.data,
+        });
+        console.log(`📡 Socket.IO: Emitted order:updated for order ${id}`);
+
+        // If status is "claimed", emit a specific event for activity tracking
+        if (status === "claimed" && result.data) {
+          io.emit("order:claimed", {
+            orderId: result.data.id,
+            orderNumber: result.data.order_number,
+            userId: result.data.user_id,
+            items: result.data.items,
+          });
+          console.log(`📡 Socket.IO: Emitted order:claimed for order ${result.data.order_number}`);
+        }
+      }
+
       res.json(result);
     } catch (error) {
       console.error("Update order status error:", error);

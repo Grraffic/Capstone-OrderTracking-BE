@@ -25,6 +25,11 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
       "x-application-name": "your-app-name",
     },
   },
+  // Increase timeout for queries (default is 60 seconds)
+  // Note: This is a client-side timeout. Database-level timeout must be configured in Supabase dashboard
+  realtime: {
+    timeout: 120000, // 2 minutes
+  },
 });
 
 // Test the Supabase connection

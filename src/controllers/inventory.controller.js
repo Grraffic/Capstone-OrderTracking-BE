@@ -31,9 +31,17 @@ class InventoryController {
       res.json(result);
     } catch (error) {
       console.error("Get inventory items error:", error);
-      res.status(500).json({
+
+      // Check if it's a database timeout error
+      const isTimeout = error.code === '57014' || error.message?.includes('timeout');
+      const statusCode = isTimeout ? 504 : 500; // 504 Gateway Timeout
+
+      res.status(statusCode).json({
         success: false,
-        message: error.message || "Failed to fetch inventory items",
+        message: isTimeout
+          ? "Database query timeout. Please try again or contact support."
+          : (error.message || "Failed to fetch inventory items"),
+        errorCode: error.code,
       });
     }
   }
