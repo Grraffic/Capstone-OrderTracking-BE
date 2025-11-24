@@ -147,10 +147,10 @@ class OrderController {
           io.emit("order:claimed", {
             orderId: result.data.id,
             orderNumber: result.data.order_number,
-            userId: result.data.user_id,
+            userId: result.data.student_id, // Use student_id from database
             items: result.data.items,
           });
-          console.log(`📡 Socket.IO: Emitted order:claimed for order ${result.data.order_number}`);
+          console.log(`📡 Socket.IO: Emitted order:claimed for order ${result.data.order_number} to student ${result.data.student_id}`);
         }
       }
 
