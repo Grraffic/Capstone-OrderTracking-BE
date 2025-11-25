@@ -5,6 +5,7 @@ const authRoutes = require("./auth");
 const inventoryRoutes = require("./inventory");
 const orderRoutes = require("./orders");
 const cartRoutes = require("./cart");
+const notificationRoutes = require("./notification");
 
 // Contact routes
 router.post("/contact", contactController.createContact);
@@ -24,5 +25,8 @@ router.use("/orders", orderRoutes);
 
 // Cart routes (Student only)
 router.use("/cart", cartRoutes);
+
+// Notification routes
+router.use("/notifications", notificationRoutes);
 
 module.exports = router;

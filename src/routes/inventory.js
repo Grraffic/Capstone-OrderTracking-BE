@@ -52,6 +52,12 @@ router.get("/", inventoryController.getInventoryItems);
 router.get("/:id", inventoryController.getInventoryItemById);
 
 /**
+ * GET /api/inventory/:id/pre-order-count
+ * Get pending pre-order count for an inventory item
+ */
+router.get("/:id/pre-order-count", inventoryController.getPreOrderCount);
+
+/**
  * POST /api/inventory
  * Create new inventory item
  * Note: Add auth.requireAdmin middleware when ready

@@ -141,6 +141,11 @@ class OrderService {
         }
       }
 
+      // Set default order_type if not provided (for backward compatibility)
+      if (!orderData.order_type) {
+        orderData.order_type = 'regular';
+      }
+
       // Validate items array
       if (!Array.isArray(orderData.items) || orderData.items.length === 0) {
         throw new Error("Order must contain at least one item");
@@ -155,75 +160,86 @@ class OrderService {
 
       if (error) throw error;
 
-      // Step 2: Automatically reduce inventory for all items in the order
+      // Step 2: Automatically reduce inventory for regular orders only
+      // Pre-orders don't reduce inventory since items are already out of stock
       const inventoryUpdates = [];
       const items = orderData.items || [];
+      const isPreOrder = orderData.order_type === 'pre-order';
 
-      for (const item of items) {
-        try {
-          // Find inventory item by name and education level
-          const { data: inventoryItems, error: searchError } = await supabase
-            .from("inventory")
-            .select("*")
-            .ilike("name", item.name)
-            .eq("education_level", orderData.education_level)
-            .eq("is_active", true)
-            .limit(1);
+      if (!isPreOrder) {
+        // Only reduce inventory for regular orders
+        for (const item of items) {
+          try {
+            // Find inventory item by name and education level
+            const { data: inventoryItems, error: searchError } = await supabase
+              .from("inventory")
+              .select("*")
+              .ilike("name", item.name)
+              .eq("education_level", orderData.education_level)
+              .eq("is_active", true)
+              .limit(1);
 
-          if (searchError) {
-            console.error(
-              `Failed to find inventory for ${item.name}:`,
-              searchError
+            if (searchError) {
+              console.error(
+                `Failed to find inventory for ${item.name}:`,
+                searchError
+              );
+              continue;
+            }
+
+            if (!inventoryItems || inventoryItems.length === 0) {
+              console.error(`Inventory item not found: ${item.name}`);
+              continue;
+            }
+
+            const inventoryItem = inventoryItems[0];
+
+            // Calculate new stock (reduce by ordered quantity)
+            const newStock = Math.max(0, inventoryItem.stock - item.quantity);
+
+            // Update inventory stock
+            const { data: updatedItem, error: updateError } = await supabase
+              .from("inventory")
+              .update({ stock: newStock })
+              .eq("id", inventoryItem.id)
+              .select()
+              .single();
+
+            if (updateError) {
+              console.error(
+                `Failed to update inventory for ${item.name}:`,
+                updateError
+              );
+              continue;
+            }
+
+            inventoryUpdates.push({
+              item: item.name,
+              quantity: item.quantity,
+              previousStock: inventoryItem.stock,
+              newStock: newStock,
+              success: true,
+            });
+
+            console.log(
+              `Inventory reduced: ${item.name} from ${inventoryItem.stock} to ${newStock} (ordered: ${item.quantity})`
             );
-            continue;
+          } catch (itemError) {
+            console.error(`Error processing item ${item.name}:`, itemError);
+            inventoryUpdates.push({
+              item: item.name,
+              quantity: item.quantity,
+              success: false,
+              error: itemError.message,
+            });
           }
-
-          if (!inventoryItems || inventoryItems.length === 0) {
-            console.error(`Inventory item not found: ${item.name}`);
-            continue;
-          }
-
-          const inventoryItem = inventoryItems[0];
-
-          // Calculate new stock (reduce by ordered quantity)
-          const newStock = Math.max(0, inventoryItem.stock - item.quantity);
-
-          // Update inventory stock
-          const { data: updatedItem, error: updateError } = await supabase
-            .from("inventory")
-            .update({ stock: newStock })
-            .eq("id", inventoryItem.id)
-            .select()
-            .single();
-
-          if (updateError) {
-            console.error(
-              `Failed to update inventory for ${item.name}:`,
-              updateError
-            );
-            continue;
-          }
-
-          inventoryUpdates.push({
-            item: item.name,
-            quantity: item.quantity,
-            previousStock: inventoryItem.stock,
-            newStock: newStock,
-            success: true,
-          });
-
-          console.log(
-            `Inventory reduced: ${item.name} from ${inventoryItem.stock} to ${newStock} (ordered: ${item.quantity})`
-          );
-        } catch (itemError) {
-          console.error(`Error processing item ${item.name}:`, itemError);
-          inventoryUpdates.push({
-            item: item.name,
-            quantity: item.quantity,
-            success: false,
-            error: itemError.message,
-          });
         }
+      } else {
+        console.log('Pre-order detected - skipping inventory reduction');
+        inventoryUpdates.push({
+          message: 'Pre-order - inventory not reduced',
+          orderType: 'pre-order',
+        });
       }
 
       return {

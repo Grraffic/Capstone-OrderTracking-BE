@@ -1,4 +1,5 @@
 const InventoryService = require("../services/inventory.service");
+const NotificationService = require("../services/notification.service");
 
 /**
  * Inventory Controller
@@ -65,6 +66,46 @@ class InventoryController {
   }
 
   /**
+   * Get pending pre-order count for an inventory item
+   * GET /api/inventory/:id/pre-order-count
+   */
+  async getPreOrderCount(req, res) {
+    try {
+      const { id } = req.params;
+
+      // Get the inventory item first
+      const itemResult = await InventoryService.getInventoryItemById(id);
+      if (!itemResult.success) {
+        return res.status(404).json({
+          success: false,
+          message: "Inventory item not found",
+        });
+      }
+
+      const item = itemResult.data;
+
+      // Find students with pending pre-orders for this item
+      const studentsWithPreOrders = await NotificationService.findStudentsWithPendingPreOrders(
+        item.name,
+        item.education_level,
+        item.size || null
+      );
+
+      res.json({
+        success: true,
+        count: studentsWithPreOrders.length,
+        students: studentsWithPreOrders,
+      });
+    } catch (error) {
+      console.error("Get pre-order count error:", error);
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to get pre-order count",
+      });
+    }
+  }
+
+  /**
    * Create new inventory item
    * POST /api/inventory
    *
@@ -88,7 +129,16 @@ class InventoryController {
    */
   async createInventoryItem(req, res) {
     try {
-      const result = await InventoryService.createInventoryItem(req.body);
+      // Get Socket.IO instance for real-time notifications
+      const io = req.app.get("io");
+
+      const result = await InventoryService.createInventoryItem(req.body, io);
+
+      // Log notification info if any students were notified
+      if (result.notificationInfo && result.notificationInfo.notified > 0) {
+        console.log(`✅ Notified ${result.notificationInfo.notified} students about new item availability`);
+      }
+
       res.status(201).json(result);
     } catch (error) {
       console.error("Create inventory item error:", error);
@@ -108,7 +158,17 @@ class InventoryController {
   async updateInventoryItem(req, res) {
     try {
       const { id } = req.params;
-      const result = await InventoryService.updateInventoryItem(id, req.body);
+
+      // Get Socket.IO instance for real-time notifications
+      const io = req.app.get("io");
+
+      const result = await InventoryService.updateInventoryItem(id, req.body, io);
+
+      // Log notification info if any students were notified
+      if (result.notificationInfo && result.notificationInfo.notified > 0) {
+        console.log(`✅ Notified ${result.notificationInfo.notified} students about restock`);
+      }
+
       res.json(result);
     } catch (error) {
       console.error("Update inventory item error:", error);
@@ -159,11 +219,21 @@ class InventoryController {
         });
       }
 
+      // Get Socket.IO instance for real-time notifications
+      const io = req.app.get("io");
+
       const result = await InventoryService.adjustInventoryStock(
         id,
         adjustment,
-        reason
+        reason,
+        io
       );
+
+      // Log notification info if any students were notified
+      if (result.notificationInfo && result.notificationInfo.notified > 0) {
+        console.log(`✅ Notified ${result.notificationInfo.notified} students about restock`);
+      }
+
       res.json(result);
     } catch (error) {
       console.error("Adjust inventory stock error:", error);

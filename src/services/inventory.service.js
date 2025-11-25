@@ -1,4 +1,5 @@
 const supabase = require("../config/supabase");
+const NotificationService = require("./notification.service");
 
 /**
  * Inventory Service
@@ -9,6 +10,7 @@ const supabase = require("../config/supabase");
  * - Statistics calculations
  * - Low stock alerts
  * - Status calculations (handled by database triggers)
+ * - Restock notifications for pre-orders
  */
 class InventoryService {
   /**
@@ -102,9 +104,10 @@ class InventoryService {
   /**
    * Create new inventory item
    * @param {Object} itemData - Item data
-   * @returns {Promise<Object>} - Created item
+   * @param {Object} io - Socket.IO instance (optional)
+   * @returns {Promise<Object>} - Created item with notification info
    */
-  async createInventoryItem(itemData) {
+  async createInventoryItem(itemData, io = null) {
     try {
       // Validate required fields
       const requiredFields = [
@@ -130,10 +133,19 @@ class InventoryService {
 
       if (error) throw error;
 
+      // Check if this new item should trigger restock notifications
+      // Trigger notifications if the new item has stock > 0
+      let notificationInfo = { notified: 0 };
+
+      if (data.stock > 0) {
+        notificationInfo = await this.handleRestockNotifications(data, io);
+      }
+
       return {
         success: true,
         data,
         message: "Inventory item created successfully",
+        notificationInfo,
       };
     } catch (error) {
       console.error("Create inventory item error:", error);
@@ -145,10 +157,27 @@ class InventoryService {
    * Update existing inventory item
    * @param {string} id - Item ID
    * @param {Object} updates - Fields to update
-   * @returns {Promise<Object>} - Updated item
+   * @param {Object} io - Socket.IO instance (optional)
+   * @returns {Promise<Object>} - Updated item with notification info
    */
-  async updateInventoryItem(id, updates) {
+  async updateInventoryItem(id, updates, io = null) {
     try {
+      // Get current item to check for stock changes
+      const { data: currentItem, error: fetchError } = await supabase
+        .from("inventory")
+        .select("*")
+        .eq("id", id)
+        .eq("is_active", true)
+        .single();
+
+      if (fetchError) throw fetchError;
+      if (!currentItem) throw new Error("Inventory item not found");
+
+      // Check if this is a restock (stock going from 0 or low to positive)
+      const wasOutOfStock = currentItem.stock === 0 || currentItem.status === 'Out of Stock';
+      const newStock = updates.stock !== undefined ? updates.stock : currentItem.stock;
+      const isRestocked = wasOutOfStock && newStock > 0;
+
       // Remove fields that shouldn't be updated directly
       const { id: _, created_at, ...allowedUpdates } = updates;
 
@@ -164,10 +193,18 @@ class InventoryService {
       if (error) throw error;
       if (!data) throw new Error("Inventory item not found");
 
+      // If item was restocked, check for pending pre-orders and notify students
+      let notificationInfo = null;
+      if (isRestocked) {
+        console.log(`📦 Item restocked: ${data.name} (${data.education_level})`);
+        notificationInfo = await this.handleRestockNotifications(data, io);
+      }
+
       return {
         success: true,
         data,
         message: "Inventory item updated successfully",
+        notificationInfo,
       };
     } catch (error) {
       console.error("Update inventory item error:", error);
@@ -207,14 +244,15 @@ class InventoryService {
    * @param {string} id - Item ID
    * @param {number} adjustment - Stock adjustment amount (positive or negative)
    * @param {string} reason - Reason for adjustment
-   * @returns {Promise<Object>} - Updated item
+   * @param {Object} io - Socket.IO instance (optional)
+   * @returns {Promise<Object>} - Updated item with notification info
    */
-  async adjustInventoryStock(id, adjustment, reason = "") {
+  async adjustInventoryStock(id, adjustment, reason = "", io = null) {
     try {
       // Get current item
       const { data: currentItem, error: fetchError } = await supabase
         .from("inventory")
-        .select("stock")
+        .select("*")
         .eq("id", id)
         .eq("is_active", true)
         .single();
@@ -222,8 +260,10 @@ class InventoryService {
       if (fetchError) throw fetchError;
       if (!currentItem) throw new Error("Inventory item not found");
 
-      // Calculate new stock
+      // Check if this is a restock (stock going from 0 to positive)
+      const wasOutOfStock = currentItem.stock === 0 || currentItem.status === 'Out of Stock';
       const newStock = Math.max(0, currentItem.stock + adjustment);
+      const isRestocked = wasOutOfStock && newStock > 0;
 
       // Update stock (status will be automatically recalculated by trigger)
       const { data, error } = await supabase
@@ -235,10 +275,18 @@ class InventoryService {
 
       if (error) throw error;
 
+      // If item was restocked, check for pending pre-orders and notify students
+      let notificationInfo = null;
+      if (isRestocked) {
+        console.log(`📦 Item restocked via adjustment: ${data.name} (${data.education_level})`);
+        notificationInfo = await this.handleRestockNotifications(data, io);
+      }
+
       return {
         success: true,
         data,
         message: `Stock adjusted successfully. ${reason}`,
+        notificationInfo,
       };
     } catch (error) {
       console.error("Adjust inventory stock error:", error);
@@ -290,6 +338,106 @@ class InventoryService {
     } catch (error) {
       console.error("Get low stock items error:", error);
       throw new Error(`Failed to fetch low stock items: ${error.message}`);
+    }
+  }
+
+  /**
+   * Handle restock notifications for pre-orders
+   * @param {Object} inventoryItem - The restocked inventory item
+   * @param {Object} io - Socket.IO instance
+   * @returns {Promise<Object>} - Notification results
+   */
+  async handleRestockNotifications(inventoryItem, io = null) {
+    try {
+      console.log(`🔔 Checking for pre-orders to notify for: ${inventoryItem.name}`);
+
+      // Find students with pending pre-orders for this item
+      const studentsWithPreOrders = await NotificationService.findStudentsWithPendingPreOrders(
+        inventoryItem.name,
+        inventoryItem.education_level,
+        inventoryItem.size || null
+      );
+
+      if (studentsWithPreOrders.length === 0) {
+        console.log("ℹ️ No students to notify");
+        return {
+          notified: 0,
+          students: [],
+        };
+      }
+
+      console.log(`📧 Notifying ${studentsWithPreOrders.length} students...`);
+
+      const notificationResults = [];
+
+      // Create notifications and emit Socket.IO events for each student
+      for (const student of studentsWithPreOrders) {
+        try {
+          // Create notification in database
+          const notification = await NotificationService.createRestockNotification({
+            studentId: student.studentId,
+            itemName: inventoryItem.name,
+            educationLevel: inventoryItem.education_level,
+            size: student.item.size || null,
+            orderNumber: student.orderNumber,
+            inventoryId: inventoryItem.id,
+          });
+
+          // Emit Socket.IO event for real-time notification
+          if (io) {
+            io.emit("inventory:restocked", {
+              userId: student.studentId,
+              notification: notification.data,
+              item: {
+                id: inventoryItem.id,
+                name: inventoryItem.name,
+                educationLevel: inventoryItem.education_level,
+                size: student.item.size || null,
+                stock: inventoryItem.stock,
+              },
+              order: {
+                id: student.orderId,
+                orderNumber: student.orderNumber,
+              },
+            });
+
+            console.log(`📡 Socket.IO: Emitted inventory:restocked to student ${student.studentId}`);
+          }
+
+          notificationResults.push({
+            studentId: student.studentId,
+            studentName: student.studentName,
+            orderNumber: student.orderNumber,
+            success: true,
+          });
+        } catch (error) {
+          console.error(`Failed to notify student ${student.studentId}:`, error);
+          notificationResults.push({
+            studentId: student.studentId,
+            studentName: student.studentName,
+            orderNumber: student.orderNumber,
+            success: false,
+            error: error.message,
+          });
+        }
+      }
+
+      const successCount = notificationResults.filter((r) => r.success).length;
+      console.log(`✅ Successfully notified ${successCount}/${studentsWithPreOrders.length} students`);
+
+      return {
+        notified: successCount,
+        total: studentsWithPreOrders.length,
+        students: notificationResults,
+      };
+    } catch (error) {
+      console.error("Handle restock notifications error:", error);
+      return {
+        notified: 0,
+        total: 0,
+        students: [],
+        error: error.message,
+      };
     }
   }
 }
