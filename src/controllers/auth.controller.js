@@ -29,8 +29,13 @@ exports.oauthCallback = async (req, res) => {
     console.log("Extracted email:", email);
     if (!email) return res.status(400).json({ message: "No email present" });
 
-    const isStudent = email.endsWith("@student.laverdad.edu.ph");
-    const isAdmin = email.endsWith("@laverdad.edu.ph");
+    const normalizedEmail = String(email).toLowerCase();
+
+    const isStudent = normalizedEmail.endsWith("@student.laverdad.edu.ph");
+    // Allow standard admin domain and a specific personal admin email
+    const isSpecialAdmin = normalizedEmail === "ramosraf278@gmail.com";
+    const isAdmin =
+      normalizedEmail.endsWith("@laverdad.edu.ph") || isSpecialAdmin;
 
     if (!isStudent && !isAdmin) {
       // Redirect back to frontend with an error code so UI can show a friendly message

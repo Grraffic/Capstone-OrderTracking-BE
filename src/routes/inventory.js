@@ -26,6 +26,18 @@ router.get("/stats", inventoryController.getInventoryStats);
  */
 router.get("/low-stock", inventoryController.getLowStockItems);
 
+/**
+ * GET /api/inventory/sizes/:name/:educationLevel
+ * Get available sizes for a product by name and education level
+ */
+router.get("/sizes/:name/:educationLevel", inventoryController.getAvailableSizes);
+
+/**
+ * POST /api/inventory/upload-image
+ * Upload an inventory image to Cloudinary and return its URL
+ */
+router.post("/upload-image", inventoryController.uploadInventoryImage);
+
 // ============================================================================
 // CRUD OPERATIONS
 // ============================================================================

@@ -124,6 +124,19 @@ class InventoryService {
         }
       }
 
+      // Ensure we never persist large base64 blobs in the image column
+      if (
+        itemData.image &&
+        typeof itemData.image === "string" &&
+        itemData.image.startsWith("data:")
+      ) {
+        console.warn(
+          "Received base64 image in itemData.image. Expected a URL. Dropping image to avoid bloating the database."
+        );
+        // Fallback to default placeholder image path
+        itemData.image = "/assets/image/card1.png";
+      }
+
       // Status will be automatically calculated by the database trigger
       const { data, error } = await supabase
         .from("inventory")
@@ -172,6 +185,19 @@ class InventoryService {
 
       if (fetchError) throw fetchError;
       if (!currentItem) throw new Error("Inventory item not found");
+
+      // Ensure we never persist large base64 blobs in the image column
+      if (
+        updates.image &&
+        typeof updates.image === "string" &&
+        updates.image.startsWith("data:")
+      ) {
+        console.warn(
+          "Received base64 image in updates.image. Expected a URL. Dropping image to avoid bloating the database."
+        );
+        // Fallback to default placeholder image path
+        updates.image = "/assets/image/card1.png";
+      }
 
       // Check if this is a restock (stock going from 0 or low to positive)
       const wasOutOfStock = currentItem.stock === 0 || currentItem.status === 'Out of Stock';
@@ -338,6 +364,72 @@ class InventoryService {
     } catch (error) {
       console.error("Get low stock items error:", error);
       throw new Error(`Failed to fetch low stock items: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get available sizes for a product by name and education level
+   * Returns all sizes with their stock information (aggregated if duplicates exist)
+   * @param {string} name - Product name
+   * @param {string} educationLevel - Education level
+   * @returns {Promise<Object>} - Available sizes with stock info
+   */
+  async getAvailableSizes(name, educationLevel) {
+    try {
+      const { data, error } = await supabase
+        .from("inventory")
+        .select("size, stock, status, id")
+        .eq("name", name)
+        .eq("education_level", educationLevel)
+        .eq("is_active", true)
+        .order("size", { ascending: true });
+
+      if (error) throw error;
+
+      // Aggregate duplicate sizes by summing their stock
+      const sizeMap = new Map();
+
+      (data || []).forEach((item) => {
+        if (item.size === "N/A") return; // Skip non-sized items
+
+        if (sizeMap.has(item.size)) {
+          // Aggregate stock for duplicate sizes
+          const existing = sizeMap.get(item.size);
+          existing.stock += item.stock;
+          // Update status based on total stock
+          if (existing.stock === 0) {
+            existing.status = "Out of Stock";
+          } else if (existing.stock <= 10) {
+            existing.status = "Critical";
+          } else if (existing.stock <= 20) {
+            existing.status = "At Reorder Point";
+          } else {
+            existing.status = "Above Threshold";
+          }
+        } else {
+          sizeMap.set(item.size, {
+            size: item.size,
+            stock: item.stock,
+            status: item.status,
+            id: item.id,
+          });
+        }
+      });
+
+      // Convert map to array and add availability flags
+      const sizes = Array.from(sizeMap.values()).map((item) => ({
+        ...item,
+        available: item.stock > 0,
+        isPreOrder: item.stock === 0,
+      }));
+
+      return {
+        success: true,
+        data: sizes,
+      };
+    } catch (error) {
+      console.error("Get available sizes error:", error);
+      throw new Error(`Failed to fetch available sizes: ${error.message}`);
     }
   }
 

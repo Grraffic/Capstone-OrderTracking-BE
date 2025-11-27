@@ -1,5 +1,6 @@
 const InventoryService = require("../services/inventory.service");
 const NotificationService = require("../services/notification.service");
+const { uploadImage } = require("../services/cloudinary.service");
 
 /**
  * Inventory Controller
@@ -8,6 +9,67 @@ const NotificationService = require("../services/notification.service");
  * Delegates business logic to InventoryService.
  */
 class InventoryController {
+  /**
+   * Upload an inventory image to Cloudinary
+   * POST /api/inventory/upload-image
+   *
+   * Request Body:
+   * {
+   *   image: string (required) - base64 data URL or raw base64,
+   *   fileName: string (optional) - original file name for logging
+   * }
+   *
+   * Response:
+   * {
+   *   success: boolean,
+   *   url?: string,        // Cloudinary secure URL
+   *   message?: string
+   * }
+   */
+  async uploadInventoryImage(req, res) {
+    try {
+      const { image, fileName } = req.body || {};
+
+      if (!image || typeof image !== "string") {
+        return res.status(400).json({
+          success: false,
+          message: "Image payload is required and must be a string",
+        });
+      }
+
+      console.log("📤 Uploading inventory image to Cloudinary...", {
+        fileName: fileName || "unnamed-file",
+      });
+
+      const result = await uploadImage(image, {
+        folder: "la-verdad-uniforms/inventory-items",
+        width: 800,
+        height: 800,
+        crop: "fill",
+        format: "auto",
+        quality: "auto",
+      });
+
+      if (!result?.success || !result?.url) {
+        return res.status(500).json({
+          success: false,
+          message: "Failed to upload inventory image to Cloudinary",
+        });
+      }
+
+      return res.json({
+        success: true,
+        url: result.url,
+      });
+    } catch (error) {
+      console.error("Upload inventory image error:", error);
+      return res.status(500).json({
+        success: false,
+        message: error.message || "Failed to upload inventory image",
+      });
+    }
+  }
+
   /**
    * Get all inventory items with optional filtering and pagination
    * GET /api/inventory
@@ -34,14 +96,15 @@ class InventoryController {
       console.error("Get inventory items error:", error);
 
       // Check if it's a database timeout error
-      const isTimeout = error.code === '57014' || error.message?.includes('timeout');
+      const isTimeout =
+        error.code === "57014" || error.message?.includes("timeout");
       const statusCode = isTimeout ? 504 : 500; // 504 Gateway Timeout
 
       res.status(statusCode).json({
         success: false,
         message: isTimeout
           ? "Database query timeout. Please try again or contact support."
-          : (error.message || "Failed to fetch inventory items"),
+          : error.message || "Failed to fetch inventory items",
         errorCode: error.code,
       });
     }
@@ -85,11 +148,12 @@ class InventoryController {
       const item = itemResult.data;
 
       // Find students with pending pre-orders for this item
-      const studentsWithPreOrders = await NotificationService.findStudentsWithPendingPreOrders(
-        item.name,
-        item.education_level,
-        item.size || null
-      );
+      const studentsWithPreOrders =
+        await NotificationService.findStudentsWithPendingPreOrders(
+          item.name,
+          item.education_level,
+          item.size || null
+        );
 
       res.json({
         success: true,
@@ -101,6 +165,33 @@ class InventoryController {
       res.status(400).json({
         success: false,
         message: error.message || "Failed to get pre-order count",
+      });
+    }
+  }
+
+  /**
+   * Get available sizes for a product
+   * GET /api/inventory/sizes/:name/:educationLevel
+   */
+  async getAvailableSizes(req, res) {
+    try {
+      const { name, educationLevel } = req.params;
+
+      // Decode URL-encoded parameters
+      const decodedName = decodeURIComponent(name);
+      const decodedEducationLevel = decodeURIComponent(educationLevel);
+
+      const result = await InventoryService.getAvailableSizes(
+        decodedName,
+        decodedEducationLevel
+      );
+
+      res.json(result);
+    } catch (error) {
+      console.error("Get available sizes error:", error);
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to get available sizes",
       });
     }
   }
@@ -136,7 +227,9 @@ class InventoryController {
 
       // Log notification info if any students were notified
       if (result.notificationInfo && result.notificationInfo.notified > 0) {
-        console.log(`✅ Notified ${result.notificationInfo.notified} students about new item availability`);
+        console.log(
+          `✅ Notified ${result.notificationInfo.notified} students about new item availability`
+        );
       }
 
       res.status(201).json(result);
@@ -162,11 +255,17 @@ class InventoryController {
       // Get Socket.IO instance for real-time notifications
       const io = req.app.get("io");
 
-      const result = await InventoryService.updateInventoryItem(id, req.body, io);
+      const result = await InventoryService.updateInventoryItem(
+        id,
+        req.body,
+        io
+      );
 
       // Log notification info if any students were notified
       if (result.notificationInfo && result.notificationInfo.notified > 0) {
-        console.log(`✅ Notified ${result.notificationInfo.notified} students about restock`);
+        console.log(
+          `✅ Notified ${result.notificationInfo.notified} students about restock`
+        );
       }
 
       res.json(result);
@@ -231,7 +330,9 @@ class InventoryController {
 
       // Log notification info if any students were notified
       if (result.notificationInfo && result.notificationInfo.notified > 0) {
-        console.log(`✅ Notified ${result.notificationInfo.notified} students about restock`);
+        console.log(
+          `✅ Notified ${result.notificationInfo.notified} students about restock`
+        );
       }
 
       res.json(result);
@@ -290,4 +391,3 @@ class InventoryController {
 }
 
 module.exports = new InventoryController();
-

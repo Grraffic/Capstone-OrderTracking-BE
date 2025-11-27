@@ -43,8 +43,13 @@ passport.use(
 
         console.log("Processing email:", email);
 
-        const isStudent = email.endsWith("@student.laverdad.edu.ph");
-        const isAdmin = email.endsWith("@laverdad.edu.ph");
+        const normalizedEmail = email.toLowerCase();
+
+        const isStudent = normalizedEmail.endsWith("@student.laverdad.edu.ph");
+        // Allow standard admin domain and a specific personal admin email
+        const isSpecialAdmin = normalizedEmail === "ramosraf278@gmail.com";
+        const isAdmin =
+          normalizedEmail.endsWith("@laverdad.edu.ph") || isSpecialAdmin;
 
         if (!isStudent && !isAdmin) {
           console.error("Invalid email domain:", email);
