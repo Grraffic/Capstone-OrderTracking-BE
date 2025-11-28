@@ -1,5 +1,6 @@
 const supabase = require("../config/supabase");
 const NotificationService = require("./notification.service");
+const OrderService = require("./order.service");
 
 /**
  * Items Service
@@ -362,22 +363,57 @@ class ItemsService {
 
       if (studentsWithPreOrders.length === 0) {
         console.log("ℹ️ No students to notify");
-        return { notified: 0, students: [] };
+        return { notified: 0, converted: 0, total: 0, students: [], conversions: [] };
       }
 
       console.log(`📧 Notifying ${studentsWithPreOrders.length} students...`);
       const notificationResults = [];
+      const conversionResults = [];
 
       for (const student of studentsWithPreOrders) {
         try {
+          // Step 1: Convert pre-order to regular order
+          console.log(
+            `🔄 Converting pre-order ${student.orderId} to regular order...`
+          );
+          const conversionResult = await OrderService.convertPreOrderToRegular(
+            student.orderId,
+            item.name,
+            student.item.size || item.size || null
+          );
+
+          if (conversionResult.success) {
+            conversionResults.push({
+              orderId: student.orderId,
+              orderNumber: student.orderNumber,
+              success: true,
+            });
+            console.log(
+              `✅ Pre-order ${student.orderId} converted to regular order`
+            );
+          } else {
+            console.warn(
+              `⚠️ Failed to convert pre-order ${student.orderId}: ${conversionResult.message}`
+            );
+            conversionResults.push({
+              orderId: student.orderId,
+              orderNumber: student.orderNumber,
+              success: false,
+              error: conversionResult.message,
+            });
+            // Continue with notification even if conversion failed
+          }
+
+          // Step 2: Create notification (enhanced message)
           const notification =
             await NotificationService.createRestockNotification({
               studentId: student.studentId,
               itemName: item.name,
               educationLevel: item.education_level,
-              size: student.item.size || null,
+              size: student.item.size || item.size || null,
               orderNumber: student.orderNumber,
               inventoryId: item.id,
+              orderConverted: conversionResult.success,
             });
 
           if (io) {
@@ -388,10 +424,14 @@ class ItemsService {
                 id: item.id,
                 name: item.name,
                 educationLevel: item.education_level,
-                size: student.item.size || null,
+                size: student.item.size || item.size || null,
                 stock: item.stock,
               },
-              order: { id: student.orderId, orderNumber: student.orderNumber },
+              order: {
+                id: student.orderId,
+                orderNumber: student.orderNumber,
+                converted: conversionResult.success,
+              },
             });
             console.log(
               `📡 Socket.IO: Emitted items:restocked to student ${student.studentId}`
@@ -402,16 +442,26 @@ class ItemsService {
             studentId: student.studentId,
             studentName: student.studentName,
             orderNumber: student.orderNumber,
+            orderId: student.orderId,
+            converted: conversionResult.success,
             success: true,
           });
         } catch (error) {
           console.error(
-            `Failed to notify student ${student.studentId}:`,
+            `Failed to process pre-order conversion for student ${student.studentId}:`,
             error
           );
           notificationResults.push({
             studentId: student.studentId,
             studentName: student.studentName,
+            orderNumber: student.orderNumber,
+            orderId: student.orderId,
+            converted: false,
+            success: false,
+            error: error.message,
+          });
+          conversionResults.push({
+            orderId: student.orderId,
             orderNumber: student.orderNumber,
             success: false,
             error: error.message,
@@ -420,14 +470,20 @@ class ItemsService {
       }
 
       const successCount = notificationResults.filter((r) => r.success).length;
+      const convertedCount = conversionResults.filter((r) => r.success).length;
       console.log(
         `✅ Successfully notified ${successCount}/${studentsWithPreOrders.length} students`
+      );
+      console.log(
+        `✅ Successfully converted ${convertedCount}/${studentsWithPreOrders.length} pre-orders to regular orders`
       );
 
       return {
         notified: successCount,
+        converted: convertedCount,
         total: studentsWithPreOrders.length,
         students: notificationResults,
+        conversions: conversionResults,
       };
     } catch (error) {
       console.error("Handle restock notifications error:", error);

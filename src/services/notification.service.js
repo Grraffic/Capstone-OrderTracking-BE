@@ -90,16 +90,27 @@ class NotificationService {
         size,
         orderNumber,
         inventoryId,
+        orderConverted = true, // Default to true if not specified
       } = notificationData;
 
-      const message = size
-        ? `Good news! ${itemName} (${educationLevel}, Size: ${size}) is now available for your order #${orderNumber}`
-        : `Good news! ${itemName} (${educationLevel}) is now available for your order #${orderNumber}`;
+      // Enhanced message indicating order conversion and QR code availability
+      let message;
+      if (orderConverted) {
+        message = size
+          ? `Great news! ${itemName} (${educationLevel}, Size: ${size}) is now available. Your order #${orderNumber} has been moved to Orders and your QR code is ready for viewing!`
+          : `Great news! ${itemName} (${educationLevel}) is now available. Your order #${orderNumber} has been moved to Orders and your QR code is ready for viewing!`;
+      } else {
+        message = size
+          ? `Good news! ${itemName} (${educationLevel}, Size: ${size}) is now available for your order #${orderNumber}`
+          : `Good news! ${itemName} (${educationLevel}) is now available for your order #${orderNumber}`;
+      }
 
       const notification = {
         user_id: studentId,
         type: "restock",
-        title: "Item Back in Stock!",
+        title: orderConverted
+          ? "Item Available - Order Ready!"
+          : "Item Back in Stock!",
         message: message,
         data: {
           itemName,
@@ -107,6 +118,8 @@ class NotificationService {
           size,
           orderNumber,
           inventoryId,
+          orderConverted,
+          qrCodeAvailable: orderConverted, // QR code is available if order was converted
         },
         is_read: false,
         created_at: new Date().toISOString(),

@@ -1,4 +1,5 @@
 const supabase = require("../config/supabase");
+const { generateOrderReceiptQRData } = require("../utils/qrCodeGenerator");
 
 /**
  * Order Service
@@ -123,7 +124,7 @@ class OrderService {
    * @param {Object} orderData - Order data
    * @returns {Promise<Object>} - Created order
    */
-  async createOrder(orderData) {
+  async createOrder(orderData, io = null) {
     try {
       // Validate required fields
       const requiredFields = [
@@ -170,29 +171,49 @@ class OrderService {
         // Only reduce inventory for regular orders
         for (const item of items) {
           try {
-            // Find inventory item by name and education level
-            const { data: inventoryItems, error: searchError } = await supabase
+            // Find inventory item by name, education level, AND size
+            // This ensures we reduce stock from the correct size variant
+            const itemSize = item.size || "N/A";
+
+            let query = supabase
               .from("items")
               .select("*")
               .ilike("name", item.name)
               .eq("education_level", orderData.education_level)
-              .eq("is_active", true)
-              .limit(1);
+              .eq("is_active", true);
+
+            // Match by size - handle both "N/A" and actual sizes
+            if (itemSize === "N/A") {
+              // For N/A items, match either null or "N/A" string
+              query = query.or("size.is.null,size.eq.N/A");
+            } else {
+              // For specific sizes, match exactly
+              query = query.eq("size", itemSize);
+            }
+
+            const { data: inventoryItems, error: searchError } =
+              await query.limit(1);
 
             if (searchError) {
               console.error(
-                `Failed to find inventory for ${item.name}:`,
+                `Failed to find inventory for ${item.name} (Size: ${itemSize}):`,
                 searchError
               );
               continue;
             }
 
             if (!inventoryItems || inventoryItems.length === 0) {
-              console.error(`Inventory item not found: ${item.name}`);
+              console.error(
+                `Inventory item not found: ${item.name} (Size: ${itemSize}, Education Level: ${orderData.education_level})`
+              );
               continue;
             }
 
             const inventoryItem = inventoryItems[0];
+
+            console.log(
+              `Found inventory item: ${item.name} (Size: ${itemSize}, Current Stock: ${inventoryItem.stock})`
+            );
 
             // Calculate new stock (reduce by ordered quantity)
             const newStock = Math.max(0, inventoryItem.stock - item.quantity);
@@ -215,6 +236,7 @@ class OrderService {
 
             inventoryUpdates.push({
               item: item.name,
+              size: itemSize,
               quantity: item.quantity,
               previousStock: inventoryItem.stock,
               newStock: newStock,
@@ -222,7 +244,7 @@ class OrderService {
             });
 
             console.log(
-              `Inventory reduced: ${item.name} from ${inventoryItem.stock} to ${newStock} (ordered: ${item.quantity})`
+              `Inventory reduced: ${item.name} (Size: ${itemSize}) from ${inventoryItem.stock} to ${newStock} (ordered: ${item.quantity})`
             );
           } catch (itemError) {
             console.error(`Error processing item ${item.name}:`, itemError);
@@ -233,6 +255,7 @@ class OrderService {
               error: itemError.message,
             });
           }
+
         }
       } else {
         console.log("Pre-order detected - skipping inventory reduction");
@@ -390,6 +413,197 @@ class OrderService {
       throw error;
     }
   }
+
+  /**
+   * Convert a pre-order to a regular order when item becomes available
+   * @param {string} orderId - Order ID
+   * @param {string} itemName - Name of the item that was restocked
+   * @param {string} size - Size of the item (optional)
+   * @returns {Promise<Object>} - Updated order
+   */
+  async convertPreOrderToRegular(orderId, itemName, size = null) {
+    try {
+      console.log(
+        `🔄 Converting pre-order ${orderId} to regular order for ${itemName}${
+          size ? ` (Size: ${size})` : ""
+        }`
+      );
+
+      // Step 1: Get the pre-order
+      const { data: order, error: fetchError } = await supabase
+        .from("orders")
+        .select("*")
+        .eq("id", orderId)
+        .eq("is_active", true)
+        .single();
+
+      if (fetchError) throw fetchError;
+      if (!order) throw new Error("Order not found");
+
+      // Step 2: Verify it's a pre-order
+      if (order.order_type !== "pre-order") {
+        console.log(
+          `⚠️ Order ${orderId} is not a pre-order, skipping conversion`
+        );
+        return {
+          success: false,
+          message: "Order is not a pre-order",
+          data: order,
+        };
+      }
+
+      // Step 3: Check if the order contains the restocked item
+      const items = order.items || [];
+      const matchingItem = items.find((item) => {
+        const nameMatch = item.name === itemName;
+        const sizeMatch = size ? item.size === size : true;
+        return nameMatch && sizeMatch;
+      });
+
+      if (!matchingItem) {
+        console.log(
+          `⚠️ Order ${orderId} does not contain matching item ${itemName}${
+            size ? ` (Size: ${size})` : ""
+          }`
+        );
+        return {
+          success: false,
+          message: "Order does not contain the restocked item",
+          data: order,
+        };
+      }
+
+      // Step 4: Generate QR code data
+      const qrCodeData = generateOrderReceiptQRData({
+        orderNumber: order.order_number,
+        studentId: order.student_id,
+        studentName: order.student_name,
+        items: order.items,
+        educationLevel: order.education_level,
+        status: "pending",
+        created_at: order.created_at,
+      });
+
+      // Step 5: Update order to regular order
+      const updates = {
+        order_type: "regular",
+        qr_code_data: qrCodeData,
+        status: "pending", // Reset to pending for regular order processing
+        updated_at: new Date().toISOString(),
+      };
+
+      const { data: updatedOrder, error: updateError } = await supabase
+        .from("orders")
+        .update(updates)
+        .eq("id", orderId)
+        .select()
+        .single();
+
+      if (updateError) throw updateError;
+
+      // Step 6: Reduce inventory stock for the items (since it's now a regular order)
+      const inventoryUpdates = [];
+      for (const item of items) {
+        try {
+          // Find inventory item by name, education level, and size if specified
+          let query = supabase
+            .from("items")
+            .select("*")
+            .ilike("name", item.name)
+            .eq("education_level", order.education_level)
+            .eq("is_active", true);
+
+          // If size is specified, match by size
+          if (item.size && item.size !== "N/A") {
+            query = query.eq("size", item.size);
+          }
+
+          const { data: inventoryItems, error: searchError } =
+            await query.limit(1);
+
+          if (searchError) {
+            console.error(
+              `Failed to find inventory for ${item.name}:`,
+              searchError
+            );
+            continue;
+          }
+
+          if (!inventoryItems || inventoryItems.length === 0) {
+            console.error(
+              `Inventory item not found: ${item.name}${
+                item.size ? ` (Size: ${item.size})` : ""
+              }`
+            );
+            continue;
+          }
+
+          const inventoryItem = inventoryItems[0];
+
+          // Calculate new stock (reduce by ordered quantity)
+          const newStock = Math.max(0, inventoryItem.stock - item.quantity);
+
+          // Update inventory stock
+          const { data: updatedItem, error: updateItemError } = await supabase
+            .from("items")
+            .update({ stock: newStock })
+            .eq("id", inventoryItem.id)
+            .select()
+            .single();
+
+          if (updateItemError) {
+            console.error(
+              `Failed to update inventory for ${item.name}:`,
+              updateItemError
+            );
+            continue;
+          }
+
+          inventoryUpdates.push({
+            item: item.name,
+            size: item.size || "N/A",
+            quantity: item.quantity,
+            previousStock: inventoryItem.stock,
+            newStock: newStock,
+            success: true,
+          });
+
+          console.log(
+            `Inventory reduced: ${item.name}${
+              item.size ? ` (Size: ${item.size})` : ""
+            } from ${inventoryItem.stock} to ${newStock} (ordered: ${
+              item.quantity
+            })`
+          );
+        } catch (itemError) {
+          console.error(`Error processing item ${item.name}:`, itemError);
+          inventoryUpdates.push({
+            item: item.name,
+            quantity: item.quantity,
+            success: false,
+            error: itemError.message,
+          });
+        }
+      }
+
+      console.log(
+        `✅ Successfully converted pre-order ${orderId} to regular order`
+      );
+
+      return {
+        success: true,
+        data: updatedOrder,
+        inventoryUpdates,
+        message: "Pre-order converted to regular order successfully",
+      };
+    } catch (error) {
+      console.error("Convert pre-order to regular error:", error);
+      throw new Error(
+        `Failed to convert pre-order to regular order: ${error.message}`
+      );
+    }
+  }
 }
 
 module.exports = new OrderService();
+

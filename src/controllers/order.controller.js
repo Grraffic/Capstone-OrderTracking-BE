@@ -98,7 +98,40 @@ class OrderController {
    */
   async createOrder(req, res) {
     try {
-      const result = await OrderService.createOrder(req.body);
+      const io = req.app.get("io");
+      const result = await OrderService.createOrder(req.body, io);
+      
+      // Emit Socket.IO events for real-time updates
+      if (io && result.success) {
+        // Emit order created event
+        io.emit("order:created", {
+          orderId: result.data.id,
+          orderNumber: result.data.order_number,
+          orderType: result.data.order_type,
+          studentId: result.data.student_id,
+          items: result.data.items,
+        });
+        console.log(`📡 Socket.IO: Emitted order:created for order ${result.data.order_number}`);
+        
+        // Emit item:updated events for each item that had stock reduced
+        if (result.inventoryUpdates && Array.isArray(result.inventoryUpdates)) {
+          result.inventoryUpdates.forEach((update) => {
+            if (update.success && update.newStock !== undefined) {
+              io.emit("item:updated", {
+                itemName: update.item,
+                size: update.size,
+                previousStock: update.previousStock,
+                newStock: update.newStock,
+                reason: `Order ${result.data.order_number} placed`,
+              });
+              console.log(
+                `📡 Socket.IO: Emitted item:updated for ${update.item} (Size: ${update.size}) - Stock: ${update.previousStock} → ${update.newStock}`
+              );
+            }
+          });
+        }
+      }
+      
       res.status(201).json(result);
     } catch (error) {
       console.error("Create order error:", error);
