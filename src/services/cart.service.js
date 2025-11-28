@@ -37,7 +37,7 @@ class CartService {
 
       // Fetch inventory details for all items
       const { data: inventoryData, error: inventoryError } = await supabase
-        .from("inventory")
+        .from("items")
         .select(
           "id, name, education_level, category, item_type, description, image, stock, price"
         )

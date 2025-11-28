@@ -143,7 +143,7 @@ class OrderService {
 
       // Set default order_type if not provided (for backward compatibility)
       if (!orderData.order_type) {
-        orderData.order_type = 'regular';
+        orderData.order_type = "regular";
       }
 
       // Validate items array
@@ -164,7 +164,7 @@ class OrderService {
       // Pre-orders don't reduce inventory since items are already out of stock
       const inventoryUpdates = [];
       const items = orderData.items || [];
-      const isPreOrder = orderData.order_type === 'pre-order';
+      const isPreOrder = orderData.order_type === "pre-order";
 
       if (!isPreOrder) {
         // Only reduce inventory for regular orders
@@ -172,7 +172,7 @@ class OrderService {
           try {
             // Find inventory item by name and education level
             const { data: inventoryItems, error: searchError } = await supabase
-              .from("inventory")
+              .from("items")
               .select("*")
               .ilike("name", item.name)
               .eq("education_level", orderData.education_level)
@@ -199,7 +199,7 @@ class OrderService {
 
             // Update inventory stock
             const { data: updatedItem, error: updateError } = await supabase
-              .from("inventory")
+              .from("items")
               .update({ stock: newStock })
               .eq("id", inventoryItem.id)
               .select()
@@ -235,10 +235,10 @@ class OrderService {
           }
         }
       } else {
-        console.log('Pre-order detected - skipping inventory reduction');
+        console.log("Pre-order detected - skipping inventory reduction");
         inventoryUpdates.push({
-          message: 'Pre-order - inventory not reduced',
-          orderType: 'pre-order',
+          message: "Pre-order - inventory not reduced",
+          orderType: "pre-order",
         });
       }
 
