@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const contactController = require("../controllers/contact.controller");
 const authRoutes = require("./auth");
-const inventoryRoutes = require("./inventory");
+const itemsRoutes = require("./items");
 const orderRoutes = require("./orders");
 const cartRoutes = require("./cart");
 const notificationRoutes = require("./notification");
@@ -17,8 +17,8 @@ router.delete("/contact/:id", contactController.deleteContact);
 // Auth (Google OAuth)
 router.use("/auth", authRoutes);
 
-// Inventory routes (Admin only)
-router.use("/inventory", inventoryRoutes);
+// Items routes (Admin only)
+router.use("/items", itemsRoutes);
 
 // Order routes
 router.use("/orders", orderRoutes);
