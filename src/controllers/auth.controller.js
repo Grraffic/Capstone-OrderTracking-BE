@@ -1,5 +1,6 @@
 const jwt = require("jsonwebtoken");
 const supabase = require("../config/supabase");
+const { isSpecialAdmin } = require("../config/admin");
 require("dotenv").config();
 
 const JWT_SECRET = process.env.JWT_SECRET || "change-me";
@@ -32,10 +33,11 @@ exports.oauthCallback = async (req, res) => {
     const normalizedEmail = String(email).toLowerCase();
 
     const isStudent = normalizedEmail.endsWith("@student.laverdad.edu.ph");
-    // Allow standard admin domain and a specific personal admin email
-    const isSpecialAdmin = normalizedEmail === "ramosraf278@gmail.com";
+    // Allow standard admin domain and specific personal admin emails
+    // See backend/src/config/admin.js for configuration
+    const isSpecialAdminEmail = isSpecialAdmin(normalizedEmail);
     const isAdmin =
-      normalizedEmail.endsWith("@laverdad.edu.ph") || isSpecialAdmin;
+      normalizedEmail.endsWith("@laverdad.edu.ph") || isSpecialAdminEmail;
 
     if (!isStudent && !isAdmin) {
       // Redirect back to frontend with an error code so UI can show a friendly message

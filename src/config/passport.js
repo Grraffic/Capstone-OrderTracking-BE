@@ -2,6 +2,7 @@ const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 const supabase = require("./supabase");
 const { getProfilePictureUrl } = require("../utils/avatarGenerator");
+const { isSpecialAdmin } = require("./admin");
 
 require("dotenv").config();
 
@@ -47,10 +48,11 @@ passport.use(
         const normalizedEmail = email.toLowerCase();
 
         const isStudent = normalizedEmail.endsWith("@student.laverdad.edu.ph");
-        // Allow standard admin domain and a specific personal admin email
-        const isSpecialAdmin = normalizedEmail === "ramosraf278@gmail.com";
+        // Allow standard admin domain and specific personal admin emails
+        // See backend/src/config/admin.js for configuration
+        const isSpecialAdminEmail = isSpecialAdmin(normalizedEmail);
         const isAdmin =
-          normalizedEmail.endsWith("@laverdad.edu.ph") || isSpecialAdmin;
+          normalizedEmail.endsWith("@laverdad.edu.ph") || isSpecialAdminEmail;
 
         if (!isStudent && !isAdmin) {
           console.error("Invalid email domain:", email);
@@ -64,7 +66,7 @@ passport.use(
         // Log the profile structure to debug photo extraction
         console.log("Profile photos array:", profile.photos);
         console.log("Profile photos length:", profile.photos?.length);
-        
+
         const photoUrl = getProfilePictureUrl(profile, name);
         console.log("Extracted/Generated profile picture URL:", photoUrl);
 
@@ -84,9 +86,9 @@ passport.use(
         // First, try to upsert the user
         const { data: upsertData, error: upsertError } = await supabase
           .from("users")
-          .upsert(userRow, { 
+          .upsert(userRow, {
             onConflict: "email",
-            ignoreDuplicates: false // This ensures existing records are updated
+            ignoreDuplicates: false, // This ensures existing records are updated
           })
           .select()
           .single();
@@ -96,30 +98,45 @@ passport.use(
           return done(upsertError);
         }
 
-        // Explicitly update photo_url and avatar_url to ensure they're always set
+        // Explicitly update photo_url, avatar_url, and role to ensure they're always set
         // This handles cases where upsert might not update existing records properly
-        console.log("🔄 Explicitly updating photo_url and avatar_url for email:", email);
+        // Also updates role in case admin status changed (e.g., email added to admin config)
+        console.log(
+          "🔄 Explicitly updating photo_url, avatar_url, and role for email:",
+          email
+        );
         const { data: updateData, error: updateError } = await supabase
           .from("users")
           .update({
             photo_url: photoUrl,
             avatar_url: photoUrl,
             name: name, // Also update name in case it changed
+            role: role, // Update role in case admin status changed
             updated_at: new Date().toISOString(),
           })
           .eq("email", email)
-          .select("id, email, name, photo_url, avatar_url")
+          .select("id, email, name, role, photo_url, avatar_url")
           .single();
 
         if (updateError) {
           console.error("❌ Supabase update error:", updateError);
           // Don't fail the login if update fails, but log it
-          console.warn("Failed to update photo_url, but user was created/updated");
+          console.warn(
+            "Failed to update photo_url, but user was created/updated"
+          );
         } else if (updateData) {
-          console.log("✅ Update successful - photo_url:", updateData.photo_url);
-          console.log("✅ Update successful - avatar_url:", updateData.avatar_url);
+          console.log(
+            "✅ Update successful - photo_url:",
+            updateData.photo_url
+          );
+          console.log(
+            "✅ Update successful - avatar_url:",
+            updateData.avatar_url
+          );
         } else {
-          console.warn("⚠️ Update query returned no data (user might not exist yet)");
+          console.warn(
+            "⚠️ Update query returned no data (user might not exist yet)"
+          );
         }
 
         // Use the updated data if available, otherwise use upsert data
@@ -130,13 +147,23 @@ passport.use(
           return done(new Error("Failed to create/update user"));
         }
 
-        console.log("✅ Success - Final user data photo_url:", finalData.photo_url || finalData.avatar_url || "NOT SET");
-        console.log("✅ Final user data:", JSON.stringify({
-          email: finalData.email,
-          name: finalData.name,
-          photo_url: finalData.photo_url,
-          avatar_url: finalData.avatar_url
-        }, null, 2));
+        console.log(
+          "✅ Success - Final user data photo_url:",
+          finalData.photo_url || finalData.avatar_url || "NOT SET"
+        );
+        console.log(
+          "✅ Final user data:",
+          JSON.stringify(
+            {
+              email: finalData.email,
+              name: finalData.name,
+              photo_url: finalData.photo_url,
+              avatar_url: finalData.avatar_url,
+            },
+            null,
+            2
+          )
+        );
         return done(null, finalData);
       } catch (err) {
         console.error("Passport strategy error:", err);
