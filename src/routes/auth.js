@@ -54,6 +54,12 @@ router.get("/profile", verifyToken, async (req, res) => {
       educationLevel: data?.education_level || null,
     };
 
+    // Debug logging to verify photo URL is being returned
+    console.log("📸 Profile endpoint - Returning profile data:");
+    console.log("  - photo_url from DB:", data?.photo_url);
+    console.log("  - avatar_url from DB:", data?.avatar_url);
+    console.log("  - photoURL in response:", profile.photoURL);
+
     return res.json(profile);
   } catch (err) {
     console.error("Profile endpoint error:", err);
@@ -201,6 +207,81 @@ router.put("/profile", verifyToken, async (req, res) => {
     return res.json(profile);
   } catch (err) {
     console.error("Profile update endpoint error:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+// Refresh profile picture endpoint - updates profile picture for existing users
+router.post("/profile/refresh-picture", verifyToken, async (req, res) => {
+  try {
+    const supabase = require("../config/supabase");
+    const { getProfilePictureUrl } = require("../utils/avatarGenerator");
+    const tokenUser = req.user; // from JWT payload
+
+    // Get user's current data from database
+    const { data: userData, error: fetchError } = await supabase
+      .from("users")
+      .select("email, name, provider_id")
+      .eq("email", tokenUser.email)
+      .maybeSingle();
+
+    if (fetchError) {
+      console.error("Error fetching user data:", fetchError);
+      return res.status(500).json({
+        message: "Failed to fetch user data",
+        details: fetchError.message,
+      });
+    }
+
+    if (!userData) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Since we can't get the full Google profile here, we'll use the Google API
+    // to fetch the user's profile picture. However, we need the access token.
+    // For now, we'll check if there's a photo_url and if not, generate initials avatar.
+
+    // If user has a provider_id (Google ID), we can construct the photo URL
+    // Google profile pictures follow this pattern: https://lh3.googleusercontent.com/a/{provider_id}
+    // But the actual URL from Google OAuth is more complex, so we'll generate initials if missing
+
+    let photoUrl = userData.photo_url || userData.avatar_url;
+
+    // If no photo exists, generate initials-based avatar
+    if (!photoUrl) {
+      const { generateInitialsAvatar } = require("../utils/avatarGenerator");
+      photoUrl = generateInitialsAvatar(userData.name || userData.email);
+    }
+
+    // Update the user's photo_url and avatar_url
+    const { data: updatedUser, error: updateError } = await supabase
+      .from("users")
+      .update({
+        photo_url: photoUrl,
+        avatar_url: photoUrl,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("email", tokenUser.email)
+      .select("email, name, photo_url, avatar_url")
+      .single();
+
+    if (updateError) {
+      console.error("Error updating profile picture:", updateError);
+      return res.status(500).json({
+        message: "Failed to update profile picture",
+        details: updateError.message,
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Profile picture refreshed",
+      photoURL: updatedUser.photo_url || updatedUser.avatar_url,
+      photo_url: updatedUser.photo_url,
+      avatar_url: updatedUser.avatar_url,
+    });
+  } catch (err) {
+    console.error("Profile refresh error:", err);
     return res.status(500).json({ message: "Internal server error" });
   }
 });

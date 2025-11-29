@@ -152,6 +152,24 @@ class OrderService {
         throw new Error("Order must contain at least one item");
       }
 
+      // Generate QR code data if missing or null
+      if (!orderData.qr_code_data) {
+        console.log("QR code data missing, generating...");
+        const qrCodeData = generateOrderReceiptQRData({
+          orderNumber: orderData.order_number,
+          studentId: orderData.student_id,
+          studentName: orderData.student_name,
+          studentEmail: orderData.student_email,
+          items: orderData.items,
+          educationLevel: orderData.education_level,
+          totalAmount: orderData.total_amount,
+          orderDate: new Date().toISOString(),
+          status: orderData.status || "pending",
+        });
+        orderData.qr_code_data = qrCodeData;
+        console.log("QR code data generated successfully");
+      }
+
       // Step 1: Create the order
       const { data, error } = await supabase
         .from("orders")
@@ -255,7 +273,6 @@ class OrderService {
               error: itemError.message,
             });
           }
-
         }
       } else {
         console.log("Pre-order detected - skipping inventory reduction");
@@ -606,4 +623,3 @@ class OrderService {
 }
 
 module.exports = new OrderService();
-

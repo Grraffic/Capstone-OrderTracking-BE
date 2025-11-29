@@ -1,6 +1,7 @@
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 const supabase = require("./supabase");
+const { getProfilePictureUrl } = require("../utils/avatarGenerator");
 
 require("dotenv").config();
 
@@ -59,34 +60,84 @@ passport.use(
         const role = isAdmin ? "admin" : "student";
         console.log("Assigned role:", role);
 
+        // Extract profile picture from Google or generate initials-based avatar
+        // Log the profile structure to debug photo extraction
+        console.log("Profile photos array:", profile.photos);
+        console.log("Profile photos length:", profile.photos?.length);
+        
+        const photoUrl = getProfilePictureUrl(profile, name);
+        console.log("Extracted/Generated profile picture URL:", photoUrl);
+
         const userRow = {
           email,
           name,
           role,
           provider: "google",
           provider_id: profile.id,
+          photo_url: photoUrl,
+          avatar_url: photoUrl, // Keep both fields in sync for compatibility
+          updated_at: new Date().toISOString(), // Ensure updated_at is set
         };
 
         console.log("Upserting user:", userRow);
 
-        const { data, error } = await supabase
+        // First, try to upsert the user
+        const { data: upsertData, error: upsertError } = await supabase
           .from("users")
-          .upsert(userRow, { onConflict: ["email"] })
+          .upsert(userRow, { 
+            onConflict: "email",
+            ignoreDuplicates: false // This ensures existing records are updated
+          })
           .select()
           .single();
 
-        if (error) {
-          console.error("Supabase error:", error);
-          return done(error);
+        if (upsertError) {
+          console.error("Supabase upsert error:", upsertError);
+          return done(upsertError);
         }
 
-        if (!data) {
+        // Explicitly update photo_url and avatar_url to ensure they're always set
+        // This handles cases where upsert might not update existing records properly
+        console.log("🔄 Explicitly updating photo_url and avatar_url for email:", email);
+        const { data: updateData, error: updateError } = await supabase
+          .from("users")
+          .update({
+            photo_url: photoUrl,
+            avatar_url: photoUrl,
+            name: name, // Also update name in case it changed
+            updated_at: new Date().toISOString(),
+          })
+          .eq("email", email)
+          .select("id, email, name, photo_url, avatar_url")
+          .single();
+
+        if (updateError) {
+          console.error("❌ Supabase update error:", updateError);
+          // Don't fail the login if update fails, but log it
+          console.warn("Failed to update photo_url, but user was created/updated");
+        } else if (updateData) {
+          console.log("✅ Update successful - photo_url:", updateData.photo_url);
+          console.log("✅ Update successful - avatar_url:", updateData.avatar_url);
+        } else {
+          console.warn("⚠️ Update query returned no data (user might not exist yet)");
+        }
+
+        // Use the updated data if available, otherwise use upsert data
+        const finalData = updateData || upsertData;
+
+        if (!finalData) {
           console.error("No data returned from Supabase");
           return done(new Error("Failed to create/update user"));
         }
 
-        console.log("Success - returning user:", data);
-        return done(null, data);
+        console.log("✅ Success - Final user data photo_url:", finalData.photo_url || finalData.avatar_url || "NOT SET");
+        console.log("✅ Final user data:", JSON.stringify({
+          email: finalData.email,
+          name: finalData.name,
+          photo_url: finalData.photo_url,
+          avatar_url: finalData.avatar_url
+        }, null, 2));
+        return done(null, finalData);
       } catch (err) {
         console.error("Passport strategy error:", err);
         return done(err);
