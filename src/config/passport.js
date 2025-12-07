@@ -79,6 +79,10 @@ passport.use(
           photo_url: photoUrl,
           avatar_url: photoUrl, // Keep both fields in sync for compatibility
           updated_at: new Date().toISOString(), // Ensure updated_at is set
+          // Ensure student fields are NULL for admins
+          course_year_level: isAdmin ? null : undefined,
+          student_number: isAdmin ? null : undefined,
+          education_level: isAdmin ? null : undefined,
         };
 
         console.log("Upserting user:", userRow);
@@ -101,19 +105,29 @@ passport.use(
         // Explicitly update photo_url, avatar_url, and role to ensure they're always set
         // This handles cases where upsert might not update existing records properly
         // Also updates role in case admin status changed (e.g., email added to admin config)
+        // For admins, ensure student fields are NULL
         console.log(
           "🔄 Explicitly updating photo_url, avatar_url, and role for email:",
           email
         );
+        const updatePayload = {
+          photo_url: photoUrl,
+          avatar_url: photoUrl,
+          name: name, // Also update name in case it changed
+          role: role, // Update role in case admin status changed
+          updated_at: new Date().toISOString(),
+        };
+
+        // Ensure student fields are NULL for admins
+        if (isAdmin) {
+          updatePayload.course_year_level = null;
+          updatePayload.student_number = null;
+          updatePayload.education_level = null;
+        }
+
         const { data: updateData, error: updateError } = await supabase
           .from("users")
-          .update({
-            photo_url: photoUrl,
-            avatar_url: photoUrl,
-            name: name, // Also update name in case it changed
-            role: role, // Update role in case admin status changed
-            updated_at: new Date().toISOString(),
-          })
+          .update(updatePayload)
           .eq("email", email)
           .select("id, email, name, role, photo_url, avatar_url")
           .single();
@@ -147,6 +161,33 @@ passport.use(
           return done(new Error("Failed to create/update user"));
         }
 
+        // Ensure user_roles entry exists for this user
+        console.log(
+          "🔄 Ensuring user_roles entry exists for user:",
+          finalData.id
+        );
+        const { data: roleData, error: roleError } = await supabase
+          .from("user_roles")
+          .upsert(
+            {
+              user_id: finalData.id,
+              role: role,
+            },
+            {
+              onConflict: "user_id,role",
+              ignoreDuplicates: false,
+            }
+          )
+          .select()
+          .single();
+
+        if (roleError) {
+          console.warn("⚠️ Failed to create/update user_roles:", roleError);
+          // Don't fail login if role creation fails, but log it
+        } else {
+          console.log("✅ User role created/updated successfully:", roleData);
+        }
+
         console.log(
           "✅ Success - Final user data photo_url:",
           finalData.photo_url || finalData.avatar_url || "NOT SET"
@@ -159,6 +200,7 @@ passport.use(
               name: finalData.name,
               photo_url: finalData.photo_url,
               avatar_url: finalData.avatar_url,
+              role: finalData.role,
             },
             null,
             2

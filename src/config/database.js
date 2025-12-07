@@ -9,13 +9,15 @@ if (!connectionString) {
 
 // Parse connection string to add better error handling
 console.log("🔍 Database connection configuration:");
-console.log("  - Using connection pooler (port 6543)");
+console.log("  - Using Supabase pgbouncer pooler (port 6543)");
+console.log("  - Prepared statements: DISABLED (pgbouncer compatibility)");
 console.log("  - SSL mode: no-verify");
 
 const sql = postgres(connectionString, {
   ssl: {
     rejectUnauthorized: false, // Accept self-signed certificates
   },
+  prepare: false, // CRITICAL: Disable prepared statements for pgbouncer compatibility
   max: 1, // Reduced to 1 connection for development (Supabase free tier limit)
   idle_timeout: 20, // Reduced idle timeout
   connect_timeout: 30, // Increased from 10 to 30 seconds

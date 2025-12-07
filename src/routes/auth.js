@@ -43,15 +43,19 @@ router.get("/profile", verifyToken, async (req, res) => {
       ).trim();
     }
 
+    const userRole = data?.role || tokenUser.role;
+    const isAdmin = userRole === "admin";
+
     const profile = {
       id: tokenUser.id,
       email: emailString,
-      role: tokenUser.role,
+      role: userRole,
       name: data?.name || null,
       photoURL: data?.photo_url || data?.avatar_url || null,
-      courseYearLevel: data?.course_year_level || null,
-      studentNumber: data?.student_number || null,
-      educationLevel: data?.education_level || null,
+      // Only include student fields for students, set to null for admins
+      courseYearLevel: isAdmin ? null : (data?.course_year_level || null),
+      studentNumber: isAdmin ? null : (data?.student_number || null),
+      educationLevel: isAdmin ? null : (data?.education_level || null),
     };
 
     // Debug logging to verify photo URL is being returned
@@ -59,6 +63,7 @@ router.get("/profile", verifyToken, async (req, res) => {
     console.log("  - photo_url from DB:", data?.photo_url);
     console.log("  - avatar_url from DB:", data?.avatar_url);
     console.log("  - photoURL in response:", profile.photoURL);
+    console.log("  - user role:", userRole, "isAdmin:", isAdmin);
 
     return res.json(profile);
   } catch (err) {
@@ -141,6 +146,16 @@ router.put("/profile", verifyToken, async (req, res) => {
     const { name, photoURL, courseYearLevel, studentNumber, educationLevel } =
       req.body;
 
+    // Get user's current role to determine if they're an admin
+    const { data: currentUser } = await supabase
+      .from("users")
+      .select("role")
+      .eq("email", tokenUser.email)
+      .maybeSingle();
+
+    const userRole = currentUser?.role || tokenUser.role;
+    const isAdmin = userRole === "admin";
+
     // Prepare update data
     const updateData = {
       updated_at: new Date().toISOString(),
@@ -157,17 +172,25 @@ router.put("/profile", verifyToken, async (req, res) => {
       updateData.avatar_url = photoURL; // Keep both fields in sync
     }
 
-    // Add student-specific fields if provided
-    if (courseYearLevel !== undefined) {
-      updateData.course_year_level = courseYearLevel;
-    }
+    // Only add student-specific fields if user is a student
+    // Admins should never have these fields set
+    if (!isAdmin) {
+      if (courseYearLevel !== undefined) {
+        updateData.course_year_level = courseYearLevel;
+      }
 
-    if (studentNumber !== undefined) {
-      updateData.student_number = studentNumber;
-    }
+      if (studentNumber !== undefined) {
+        updateData.student_number = studentNumber;
+      }
 
-    if (educationLevel !== undefined) {
-      updateData.education_level = educationLevel;
+      if (educationLevel !== undefined) {
+        updateData.education_level = educationLevel;
+      }
+    } else {
+      // For admins, explicitly set these fields to NULL to ensure they're not set
+      updateData.course_year_level = null;
+      updateData.student_number = null;
+      updateData.education_level = null;
     }
 
     // Update user in database
@@ -193,15 +216,16 @@ router.put("/profile", verifyToken, async (req, res) => {
     }
 
     // Return updated profile
+    // For admins, always return null for student fields
     const profile = {
       id: tokenUser.id,
       email: data.email,
       role: data.role,
       name: data.name,
       photoURL: data.photo_url || data.avatar_url,
-      courseYearLevel: data.course_year_level,
-      studentNumber: data.student_number,
-      educationLevel: data.education_level,
+      courseYearLevel: isAdmin ? null : (data.course_year_level || null),
+      studentNumber: isAdmin ? null : (data.student_number || null),
+      educationLevel: isAdmin ? null : (data.education_level || null),
     };
 
     return res.json(profile);
