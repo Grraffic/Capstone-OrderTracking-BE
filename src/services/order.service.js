@@ -26,6 +26,10 @@ class OrderService {
         query = query.eq("status", filters.status);
       }
 
+      if (filters.order_type) {
+        query = query.eq("order_type", filters.order_type);
+      }
+
       if (filters.education_level) {
         query = query.eq("education_level", filters.education_level);
       }
@@ -49,9 +53,54 @@ class OrderService {
 
       if (error) throw error;
 
+      // Enhance orders with student profile data
+      let enhancedData = data;
+      if (data && data.length > 0) {
+        // Extract unique student IDs
+        const studentIds = [...new Set(data.filter(o => o.student_id).map(o => o.student_id))];
+        
+        if (studentIds.length > 0) {
+          // Fetch user profiles
+          const { data: users, error: usersError } = await supabase
+            .from("users")
+            .select("id, photo_url, avatar_url, name, email")
+            .in("id", studentIds); // Use id (uuid) not email/string if student_id is user.id
+
+          // Note: If student_id is NOT the user table uuid, this might fail. 
+          // Based on createOrder, student_id seems to be passed from auth context, likely user.id.
+          
+          if (!usersError && users) {
+             const userMap = {};
+             users.forEach(u => userMap[u.id] = u);
+             
+             enhancedData = data.map(order => ({
+               ...order,
+               student_data: userMap[order.student_id] || null
+             }));
+          } else {
+             // Try matching by email if ID match fails or returns empty (fallback)
+              const studentEmails = [...new Set(data.map(o => o.student_email))];
+              const { data: usersByEmail, error: emailError } = await supabase
+                .from("users")
+                .select("id, email, photo_url, avatar_url, name")
+                .in("email", studentEmails);
+                
+              if (!emailError && usersByEmail) {
+                 const emailMap = {};
+                 usersByEmail.forEach(u => emailMap[u.email] = u);
+                 
+                 enhancedData = data.map(order => ({
+                   ...order,
+                   student_data: emailMap[order.student_email] || null
+                 }));
+              }
+          }
+        }
+      }
+
       return {
         success: true,
-        data,
+        data: enhancedData,
         pagination: {
           page,
           limit,
@@ -82,9 +131,35 @@ class OrderService {
       if (error) throw error;
       if (!data) throw new Error("Order not found");
 
+      // Attach student data
+      let enhancedOrder = data;
+      if (data.student_id) {
+        // Try precise match by ID first
+        const { data: user, error: userError } = await supabase
+          .from("users")
+          .select("id, photo_url, avatar_url, name, email")
+          .eq("id", data.student_id)
+          .maybeSingle();
+          
+        if (user) {
+          enhancedOrder = { ...data, student_data: user };
+        } else {
+           // Fallback to email match
+           const { data: userByEmail } = await supabase
+            .from("users")
+            .select("id, photo_url, avatar_url, name, email")
+            .eq("email", data.student_email)
+            .maybeSingle();
+            
+           if (userByEmail) {
+             enhancedOrder = { ...data, student_data: userByEmail };
+           }
+        }
+      }
+
       return {
         success: true,
-        data,
+        data: enhancedOrder,
       };
     } catch (error) {
       console.error("Get order by ID error:", error);
@@ -109,9 +184,35 @@ class OrderService {
       if (error) throw error;
       if (!data) throw new Error("Order not found");
 
+      // Attach student data
+      let enhancedOrder = data;
+      if (data.student_id) {
+        // Try precise match by ID first
+        const { data: user, error: userError } = await supabase
+          .from("users")
+          .select("id, photo_url, avatar_url, name, email")
+          .eq("id", data.student_id)
+          .maybeSingle();
+          
+        if (user) {
+          enhancedOrder = { ...data, student_data: user };
+        } else {
+           // Fallback to email match
+           const { data: userByEmail } = await supabase
+            .from("users")
+            .select("id, photo_url, avatar_url, name, email")
+            .eq("email", data.student_email)
+            .maybeSingle();
+            
+           if (userByEmail) {
+             enhancedOrder = { ...data, student_data: userByEmail };
+           }
+        }
+      }
+
       return {
         success: true,
-        data,
+        data: enhancedOrder,
       };
     } catch (error) {
       console.error("Get order by number error:", error);
