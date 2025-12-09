@@ -64,10 +64,7 @@ class OrderService {
           const { data: users, error: usersError } = await supabase
             .from("users")
             .select("id, photo_url, avatar_url, name, email")
-            .in("id", studentIds); // Use id (uuid) not email/string if student_id is user.id
-
-          // Note: If student_id is NOT the user table uuid, this might fail. 
-          // Based on createOrder, student_id seems to be passed from auth context, likely user.id.
+            .in("id", studentIds);
           
           if (!usersError && users) {
              const userMap = {};
@@ -301,70 +298,146 @@ class OrderService {
               .eq("education_level", orderData.education_level)
               .eq("is_active", true);
 
-            // Match by size - handle both "N/A" and actual sizes
-            if (itemSize === "N/A") {
-              // For N/A items, match either null or "N/A" string
-              query = query.or("size.is.null,size.eq.N/A");
-            } else {
-              // For specific sizes, match exactly
-              query = query.eq("size", itemSize);
-            }
-
-            const { data: inventoryItems, error: searchError } =
-              await query.limit(1);
+            // Fetch generic item first (without size filter) to check for JSON variants
+            const { data: potentialItems, error: searchError } = await query;
 
             if (searchError) {
               console.error(
-                `Failed to find inventory for ${item.name} (Size: ${itemSize}):`,
+                `Failed to find inventory for ${item.name}:`,
                 searchError
               );
               continue;
             }
 
-            if (!inventoryItems || inventoryItems.length === 0) {
+            let inventoryItem = null;
+            let isJsonVariant = false;
+            let variantIndex = -1;
+
+            // Check if any of the potential items match the size via JSON variants or direct column
+            for (const pItem of potentialItems || []) {
+              // Check 1: Is it a JSON variant item?
+              if (pItem.note) {
+                try {
+                  const parsedNote = JSON.parse(pItem.note);
+                  if (parsedNote && parsedNote._type === 'sizeVariations' && Array.isArray(parsedNote.sizeVariations)) {
+                     // Find matching variant
+                     const vIndex = parsedNote.sizeVariations.findIndex(v => {
+                       // Flexible matching: check perfect match or abbreviation match
+                        const vSize = v.size || "";
+                        if (vSize === itemSize) return true;
+                        return vSize.includes(itemSize) || itemSize.includes(vSize);
+                     });
+                     
+                     if (vIndex !== -1) {
+                       inventoryItem = pItem;
+                       isJsonVariant = true;
+                       variantIndex = vIndex;
+                       break; // Found it
+                     }
+                  }
+                } catch (e) {
+                  // Not JSON
+                }
+              }
+              
+              // Check 2: Direct size match (legacy/standard row)
+              if (!isJsonVariant) {
+                 const dbSize = pItem.size || "N/A";
+                 if (dbSize === itemSize || (itemSize === "N/A" && (!pItem.size || pItem.size === "N/A"))) {
+                   inventoryItem = pItem;
+                   break;
+                 }
+              }
+            }
+
+            if (!inventoryItem) {
               console.error(
                 `Inventory item not found: ${item.name} (Size: ${itemSize}, Education Level: ${orderData.education_level})`
               );
               continue;
             }
 
-            const inventoryItem = inventoryItems[0];
-
             console.log(
-              `Found inventory item: ${item.name} (Size: ${itemSize}, Current Stock: ${inventoryItem.stock})`
+              `Found inventory item: ${item.name} (Size: ${itemSize}, Stock: ${inventoryItem.stock}, JSON: ${isJsonVariant})`
             );
 
-            // Calculate new stock (reduce by ordered quantity)
-            const newStock = Math.max(0, inventoryItem.stock - item.quantity);
+            let newStock = 0; // Total new stock for the row
+            let previousStock = 0; // Previous stock for the specific variant
+            
+            if (isJsonVariant) {
+               // Handle JSON Variant Update
+               const parsedNote = JSON.parse(inventoryItem.note);
+               const variant = parsedNote.sizeVariations[variantIndex];
+               previousStock = Number(variant.stock) || 0;
+               
+               // Deduct from variant
+               const newVariantStock = Math.max(0, previousStock - item.quantity);
+               parsedNote.sizeVariations[variantIndex].stock = newVariantStock;
+               
+               // Recalculate total stock for the row
+               newStock = parsedNote.sizeVariations.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+               
+               // Update DB
+               const { data: updatedItem, error: updateError } = await supabase
+                .from("items")
+                .update({ 
+                  stock: newStock,
+                  note: JSON.stringify(parsedNote)
+                })
+                .eq("id", inventoryItem.id)
+                .select()
+                .single();
+                
+               if (updateError) {
+                  throw updateError;
+               }
+               
+               console.log(`Updated JSON variant inventory for ${item.name} size ${variant.size}: ${previousStock} -> ${newVariantStock}. Total row stock: ${newStock}`);
+               
+               inventoryUpdates.push({
+                item: item.name,
+                size: variant.size,
+                quantity: item.quantity,
+                previousStock: previousStock,
+                newStock: newVariantStock,
+                success: true,
+              });
 
-            // Update inventory stock
-            const { data: updatedItem, error: updateError } = await supabase
-              .from("items")
-              .update({ stock: newStock })
-              .eq("id", inventoryItem.id)
-              .select()
-              .single();
+            } else {
+              // Handle Standard Row Update
+               previousStock = inventoryItem.stock;
+               newStock = Math.max(0, inventoryItem.stock - item.quantity);
 
-            if (updateError) {
-              console.error(
-                `Failed to update inventory for ${item.name}:`,
-                updateError
+              // Update inventory stock
+              const { data: updatedItem, error: updateError } = await supabase
+                .from("items")
+                .update({ stock: newStock })
+                .eq("id", inventoryItem.id)
+                .select()
+                .single();
+
+              if (updateError) {
+                console.error(
+                  `Failed to update inventory for ${item.name}:`,
+                  updateError
+                );
+                continue;
+              }
+
+              inventoryUpdates.push({
+                item: item.name,
+                size: itemSize,
+                quantity: item.quantity,
+                previousStock: previousStock,
+                newStock: newStock,
+                success: true,
+              });
+
+              console.log(
+                `Inventory reduced: ${item.name} (Size: ${itemSize}) from ${previousStock} to ${newStock} (ordered: ${item.quantity})`
               );
-              continue;
             }
 
-            inventoryUpdates.push({
-              item: item.name,
-              size: itemSize,
-              quantity: item.quantity,
-              previousStock: inventoryItem.stock,
-              newStock: newStock,
-              success: true,
-            });
-
-            console.log(
-              `Inventory reduced: ${item.name} (Size: ${itemSize}) from ${inventoryItem.stock} to ${newStock} (ordered: ${item.quantity})`
-            );
           } catch (itemError) {
             console.error(`Error processing item ${item.name}:`, itemError);
             inventoryUpdates.push({

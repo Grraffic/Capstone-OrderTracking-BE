@@ -302,11 +302,15 @@ class ItemsService {
   /**
    * Get available sizes for a product by name and education level
    */
+  /**
+   * Get available sizes for a product by name and education level
+   */
   async getAvailableSizes(name, educationLevel) {
     try {
+      // Select note field as well to check for JSON variations
       const { data, error } = await supabase
         .from("items")
-        .select("size, stock, status, id")
+        .select("size, stock, status, id, note, price")
         .eq("name", name)
         .eq("education_level", educationLevel)
         .eq("is_active", true)
@@ -315,22 +319,84 @@ class ItemsService {
       if (error) throw error;
 
       const sizeMap = new Map();
+      
       (data || []).forEach((item) => {
-        if (item.size === "N/A") return;
-        if (sizeMap.has(item.size)) {
-          const existing = sizeMap.get(item.size);
-          existing.stock += item.stock;
-          if (existing.stock === 0) existing.status = "Out of Stock";
-          else if (existing.stock <= 10) existing.status = "Critical";
-          else if (existing.stock <= 20) existing.status = "At Reorder Point";
-          else existing.status = "Above Threshold";
-        } else {
-          sizeMap.set(item.size, {
-            size: item.size,
-            stock: item.stock,
-            status: item.status,
-            id: item.id,
-          });
+        // Check if item has JSON variations in note field
+        let hasJsonVariations = false;
+        if (item.note) {
+          try {
+            const parsedNote = JSON.parse(item.note);
+            if (parsedNote && parsedNote._type === 'sizeVariations' && Array.isArray(parsedNote.sizeVariations)) {
+              hasJsonVariations = true;
+              
+              // Process each variation from the JSON
+              parsedNote.sizeVariations.forEach(variant => {
+                let variantSize = variant.size;
+                
+                // Normalization: 
+                // Admin saves sizes as "Small (S)", "Medium (M)" etc.
+                // Frontend expects "Small", "Medium" to map to "S", "M".
+                // We strip the abbreviation in parens if present.
+                if (variantSize && typeof variantSize === 'string') {
+                  const match = variantSize.match(/^(.+?)\s*\((.+?)\)$/);
+                  if (match) {
+                     variantSize = match[1].trim(); 
+                  }
+                }
+                const variantStock = Number(variant.stock) || 0;
+                
+                // Determine status based on variant stock
+                let variantStatus = "Above Threshold";
+                if (variantStock === 0) variantStatus = "Out of Stock";
+                else if (variantStock <= 10) variantStatus = "Critical";
+                else if (variantStock <= 20) variantStatus = "At Reorder Point";
+                
+                if (sizeMap.has(variantSize)) {
+                  const existing = sizeMap.get(variantSize);
+                  existing.stock += variantStock;
+                  // Update status based on new combined stock
+                  if (existing.stock === 0) existing.status = "Out of Stock";
+                  else if (existing.stock <= 10) existing.status = "Critical";
+                  else if (existing.stock <= 20) existing.status = "At Reorder Point";
+                  else existing.status = "Above Threshold";
+                } else {
+                  sizeMap.set(variantSize, {
+                    size: variantSize,
+                    stock: variantStock,
+                    status: variantStatus,
+                    id: item.id, // Use parent item ID
+                    price: Number(variant.price) || Number(item.price) || 0,
+                    isJsonVariant: true // Flag to indicate this is from JSON
+                  });
+                }
+              });
+            }
+          } catch (e) {
+            // Ignore parse errors, treat as normal item
+            console.warn("Failed to parse item note as JSON:", e);
+          }
+        }
+        
+        // If not processed as JSON variations, process as standard item row
+        if (!hasJsonVariations) {
+          if (item.size === "N/A") return;
+          
+          if (sizeMap.has(item.size)) {
+            const existing = sizeMap.get(item.size);
+            existing.stock += item.stock;
+            if (existing.stock === 0) existing.status = "Out of Stock";
+            else if (existing.stock <= 10) existing.status = "Critical";
+            else if (existing.stock <= 20) existing.status = "At Reorder Point";
+            else existing.status = "Above Threshold";
+          } else {
+            sizeMap.set(item.size, {
+              size: item.size,
+              stock: item.stock,
+              status: item.status,
+              id: item.id,
+              price: item.price
+            });
+          }
         }
       });
 
@@ -339,6 +405,24 @@ class ItemsService {
         available: item.stock > 0,
         isPreOrder: item.stock === 0,
       }));
+      
+      // Sort sizes logically (S, M, L, etc.)
+      const sizeOrder = { 'XS': 1, 'S': 2, 'M': 3, 'L': 4, 'XL': 5, 'XXL': 6, '3XL': 7 };
+      sizes.sort((a, b) => {
+        // Extract abbreviation if present (e.g. "Small (S)" -> "S")
+        const getAbbr = (s) => {
+          const match = s.match(/\(([^)]+)\)/);
+          return match ? match[1] : s;
+        };
+        
+        const abbrA = getAbbr(a.size);
+        const abbrB = getAbbr(b.size);
+        
+        const orderA = sizeOrder[abbrA] || 99;
+        const orderB = sizeOrder[abbrB] || 99;
+        
+        return orderA - orderB;
+      });
 
       return { success: true, data: sizes };
     } catch (error) {

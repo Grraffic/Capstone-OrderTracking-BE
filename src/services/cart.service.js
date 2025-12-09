@@ -39,7 +39,7 @@ class CartService {
       const { data: inventoryData, error: inventoryError } = await supabase
         .from("items")
         .select(
-          "id, name, education_level, category, item_type, description, image, stock, price"
+          "id, name, education_level, category, item_type, description, image, stock, price, note"
         )
         .in("id", inventoryIds);
 
@@ -53,17 +53,51 @@ class CartService {
         inventoryMap[inv.id] = inv;
       });
 
-      // Transform data to include inventory details
-      const transformedData = cartItems.map((item) => ({
-        id: item.id,
-        userId: item.user_id,
-        inventoryId: item.inventory_id,
-        size: item.size,
-        quantity: item.quantity,
-        createdAt: item.created_at,
-        updatedAt: item.updated_at,
-        inventory: inventoryMap[item.inventory_id] || null,
-      }));
+      // Transform data to include inventory details with correct price for size
+      const transformedData = cartItems.map((item) => {
+        const inventoryItem = inventoryMap[item.inventory_id];
+        let finalPrice = inventoryItem ? inventoryItem.price : 0;
+        let stock = inventoryItem ? inventoryItem.stock : 0;
+        
+        // Check for variant price in note field
+        if (inventoryItem && inventoryItem.note && item.size && item.size !== "N/A") {
+          try {
+             const parsedNote = JSON.parse(inventoryItem.note);
+             if (parsedNote && parsedNote._type === 'sizeVariations' && Array.isArray(parsedNote.sizeVariations)) {
+                // Find matching variant
+                const variant = parsedNote.sizeVariations.find(v => {
+                   const vSize = v.size || "";
+                   return vSize === item.size || vSize.includes(item.size) || item.size.includes(vSize);
+                });
+                
+                if (variant) {
+                   finalPrice = Number(variant.price) || finalPrice;
+                   stock = Number(variant.stock) || 0; // Variant stock
+                }
+             }
+          } catch (e) {
+             // Ignore parse or lookup errors
+          }
+        }
+        
+        // Override inventory fields with variant specific data if found
+        const enhancedInventory = inventoryItem ? {
+           ...inventoryItem,
+           price: finalPrice,
+           stock: stock // Show variant stock instead of total status
+        } : null;
+
+        return {
+          id: item.id,
+          userId: item.user_id,
+          inventoryId: item.inventory_id,
+          size: item.size,
+          quantity: item.quantity,
+          createdAt: item.created_at,
+          updatedAt: item.updated_at,
+          inventory: enhancedInventory,
+        };
+      });
 
       return {
         success: true,
