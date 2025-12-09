@@ -174,16 +174,66 @@ class ItemsService {
       if (!data) throw new Error("Item not found");
 
       let notificationInfo = null;
-      if (isRestocked) {
-        console.log(
-          `📦 Item restocked: ${data.name} (${data.education_level})`
-        );
-        notificationInfo = await this.handleRestockNotifications(data, io);
+
+      // Re-fetch fresh data to get updated stock/note for checks
+      const { data: updatedItemData, error: refetchError } = await supabase
+        .from("items")
+        .select("*")
+        .eq("id", id)
+        .single();
+        
+      if (!refetchError && updatedItemData) {
+         // Determine if effectively restocked (including JSON variants)
+         let effectivelyRestocked = false;
+         
+         // Check standard stock
+         if (wasOutOfStock && updatedItemData.stock > 0) {
+            effectivelyRestocked = true;
+         }
+         
+         // OR Check JSON variants if available
+         if (updatedItemData.note) {
+             try {
+                const parsed = JSON.parse(updatedItemData.note);
+                if (parsed?._type === 'sizeVariations' && Array.isArray(parsed.sizeVariations)) {
+                   // Find all variants that have stock > 0
+                   // This allows us to notify specifically for the sizes that are now available
+                   const availableVariants = parsed.sizeVariations.filter(v => (Number(v.stock) || 0) > 0);
+                   
+                   if (availableVariants.length > 0) {
+                      effectivelyRestocked = true;
+                      
+                      // Notify for EACH available size variant
+                      // This ensures that if "Large" is restocked, we notify for "Large" specifically
+                      for (const variant of availableVariants) {
+                          const variantItem = {
+                              ...updatedItemData,
+                              size: variant.size // Override size with variant size
+                          };
+                          console.log(`📦 JSON Variant restocked: ${updatedItemData.name} (${updatedItemData.education_level}) - Size: ${variant.size}`);
+                          // We don't await here to avoid blocking response, but in this context waiting is safer to ensure it runs
+                          await this.handleRestockNotifications(variantItem, io);
+                      }
+                      
+                      // Prevent the generic notification below since we handled it here
+                      isRestocked = false; 
+                      effectivelyRestocked = false; // Set to false to skip the generic block below
+                   }
+                }
+             } catch(e) {
+                console.warn("Failed to parse/process item note for notifications:", e);
+             }
+         }
+         
+         if (effectivelyRestocked || isRestocked) {
+            console.log(`📦 Item restocked (Generic/Standard): ${updatedItemData.name} (${updatedItemData.education_level})`);
+            notificationInfo = await this.handleRestockNotifications(updatedItemData, io);
+         }
       }
 
       return {
         success: true,
-        data,
+        data: updatedItemData || data,
         message: "Item updated successfully",
         notificationInfo,
       };
@@ -407,19 +457,42 @@ class ItemsService {
       }));
       
       // Sort sizes logically (S, M, L, etc.)
-      const sizeOrder = { 'XS': 1, 'S': 2, 'M': 3, 'L': 4, 'XL': 5, 'XXL': 6, '3XL': 7 };
+      const sizeOrder = { 
+        'XS': 1, 'XSMALL': 1, 'EXTRA SMALL': 1,
+        'S': 2, 'SMALL': 2,
+        'M': 3, 'MEDIUM': 3,
+        'L': 4, 'LARGE': 4,
+        'XL': 5, 'XLARGE': 5, 'EXTRA LARGE': 5,
+        'XXL': 6, '2XL': 6, '2XLARGE': 6, 'XXLARGE': 6,
+        '3XL': 7, '3XLARGE': 7
+      };
+      
       sizes.sort((a, b) => {
         // Extract abbreviation if present (e.g. "Small (S)" -> "S")
-        const getAbbr = (s) => {
-          const match = s.match(/\(([^)]+)\)/);
-          return match ? match[1] : s;
+        const getCleanSize = (s) => {
+          if (!s) return '';
+          const str = String(s).toUpperCase();
+          // Try to extract content in parens
+          const match = str.match(/\(([^)]+)\)/);
+          if (match) return match[1].trim();
+          return str.trim();
         };
         
-        const abbrA = getAbbr(a.size);
-        const abbrB = getAbbr(b.size);
+        const cleanA = getCleanSize(a.size);
+        const cleanB = getCleanSize(b.size);
         
-        const orderA = sizeOrder[abbrA] || 99;
-        const orderB = sizeOrder[abbrB] || 99;
+        // Try direct lookup or fallback to default high number
+        // Check for "XSMALL", "XS", etc.
+        let orderA = sizeOrder[cleanA] || 99;
+        let orderB = sizeOrder[cleanB] || 99;
+        
+        // If 99, try to see if it starts with known keys
+        if (orderA === 99) {
+           for (const k in sizeOrder) { if (cleanA.includes(k)) { orderA = sizeOrder[k]; break; } }
+        }
+        if (orderB === 99) {
+           for (const k in sizeOrder) { if (cleanB.includes(k)) { orderB = sizeOrder[k]; break; } }
+        }
         
         return orderA - orderB;
       });
@@ -438,11 +511,32 @@ class ItemsService {
     try {
       console.log(`🔔 Checking for pre-orders to notify for: ${item.name}`);
 
+      // Normalize size for matching
+      let sizeToMatch = item.size;
+      if (item.size) {
+        const lower = item.size.toLowerCase();
+        // Extract content from parens if any: "XSmall (XS)" -> "XS"
+        const parenMatch = item.size.match(/\(([^)]+)\)/);
+        if (parenMatch) {
+           sizeToMatch = parenMatch[1].trim(); 
+        } else {
+           // Basic mapping
+           if (lower === 'xsmall' || lower === 'extra small') sizeToMatch = 'XS';
+           else if (lower === 'small') sizeToMatch = 'S';
+           else if (lower === 'medium') sizeToMatch = 'M';
+           else if (lower === 'large') sizeToMatch = 'L';
+           else if (lower === 'xlarge' || lower === 'extra large') sizeToMatch = 'XL';
+           else if (lower === '2xlarge' || lower === 'xxl') sizeToMatch = 'XXL';
+        }
+      }
+
+      console.log(`🔍 Matching against size: ${sizeToMatch} (Original: ${item.size})`);
+
       const studentsWithPreOrders =
         await NotificationService.findStudentsWithPendingPreOrders(
           item.name,
           item.education_level,
-          item.size || null
+          sizeToMatch || null
         );
 
       if (studentsWithPreOrders.length === 0) {
@@ -463,7 +557,7 @@ class ItemsService {
           const conversionResult = await OrderService.convertPreOrderToRegular(
             student.orderId,
             item.name,
-            student.item.size || item.size || null
+            student.item.size || sizeToMatch || null
           );
 
           if (conversionResult.success) {

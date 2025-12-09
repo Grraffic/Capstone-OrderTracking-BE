@@ -26,7 +26,7 @@ class NotificationService {
         .select("*")
         .eq("order_type", "pre-order")
         .eq("is_active", true)
-        .in("status", ["pending", "processing"]); // Only pending/processing pre-orders
+        .in("status", ["pending", "processing", "payment_pending"]); // Include payment_pending
 
       if (error) throw error;
 
@@ -41,7 +41,40 @@ class NotificationService {
         return items.some((item) => {
           const nameMatch = item.name === itemName;
           const levelMatch = item.education_level === educationLevel;
-          const sizeMatch = size ? item.size === size : true;
+          // Enhanced size matching logic
+          let sizeMatch = true;
+          if (size) {
+            // Normalize sizes for comparison
+            const orderItemSize = (item.size || "").toLowerCase().trim();
+            const restockSize = (size || "").toLowerCase().trim();
+            
+            // Common size aliases map
+            const aliases = {
+              'xs': ['xsmall', 'extra small', 'xs'],
+              's': ['small', 's'],
+              'm': ['medium', 'm'],
+              'l': ['large', 'l'],
+              'xl': ['xlarge', 'extra large', 'xl'],
+              'xxl': ['2xlarge', '2xl', 'xxl', 'double extra large'],
+              '3xl': ['3xlarge', '3xl', 'triple extra large']
+            };
+
+            // Check direct match
+            const directMatch = orderItemSize === restockSize;
+
+            // Check alias match
+            let aliasMatch = false;
+            for (const [key, values] of Object.entries(aliases)) {
+              // Ensure strict matching within aliases
+              // Check if BOTH the order size and restock size belong to the SAME alias group
+              if (values.includes(orderItemSize) && values.includes(restockSize)) {
+                aliasMatch = true;
+                break;
+              }
+            }
+
+            sizeMatch = directMatch || aliasMatch;
+          }
           
           return nameMatch && levelMatch && sizeMatch;
         });
@@ -55,7 +88,33 @@ class NotificationService {
         const matchedItem = order.items.find((item) => {
           const nameMatch = item.name === itemName;
           const levelMatch = item.education_level === educationLevel;
-          const sizeMatch = size ? item.size === size : true;
+          // Enhanced size matching logic
+          let sizeMatch = true;
+          if (size) {
+            const orderItemSize = (item.size || "").toLowerCase().trim();
+            const restockSize = (size || "").toLowerCase().trim();
+            
+            const aliases = {
+              'xs': ['xsmall', 'extra small', 'xs'],
+              's': ['small', 's'],
+              'm': ['medium', 'm'],
+              'l': ['large', 'l'],
+              'xl': ['xlarge', 'extra large', 'xl'],
+              'xxl': ['2xlarge', '2xl', 'xxl', 'double extra large'],
+              '3xl': ['3xlarge', '3xl', 'triple extra large']
+            };
+
+            const directMatch = orderItemSize === restockSize;
+
+            let aliasMatch = false;
+            for (const [key, values] of Object.entries(aliases)) {
+              if (values.includes(orderItemSize) && values.includes(restockSize)) {
+                aliasMatch = true;
+                break;
+              }
+            }
+            sizeMatch = directMatch || aliasMatch;
+          }
           return nameMatch && levelMatch && sizeMatch;
         });
 

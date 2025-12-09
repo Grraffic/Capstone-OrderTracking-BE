@@ -697,47 +697,100 @@ class OrderService {
       for (const item of items) {
         try {
           // Find inventory item by name, education level, and size if specified
-          let query = supabase
+          // Find inventory item by name and education level
+          const { data: inventoryItems, error: searchError } = await supabase
             .from("items")
             .select("*")
             .ilike("name", item.name)
             .eq("education_level", order.education_level)
-            .eq("is_active", true);
-
-          // If size is specified, match by size
-          if (item.size && item.size !== "N/A") {
-            query = query.eq("size", item.size);
-          }
-
-          const { data: inventoryItems, error: searchError } =
-            await query.limit(1);
+            .eq("is_active", true)
+            .limit(1);
 
           if (searchError) {
-            console.error(
-              `Failed to find inventory for ${item.name}:`,
-              searchError
-            );
+             console.error(`Failed to find inventory for ${item.name}:`, searchError);
             continue;
           }
 
           if (!inventoryItems || inventoryItems.length === 0) {
-            console.error(
-              `Inventory item not found: ${item.name}${
-                item.size ? ` (Size: ${item.size})` : ""
-              }`
-            );
+            console.error(`Inventory item not found: ${item.name}`);
             continue;
           }
 
           const inventoryItem = inventoryItems[0];
+          let newStock = 0;
+          let noteUpdate = null;
+          let variantFound = false;
 
-          // Calculate new stock (reduce by ordered quantity)
-          const newStock = Math.max(0, inventoryItem.stock - item.quantity);
+          // Check if item has JSON variations in note field
+          if (inventoryItem.note) {
+             try {
+                const parsedNote = JSON.parse(inventoryItem.note);
+                if (parsedNote && parsedNote._type === 'sizeVariations' && Array.isArray(parsedNote.sizeVariations)) {
+                   
+                   // Find the variant
+                   const variantIndex = parsedNote.sizeVariations.findIndex(v => {
+                      const vSize = v.size || "";
+                      return vSize === item.size || vSize.includes(item.size) || (item.size && item.size.includes(vSize));
+                   });
 
-          // Update inventory stock
+                   if (variantIndex !== -1) {
+                      variantFound = true;
+                      const variant = parsedNote.sizeVariations[variantIndex];
+                      const currentVariantStock = Number(variant.stock) || 0;
+                      
+                      // Deduct from variant
+                      const newVariantStock = Math.max(0, currentVariantStock - item.quantity);
+                      parsedNote.sizeVariations[variantIndex].stock = newVariantStock;
+                      
+                      noteUpdate = JSON.stringify(parsedNote);
+                      
+                      // Also update total stock for compatibility
+                      // Recalculate total stock from all variants
+                      newStock = parsedNote.sizeVariations.reduce((acc, v) => acc + (Number(v.stock) || 0), 0);
+                   }
+                }
+             } catch (e) {
+                console.warn("Failed to parse item note for variant deduction:", e);
+             }
+          }
+
+          // If no variant logic applied, fall back to standard deduction
+          if (!variantFound) {
+             // Only proceed if size matches (or item has no size/N/A)
+             // We relax the size match here because we pulled by name/edu level. 
+             // If the row relies on 'size' column for differentiation:
+             if (inventoryItem.size !== 'N/A' && inventoryItem.size !== item.size && item.size !== 'N/A') {
+                 // Try to find exact match row if we picked pending one
+                 const { data: exactMatch } = await supabase
+                    .from('items')
+                    .select('*')
+                    .ilike('name', item.name)
+                    .eq('education_level', order.education_level)
+                    .eq('size', item.size)
+                    .eq('is_active', true)
+                    .single();
+                 
+                 if (exactMatch) {
+                    newStock = Math.max(0, exactMatch.stock - item.quantity);
+                    // Update exact match
+                    await supabase.from('items').update({ stock: newStock }).eq('id', exactMatch.id);
+                    // Continue to next item
+                    continue; 
+                 }
+             }
+             
+             newStock = Math.max(0, inventoryItem.stock - item.quantity);
+          }
+
+          // Update inventory stock (and note if applicable)
+          const updatePayload = { stock: newStock };
+          if (noteUpdate) {
+             updatePayload.note = noteUpdate;
+          }
+
           const { data: updatedItem, error: updateItemError } = await supabase
             .from("items")
-            .update({ stock: newStock })
+            .update(updatePayload)
             .eq("id", inventoryItem.id)
             .select()
             .single();
