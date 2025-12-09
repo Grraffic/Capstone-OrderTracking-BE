@@ -2,7 +2,7 @@ const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 const supabase = require("./supabase");
 const { getProfilePictureUrl } = require("../utils/avatarGenerator");
-const { isSpecialAdmin } = require("./admin");
+const { isSpecialAdmin, getSpecialAdminEmails } = require("./admin");
 
 require("dotenv").config();
 
@@ -56,6 +56,7 @@ passport.use(
 
         if (!isStudent && !isAdmin) {
           console.error("Invalid email domain:", email);
+          console.error("Allowed Special Admins:", getSpecialAdminEmails());
           return done(new Error("Email domain not allowed"));
         }
 

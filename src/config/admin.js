@@ -36,11 +36,13 @@ require("dotenv").config();
  *
  * @type {string[]}
  */
-const SPECIAL_ADMIN_EMAILS = process.env.SPECIAL_ADMIN_EMAILS
-  ? process.env.SPECIAL_ADMIN_EMAILS.split(",")
+const SPECIAL_ADMIN_EMAILS = (process.env.SPECIAL_ADMIN_EMAILS || process.env.VITE_SPECIAL_ADMIN_EMAILS)
+  ? (process.env.SPECIAL_ADMIN_EMAILS || process.env.VITE_SPECIAL_ADMIN_EMAILS).split(",")
       .map((email) => email.trim().toLowerCase())
       .filter((email) => email.length > 0)
   : [];
+
+console.log("Loaded Special Admin Emails:", SPECIAL_ADMIN_EMAILS);
 
 /**
  * Check if an email is a special admin email
