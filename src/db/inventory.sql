@@ -1,249 +1,254 @@
 -- ============================================================================
--- Inventory Table Schema for La Verdad Uniform Ordering System
+-- Inventory Views and Functions for Reporting
+-- La Verdad Uniform Ordering System
 -- ============================================================================
--- This file contains the complete database schema for the inventory management
--- system including:
--- - Table structure with all required fields
--- - Automatic status calculation trigger
--- - Helper functions for statistics and low stock items
--- - Row Level Security (RLS) policies
--- - Performance indexes
+-- This file contains views, functions, and queries for inventory reporting
+-- The actual table is "items" - this file provides inventory-specific views
+-- Used by Inventory.jsx page for inventory management and reporting
 -- ============================================================================
 
--- Enable UUID extension if not already enabled
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
 -- ============================================================================
--- INVENTORY TABLE
+-- INVENTORY REPORT VIEW
 -- ============================================================================
-
-CREATE TABLE IF NOT EXISTS inventory (
-  -- Primary Key
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  
-  -- Item Information
-  name TEXT NOT NULL,
-  education_level TEXT NOT NULL,
-  category TEXT NOT NULL,
-  item_type TEXT NOT NULL,
-  description TEXT,
-  description_text TEXT,
-  material TEXT,
-  
-  -- Stock and Pricing
-  stock INTEGER NOT NULL DEFAULT 0 CHECK (stock >= 0),
-  price NUMERIC(10,2) NOT NULL DEFAULT 0 CHECK (price >= 0),
-  image TEXT DEFAULT '/assets/image/card1.png',
-  
-  -- Inventory Threshold Fields
-  physical_count INTEGER DEFAULT 0 CHECK (physical_count >= 0),
-  available INTEGER DEFAULT 0 CHECK (available >= 0),
-  reorder_point INTEGER DEFAULT 0 CHECK (reorder_point >= 0),
-  note TEXT,
-  
-  -- Status (automatically calculated by trigger)
-  status TEXT DEFAULT 'Above Threshold',
-  
-  -- Soft Delete
-  is_active BOOLEAN DEFAULT true,
-  
-  -- Timestamps
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
--- ============================================================================
--- INDEXES FOR PERFORMANCE
+-- This view provides a comprehensive inventory report with all calculated fields
+-- Used by the Inventory.jsx page to display inventory data
 -- ============================================================================
 
-CREATE INDEX IF NOT EXISTS idx_inventory_education_level ON inventory(education_level);
-CREATE INDEX IF NOT EXISTS idx_inventory_category ON inventory(category);
-CREATE INDEX IF NOT EXISTS idx_inventory_item_type ON inventory(item_type);
-CREATE INDEX IF NOT EXISTS idx_inventory_status ON inventory(status);
-CREATE INDEX IF NOT EXISTS idx_inventory_is_active ON inventory(is_active);
-CREATE INDEX IF NOT EXISTS idx_inventory_created_at ON inventory(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_inventory_education_category ON inventory(education_level, category);
+CREATE OR REPLACE VIEW inventory_report AS
+SELECT 
+  i.id,
+  i.name,
+  i.education_level,
+  i.category,
+  i.item_type,
+  i.size,
+  i.stock,
+  i.beginning_inventory,
+  i.purchases,
+  i.beginning_inventory_date,
+  i.fiscal_year_start,
+  i.price as unit_price,
+  -- Calculate ending inventory: Beginning + Purchases - Released + Returns
+  -- Note: Released and Returns need to be calculated from orders table
+  (i.beginning_inventory + COALESCE(i.purchases, 0)) as calculated_ending_inventory,
+  -- Calculate available: Ending Inventory - Unreleased
+  -- Note: Unreleased needs to be calculated from orders table
+  i.available,
+  -- Calculate total amount: (Beginning Inventory * Unit Price) + (Purchases * Unit Price)
+  ((i.beginning_inventory * i.price) + (COALESCE(i.purchases, 0) * i.price)) as total_amount,
+  i.status,
+  i.is_active,
+  i.created_at,
+  i.updated_at
+FROM items i
+WHERE i.is_active = true;
 
 -- ============================================================================
--- TRIGGER FUNCTION: Auto-update updated_at timestamp
+-- INVENTORY SUMMARY FUNCTION
+-- ============================================================================
+-- Returns summary statistics for inventory reporting
 -- ============================================================================
 
-CREATE OR REPLACE FUNCTION update_inventory_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-  NEW.updated_at = NOW();
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- Drop trigger if exists and recreate
-DROP TRIGGER IF EXISTS trigger_update_inventory_updated_at ON inventory;
-
-CREATE TRIGGER trigger_update_inventory_updated_at
-  BEFORE UPDATE ON inventory
-  FOR EACH ROW
-  EXECUTE FUNCTION update_inventory_updated_at();
-
--- ============================================================================
--- TRIGGER FUNCTION: Auto-calculate inventory status based on stock levels
--- ============================================================================
--- Status Thresholds:
--- - "Out of Stock": stock = 0
--- - "Critical": stock >= 1 AND stock < 20
--- - "At Reorder Point": stock >= 20 AND stock < 50
--- - "Above Threshold": stock >= 50
--- ============================================================================
-
-CREATE OR REPLACE FUNCTION update_inventory_status()
-RETURNS TRIGGER AS $$
-BEGIN
-  IF NEW.stock = 0 THEN
-    NEW.status = 'Out of Stock';
-  ELSIF NEW.stock >= 1 AND NEW.stock < 20 THEN
-    NEW.status = 'Critical';
-  ELSIF NEW.stock >= 20 AND NEW.stock < 50 THEN
-    NEW.status = 'At Reorder Point';
-  ELSIF NEW.stock >= 50 THEN
-    NEW.status = 'Above Threshold';
-  END IF;
-  
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- Drop trigger if exists and recreate
-DROP TRIGGER IF EXISTS trigger_update_inventory_status ON inventory;
-
-CREATE TRIGGER trigger_update_inventory_status
-  BEFORE INSERT OR UPDATE OF stock ON inventory
-  FOR EACH ROW
-  EXECUTE FUNCTION update_inventory_status();
-
--- ============================================================================
--- HELPER FUNCTION: Get Low Stock Items
--- ============================================================================
--- Returns items with "Critical" or "At Reorder Point" status
--- ============================================================================
-
-CREATE OR REPLACE FUNCTION get_low_stock_items()
-RETURNS TABLE (
-  id UUID,
-  name TEXT,
-  education_level TEXT,
-  category TEXT,
-  stock INTEGER,
-  available INTEGER,
-  reorder_point INTEGER,
-  status TEXT
-) AS $$
-BEGIN
-  RETURN QUERY
-  SELECT
-    i.id, i.name, i.education_level, i.category,
-    i.stock, i.available, i.reorder_point, i.status
-  FROM inventory i
-  WHERE i.is_active = true
-    AND (i.status = 'Critical' OR i.status = 'At Reorder Point')
-  ORDER BY i.stock ASC;
-END;
-$$ LANGUAGE plpgsql;
-
--- ============================================================================
--- HELPER FUNCTION: Get Inventory Statistics
--- ============================================================================
--- Returns statistics for each status category
--- ============================================================================
-
-CREATE OR REPLACE FUNCTION get_inventory_stats()
+CREATE OR REPLACE FUNCTION get_inventory_summary(
+  p_start_date DATE DEFAULT NULL,
+  p_end_date DATE DEFAULT NULL,
+  p_education_level TEXT DEFAULT NULL
+)
 RETURNS TABLE (
   total_items BIGINT,
-  above_threshold_items BIGINT,
-  at_reorder_point_items BIGINT,
-  critical_items BIGINT,
-  out_of_stock_items BIGINT,
-  total_value NUMERIC
+  total_beginning_inventory BIGINT,
+  total_purchases BIGINT,
+  total_ending_inventory BIGINT,
+  total_value NUMERIC,
+  items_above_threshold BIGINT,
+  items_at_reorder_point BIGINT,
+  items_critical BIGINT,
+  items_out_of_stock BIGINT
 ) AS $$
 BEGIN
   RETURN QUERY
   SELECT
     COUNT(*) as total_items,
-    COUNT(*) FILTER (WHERE status = 'Above Threshold') as above_threshold_items,
-    COUNT(*) FILTER (WHERE status = 'At Reorder Point') as at_reorder_point_items,
-    COUNT(*) FILTER (WHERE status = 'Critical') as critical_items,
-    COUNT(*) FILTER (WHERE status = 'Out of Stock') as out_of_stock_items,
-    SUM(price * stock) as total_value
-  FROM inventory
-  WHERE is_active = true;
+    SUM(COALESCE(i.beginning_inventory, 0)) as total_beginning_inventory,
+    SUM(COALESCE(i.purchases, 0)) as total_purchases,
+    SUM(COALESCE(i.beginning_inventory, 0) + COALESCE(i.purchases, 0)) as total_ending_inventory,
+    SUM((COALESCE(i.beginning_inventory, 0) * i.price) + (COALESCE(i.purchases, 0) * i.price)) as total_value,
+    COUNT(*) FILTER (WHERE i.status = 'Above Threshold') as items_above_threshold,
+    COUNT(*) FILTER (WHERE i.status = 'At Reorder Point') as items_at_reorder_point,
+    COUNT(*) FILTER (WHERE i.status = 'Critical') as items_critical,
+    COUNT(*) FILTER (WHERE i.status = 'Out of Stock') as items_out_of_stock
+  FROM items i
+  WHERE i.is_active = true
+    AND (p_education_level IS NULL OR i.education_level = p_education_level)
+    AND (
+      p_start_date IS NULL OR 
+      p_end_date IS NULL OR
+      (i.created_at::DATE BETWEEN p_start_date AND p_end_date)
+    );
 END;
 $$ LANGUAGE plpgsql;
 
 -- ============================================================================
--- ROW LEVEL SECURITY (RLS) POLICIES
+-- INVENTORY BY SIZE VIEW
+-- ============================================================================
+-- Groups inventory by item name and size for reporting
+-- Used by Inventory.jsx to display items with their size variants
 -- ============================================================================
 
--- Enable RLS on inventory table
-ALTER TABLE inventory ENABLE ROW LEVEL SECURITY;
+CREATE OR REPLACE VIEW inventory_by_size AS
+SELECT 
+  i.name,
+  i.education_level,
+  i.size,
+  i.id,
+  i.stock,
+  i.beginning_inventory,
+  i.purchases,
+  i.beginning_inventory_date,
+  i.fiscal_year_start,
+  i.price as unit_price,
+  (i.beginning_inventory + COALESCE(i.purchases, 0)) as ending_inventory,
+  i.available,
+  ((i.beginning_inventory * i.price) + (COALESCE(i.purchases, 0) * i.price)) as total_amount,
+  i.status,
+  -- Calculate days since beginning inventory was set
+  CASE 
+    WHEN i.beginning_inventory_date IS NOT NULL 
+    THEN EXTRACT(DAY FROM (NOW() - i.beginning_inventory_date))
+    ELSE NULL
+  END as days_since_start,
+  -- Check if beginning inventory is expired (>365 days)
+  CASE 
+    WHEN i.beginning_inventory_date IS NOT NULL 
+      AND EXTRACT(DAY FROM (NOW() - i.beginning_inventory_date)) > 365 
+    THEN true
+    ELSE false
+  END as is_expired
+FROM items i
+WHERE i.is_active = true
+ORDER BY i.name, i.education_level, i.size;
 
--- Policy: Allow public read access to active inventory items
-CREATE POLICY "Public read active inventory"
-  ON inventory FOR SELECT
-  USING (is_active = true);
+-- ============================================================================
+-- INVENTORY TRANSACTIONS VIEW (Placeholder)
+-- ============================================================================
+-- This view will be used to track inventory transactions
+-- Currently returns data from items table, but can be extended
+-- to join with orders/transactions table when implemented
+-- ============================================================================
 
--- Policy: Allow authenticated admin users full access
-CREATE POLICY "Admin full access to inventory"
-  ON inventory FOR ALL
-  USING (
-    auth.role() = 'authenticated' AND
-    EXISTS (
-      SELECT 1 FROM users
-      WHERE users.id = auth.uid()
-      AND users.role = 'admin'
-      AND users.is_active = true
+CREATE OR REPLACE VIEW inventory_transactions_summary AS
+SELECT 
+  i.id as item_id,
+  i.name,
+  i.size,
+  i.education_level,
+  i.beginning_inventory,
+  i.purchases,
+  -- TODO: Calculate released from orders table
+  0 as released,
+  -- TODO: Calculate returns from orders/returns table
+  0 as returns,
+  -- TODO: Calculate unreleased from orders table (pending orders)
+  0 as unreleased,
+  i.available,
+  (i.beginning_inventory + COALESCE(i.purchases, 0)) as ending_inventory,
+  i.beginning_inventory_date,
+  i.fiscal_year_start
+FROM items i
+WHERE i.is_active = true;
+
+-- ============================================================================
+-- FUNCTION: Get Inventory Report for Frontend
+-- ============================================================================
+-- This function returns inventory data formatted for the Inventory.jsx page
+-- Includes all fields needed for the inventory table display
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION get_inventory_report_data(
+  p_education_level TEXT DEFAULT NULL,
+  p_search_term TEXT DEFAULT NULL,
+  p_limit INTEGER DEFAULT 100,
+  p_offset INTEGER DEFAULT 0
+)
+RETURNS TABLE (
+  id UUID,
+  name TEXT,
+  education_level TEXT,
+  size TEXT,
+  beginning_inventory INTEGER,
+  purchases INTEGER,
+  released INTEGER,
+  returns INTEGER,
+  unreleased INTEGER,
+  available INTEGER,
+  ending_inventory INTEGER,
+  unit_price NUMERIC,
+  total_amount NUMERIC,
+  status TEXT,
+  beginning_inventory_date TIMESTAMP WITH TIME ZONE,
+  fiscal_year_start DATE
+) AS $$
+BEGIN
+  RETURN QUERY
+  SELECT
+    i.id,
+    i.name,
+    i.education_level,
+    COALESCE(i.size, 'N/A') as size,
+    COALESCE(i.beginning_inventory, 0) as beginning_inventory,
+    COALESCE(i.purchases, 0) as purchases,
+    -- TODO: Calculate from orders table
+    0 as released,
+    -- TODO: Calculate from returns table
+    0 as returns,
+    -- TODO: Calculate from orders table (pending orders)
+    0 as unreleased,
+    COALESCE(i.available, 0) as available,
+    (COALESCE(i.beginning_inventory, 0) + COALESCE(i.purchases, 0)) as ending_inventory,
+    i.price as unit_price,
+    ((COALESCE(i.beginning_inventory, 0) * i.price) + (COALESCE(i.purchases, 0) * i.price)) as total_amount,
+    i.status,
+    i.beginning_inventory_date,
+    i.fiscal_year_start
+  FROM items i
+  WHERE i.is_active = true
+    AND (p_education_level IS NULL OR i.education_level = p_education_level)
+    AND (
+      p_search_term IS NULL OR
+      i.name ILIKE '%' || p_search_term || '%' OR
+      i.education_level ILIKE '%' || p_search_term || '%' OR
+      i.category ILIKE '%' || p_search_term || '%'
     )
-  );
+  ORDER BY i.name, i.education_level, i.size
+  LIMIT p_limit
+  OFFSET p_offset;
+END;
+$$ LANGUAGE plpgsql;
 
 -- ============================================================================
--- SAMPLE DATA (Optional - for testing)
+-- COMMENTS
 -- ============================================================================
--- Uncomment to insert sample data for testing
 
-/*
-INSERT INTO inventory (name, education_level, category, item_type, description, material, stock, price, image)
-VALUES
-  ('Kinder Dress', 'Kindergarten', 'Kinder Dress', 'Uniform', 'Small', 'Cotton', 60, 350.00, '/assets/image/card1.png'),
-  ('Grade 1 Polo', 'Grade 1', 'Boys Polo', 'Uniform', 'Medium', 'Polyester', 25, 280.00, '/assets/image/card2.png'),
-  ('Grade 2 Blouse', 'Grade 2', 'Girls Blouse', 'Uniform', 'Large', 'Cotton Blend', 15, 300.00, '/assets/image/card3.png'),
-  ('PE Shirt', 'Grade 3', 'PE Uniform', 'Uniform', 'XL', 'Dri-Fit', 8, 250.00, '/assets/image/card4.png'),
-  ('School Tie', 'Grade 4', 'Accessories', 'Accessories', 'One Size', 'Silk', 0, 150.00, '/assets/image/card5.png');
-*/
+COMMENT ON VIEW inventory_report IS 'Comprehensive inventory report view with all calculated fields';
+COMMENT ON VIEW inventory_by_size IS 'Inventory grouped by item name and size for reporting';
+COMMENT ON VIEW inventory_transactions_summary IS 'Summary of inventory transactions (released, returns, unreleased)';
+COMMENT ON FUNCTION get_inventory_summary IS 'Returns summary statistics for inventory reporting';
+COMMENT ON FUNCTION get_inventory_report_data IS 'Returns inventory data formatted for Inventory.jsx frontend page';
 
 -- ============================================================================
 -- VERIFICATION QUERIES
 -- ============================================================================
--- Use these queries to verify the setup
 
--- Check table structure
--- SELECT column_name, data_type, is_nullable, column_default
--- FROM information_schema.columns
--- WHERE table_name = 'inventory'
--- ORDER BY ordinal_position;
+-- Test inventory report view
+-- SELECT * FROM inventory_report LIMIT 10;
 
--- Check triggers
--- SELECT trigger_name, event_manipulation, event_object_table, action_statement
--- FROM information_schema.triggers
--- WHERE event_object_table = 'inventory';
+-- Test inventory summary function
+-- SELECT * FROM get_inventory_summary();
 
--- Check indexes
--- SELECT indexname, indexdef
--- FROM pg_indexes
--- WHERE tablename = 'inventory';
+-- Test inventory by size view
+-- SELECT * FROM inventory_by_size LIMIT 10;
 
--- Test status calculation
--- SELECT name, stock, status FROM inventory ORDER BY stock;
+-- Test inventory report data function
+-- SELECT * FROM get_inventory_report_data(NULL, NULL, 10, 0);
 
--- Test statistics function
--- SELECT * FROM get_inventory_stats();
-
--- Test low stock function
--- SELECT * FROM get_low_stock_items();
 

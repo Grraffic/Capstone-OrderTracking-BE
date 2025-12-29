@@ -21,7 +21,7 @@ class OrderService {
         .eq("is_active", true)
         .order("created_at", { ascending: false });
 
-      // Apply filters
+      // Apply filters (but not search - we'll handle search separately)
       if (filters.status) {
         query = query.eq("status", filters.status);
       }
@@ -38,18 +38,73 @@ class OrderService {
         query = query.eq("student_id", filters.student_id);
       }
 
+      let data, error, count;
+
       if (filters.search) {
-        query = query.or(
-          `order_number.ilike.%${filters.search}%,student_name.ilike.%${filters.search}%,student_email.ilike.%${filters.search}%`
-        );
+        // For search, fetch a large batch of orders to search through all fields
+        // This allows searching in item names which are in JSONB
+        // Fetch up to 1000 orders to search through (reasonable limit)
+        const searchLimit = 1000;
+        let searchQuery = query.limit(searchLimit);
+        
+        // Fetch orders (without filtering by search term in query, we'll filter client-side)
+        // This ensures we can search in item names even if basic fields don't match
+        const { data: allData, error: allError } = await searchQuery;
+        if (allError) throw allError;
+        
+        // Filter by ALL fields including item names
+        const searchTermLower = filters.search.toLowerCase().trim();
+        const allMatchingOrders = (allData || []).filter(order => {
+          // Check basic fields: order_number, student_name, student_email
+          const matchesBasic = 
+            (order.order_number && order.order_number.toLowerCase().includes(searchTermLower)) ||
+            (order.student_name && order.student_name.toLowerCase().includes(searchTermLower)) ||
+            (order.student_email && order.student_email.toLowerCase().includes(searchTermLower));
+          
+          if (matchesBasic) return true;
+          
+          // Check items JSONB array for item names and sizes
+          let itemsArray = [];
+          if (order.items && Array.isArray(order.items)) {
+            itemsArray = order.items;
+          } else if (typeof order.items === 'string') {
+            try {
+              const parsedItems = JSON.parse(order.items);
+              if (Array.isArray(parsedItems)) {
+                itemsArray = parsedItems;
+              }
+            } catch (e) {
+              // Not valid JSON, skip
+            }
+          }
+          
+          // Search in item names and sizes
+          return itemsArray.some(item => {
+            const itemName = (item?.name || '').toLowerCase();
+            const itemSize = (item?.size || '').toLowerCase();
+            return itemName.includes(searchTermLower) || itemSize.includes(searchTermLower);
+          });
+        });
+        
+        count = allMatchingOrders.length;
+        
+        // Apply pagination to filtered results
+        const from = (page - 1) * limit;
+        const to = from + limit;
+        data = allMatchingOrders.slice(from, to);
+        error = null;
+      } else {
+        // No search, use normal pagination
+        const from = (page - 1) * limit;
+        const to = from + limit - 1;
+        query = query.range(from, to);
+        const result = await query;
+        data = result.data;
+        error = result.error;
+        count = result.count;
       }
 
-      // Apply pagination
-      const from = (page - 1) * limit;
-      const to = from + limit - 1;
-      query = query.range(from, to);
-
-      const { data, error, count } = await query;
+      if (error) throw error;
 
       if (error) throw error;
 

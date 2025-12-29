@@ -174,7 +174,22 @@ class ItemsController {
   async createItem(req, res) {
     try {
       const io = req.app.get("io");
+      console.log(`[ItemsController] 📥 Received createItem request:`, {
+        name: req.body.name,
+        size: req.body.size,
+        stock: req.body.stock,
+        education_level: req.body.education_level
+      });
+      
       const result = await ItemsService.createItem(req.body, io);
+
+      console.log(`[ItemsController] 📤 Sending response:`, {
+        success: result.success,
+        isExisting: result.isExisting,
+        purchases: result.data?.purchases,
+        beginning_inventory: result.data?.beginning_inventory,
+        stock: result.data?.stock
+      });
 
       if (result.notificationInfo && result.notificationInfo.notified > 0) {
         console.log(
@@ -184,7 +199,7 @@ class ItemsController {
 
       res.status(201).json(result);
     } catch (error) {
-      console.error("Create item error:", error);
+      console.error("[ItemsController] ❌ Create item error:", error);
       res
         .status(400)
         .json({
@@ -316,6 +331,73 @@ class ItemsController {
           success: false,
           message: error.message || "Failed to fetch low stock items",
         });
+    }
+  }
+
+  /**
+   * Get inventory report
+   * GET /api/items/inventory-report
+   */
+  async getInventoryReport(req, res) {
+    try {
+      const InventoryService = require("../services/inventory.service");
+      const result = await InventoryService.getInventoryReport(req.query);
+      res.json(result);
+    } catch (error) {
+      console.error("Get inventory report error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to fetch inventory report",
+      });
+    }
+  }
+
+  /**
+   * Add stock to item (purchases)
+   * POST /api/items/:id/add-stock
+   * Body: { quantity, size?, unitPrice? }
+   */
+  async addStock(req, res) {
+    try {
+      const { id } = req.params;
+      const { quantity, size, unitPrice } = req.body;
+      const io = req.app.get("io"); // Get Socket.IO instance
+
+      if (!quantity || quantity <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Quantity is required and must be greater than 0",
+        });
+      }
+
+      const InventoryService = require("../services/inventory.service");
+      const result = await InventoryService.addStock(id, quantity, size, unitPrice, io);
+      res.json(result);
+    } catch (error) {
+      console.error("Add stock error:", error);
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to add stock",
+      });
+    }
+  }
+
+  /**
+   * Reset beginning inventory manually
+   * POST /api/items/:id/reset-beginning-inventory
+   */
+  async resetBeginningInventory(req, res) {
+    try {
+      const { id } = req.params;
+      const InventoryService = require("../services/inventory.service");
+      const result = await InventoryService.resetBeginningInventory(id);
+      res.json(result);
+    } catch (error) {
+      console.error("Reset beginning inventory error:", error);
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to reset beginning inventory",
+      });
     }
   }
 }

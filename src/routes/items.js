@@ -27,6 +27,12 @@ router.get("/stats", itemsController.getStats);
 router.get("/low-stock", itemsController.getLowStockItems);
 
 /**
+ * GET /api/items/inventory-report
+ * Get full inventory report with beginning inventory, purchases, etc.
+ */
+router.get("/inventory-report", itemsController.getInventoryReport);
+
+/**
  * GET /api/items/sizes/:name/:educationLevel
  * Get available sizes for a product by name and education level
  */
@@ -89,6 +95,20 @@ router.put("/:id", itemsController.updateItem);
  * Note: Add auth.requireAdmin middleware when ready
  */
 router.patch("/:id/adjust", itemsController.adjustStock);
+
+/**
+ * POST /api/items/:id/add-stock
+ * Add stock to item (goes to purchases)
+ * Note: Add auth.requireAdmin middleware when ready
+ */
+router.post("/:id/add-stock", itemsController.addStock);
+
+/**
+ * POST /api/items/:id/reset-beginning-inventory
+ * Manually reset beginning inventory
+ * Note: Add auth.requireAdmin middleware when ready
+ */
+router.post("/:id/reset-beginning-inventory", itemsController.resetBeginningInventory);
 
 /**
  * DELETE /api/items/:id
