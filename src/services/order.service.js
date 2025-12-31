@@ -1,5 +1,6 @@
 const supabase = require("../config/supabase");
 const { generateOrderReceiptQRData } = require("../utils/qrCodeGenerator");
+const isProduction = process.env.NODE_ENV === "production";
 
 /**
  * Order Service
@@ -41,21 +42,27 @@ class OrderService {
       let data, error, count;
 
       if (filters.search) {
-        // For search, fetch a large batch of orders to search through all fields
-        // This allows searching in item names which are in JSONB
-        // Fetch up to 1000 orders to search through (reasonable limit)
-        const searchLimit = 1000;
+        // Optimized search: Use database-level search for basic fields first
+        // This is much more efficient than fetching all records
+        const searchTerm = filters.search.trim();
+        
+        // Try database-level search first (faster)
+        query = query.or(
+          `order_number.ilike.%${searchTerm}%,student_name.ilike.%${searchTerm}%,student_email.ilike.%${searchTerm}%`
+        );
+        
+        // For item name search, we need to fetch and filter client-side
+        // But limit the initial fetch to reduce memory usage
+        const searchLimit = 500; // Reduced from 1000
         let searchQuery = query.limit(searchLimit);
         
-        // Fetch orders (without filtering by search term in query, we'll filter client-side)
-        // This ensures we can search in item names even if basic fields don't match
         const { data: allData, error: allError } = await searchQuery;
         if (allError) throw allError;
         
-        // Filter by ALL fields including item names
-        const searchTermLower = filters.search.toLowerCase().trim();
+        // Filter by ALL fields including item names (client-side for JSONB)
+        const searchTermLower = searchTerm.toLowerCase();
         const allMatchingOrders = (allData || []).filter(order => {
-          // Check basic fields: order_number, student_name, student_email
+          // Basic fields already filtered by DB, but double-check
           const matchesBasic = 
             (order.order_number && order.order_number.toLowerCase().includes(searchTermLower)) ||
             (order.student_name && order.student_name.toLowerCase().includes(searchTermLower)) ||
@@ -106,48 +113,46 @@ class OrderService {
 
       if (error) throw error;
 
-      if (error) throw error;
-
-      // Enhance orders with student profile data
+      // Enhance orders with student profile data - optimized batch lookup
       let enhancedData = data;
       if (data && data.length > 0) {
-        // Extract unique student IDs
+        // Extract unique student IDs and emails
         const studentIds = [...new Set(data.filter(o => o.student_id).map(o => o.student_id))];
+        const studentEmails = [...new Set(data.filter(o => o.student_email).map(o => o.student_email))];
         
-        if (studentIds.length > 0) {
-          // Fetch user profiles
-          const { data: users, error: usersError } = await supabase
-            .from("users")
-            .select("id, photo_url, avatar_url, name, email")
-            .in("id", studentIds);
-          
-          if (!usersError && users) {
-             const userMap = {};
-             users.forEach(u => userMap[u.id] = u);
-             
-             enhancedData = data.map(order => ({
-               ...order,
-               student_data: userMap[order.student_id] || null
-             }));
-          } else {
-             // Try matching by email if ID match fails or returns empty (fallback)
-              const studentEmails = [...new Set(data.map(o => o.student_email))];
-              const { data: usersByEmail, error: emailError } = await supabase
+        // Batch fetch users by ID and email in parallel
+        const [usersByIdResult, usersByEmailResult] = await Promise.all([
+          studentIds.length > 0
+            ? supabase
+                .from("users")
+                .select("id, photo_url, avatar_url, name, email")
+                .in("id", studentIds)
+            : Promise.resolve({ data: [], error: null }),
+          studentEmails.length > 0
+            ? supabase
                 .from("users")
                 .select("id, email, photo_url, avatar_url, name")
-                .in("email", studentEmails);
-                
-              if (!emailError && usersByEmail) {
-                 const emailMap = {};
-                 usersByEmail.forEach(u => emailMap[u.email] = u);
-                 
-                 enhancedData = data.map(order => ({
-                   ...order,
-                   student_data: emailMap[order.student_email] || null
-                 }));
-              }
-          }
+                .in("email", studentEmails)
+            : Promise.resolve({ data: [], error: null }),
+        ]);
+        
+        // Create lookup maps
+        const userMapById = {};
+        const userMapByEmail = {};
+        
+        if (usersByIdResult.data) {
+          usersByIdResult.data.forEach(u => userMapById[u.id] = u);
         }
+        
+        if (usersByEmailResult.data) {
+          usersByEmailResult.data.forEach(u => userMapByEmail[u.email] = u);
+        }
+        
+        // Map orders with student data (prefer ID match, fallback to email)
+        enhancedData = data.map(order => ({
+          ...order,
+          student_data: userMapById[order.student_id] || userMapByEmail[order.student_email] || null
+        }));
       }
 
       return {
@@ -340,26 +345,38 @@ class OrderService {
 
       if (!isPreOrder) {
         // Only reduce inventory for regular orders
+        // Optimize: Batch fetch all potential items first to reduce queries
+        const uniqueItemNames = [...new Set(items.map(i => i.name))];
+        const itemLookupPromises = uniqueItemNames.map(itemName =>
+          supabase
+            .from("items")
+            .select("*")
+            .ilike("name", itemName)
+            .eq("education_level", orderData.education_level)
+            .eq("is_active", true)
+        );
+        
+        const itemLookupResults = await Promise.all(itemLookupPromises);
+        const itemLookupMap = new Map();
+        uniqueItemNames.forEach((name, index) => {
+          if (itemLookupResults[index].data) {
+            itemLookupMap.set(name.toLowerCase(), itemLookupResults[index].data);
+          }
+        });
+        
+        // Process each item in the order
         for (const item of items) {
           try {
             // Find inventory item by name, education level, AND size
             // This ensures we reduce stock from the correct size variant
             const itemSize = item.size || "N/A";
 
-            let query = supabase
-              .from("items")
-              .select("*")
-              .ilike("name", item.name)
-              .eq("education_level", orderData.education_level)
-              .eq("is_active", true);
+            // Use pre-fetched items from batch lookup
+            const potentialItems = itemLookupMap.get(item.name.toLowerCase()) || [];
 
-            // Fetch generic item first (without size filter) to check for JSON variants
-            const { data: potentialItems, error: searchError } = await query;
-
-            if (searchError) {
+            if (!potentialItems || potentialItems.length === 0) {
               console.error(
-                `Failed to find inventory for ${item.name}:`,
-                searchError
+                `Inventory item not found: ${item.name} (Education Level: ${orderData.education_level})`
               );
               continue;
             }
@@ -412,9 +429,11 @@ class OrderService {
               continue;
             }
 
-            console.log(
-              `Found inventory item: ${item.name} (Size: ${itemSize}, Stock: ${inventoryItem.stock}, JSON: ${isJsonVariant})`
-            );
+            if (!isProduction) {
+              console.log(
+                `Found inventory item: ${item.name} (Size: ${itemSize}, Stock: ${inventoryItem.stock}, JSON: ${isJsonVariant})`
+              );
+            }
 
             let newStock = 0; // Total new stock for the row
             let previousStock = 0; // Previous stock for the specific variant
@@ -447,7 +466,9 @@ class OrderService {
                   throw updateError;
                }
                
-               console.log(`Updated JSON variant inventory for ${item.name} size ${variant.size}: ${previousStock} -> ${newVariantStock}. Total row stock: ${newStock}`);
+               if (!isProduction) {
+                 console.log(`Updated JSON variant inventory for ${item.name} size ${variant.size}: ${previousStock} -> ${newVariantStock}. Total row stock: ${newStock}`);
+               }
                
                inventoryUpdates.push({
                 item: item.name,
@@ -488,9 +509,11 @@ class OrderService {
                 success: true,
               });
 
-              console.log(
-                `Inventory reduced: ${item.name} (Size: ${itemSize}) from ${previousStock} to ${newStock} (ordered: ${item.quantity})`
-              );
+              if (!isProduction) {
+                console.log(
+                  `Inventory reduced: ${item.name} (Size: ${itemSize}) from ${previousStock} to ${newStock} (ordered: ${item.quantity})`
+                );
+              }
             }
 
           } catch (itemError) {
@@ -504,7 +527,9 @@ class OrderService {
           }
         }
       } else {
-        console.log("Pre-order detected - skipping inventory reduction");
+        if (!isProduction) {
+          console.log("Pre-order detected - skipping inventory reduction");
+        }
         inventoryUpdates.push({
           message: "Pre-order - inventory not reduced",
           orderType: "pre-order",

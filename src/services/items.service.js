@@ -1,6 +1,7 @@
 const supabase = require("../config/supabase");
 const NotificationService = require("./notification.service");
 const OrderService = require("./order.service");
+const isProduction = process.env.NODE_ENV === "production";
 
 /**
  * Items Service
@@ -132,13 +133,14 @@ class ItemsService {
         `[createItem] Checking for duplicates: name="${itemData.name}", education_level="${itemData.education_level}", size="${itemSize}"`
       );
 
-      // Use case-insensitive matching for name and education_level
-      // IMPORTANT: Supabase .ilike() works with exact match (case-insensitive) or pattern with %
-      // We'll fetch all active items and filter manually for more reliable matching
-      const { data: allActiveItems, error: queryError } = await supabase
+      // Optimized: Only fetch items matching name and education_level (case-insensitive)
+      // This is much more efficient than fetching all active items
+      const { data: potentialItems, error: queryError } = await supabase
         .from("items")
         .select("*")
-        .eq("is_active", true);
+        .eq("is_active", true)
+        .ilike("name", itemData.name.trim())
+        .ilike("education_level", itemData.education_level.trim());
 
       if (queryError) {
         console.error(
@@ -149,9 +151,9 @@ class ItemsService {
         // This prevents blocking item creation due to query issues
       }
 
-      // Manual filtering for exact case-insensitive match
-      // This is more reliable than .ilike() which can have issues
-      const finalExistingItems = (allActiveItems || []).filter((item) => {
+      // Manual filtering for exact case-insensitive match (double-check)
+      // This ensures we catch any edge cases with .ilike() matching
+      const finalExistingItems = (potentialItems || []).filter((item) => {
         if (!item.name || !itemData.name) return false;
         if (!item.education_level || !itemData.education_level) return false;
 
@@ -164,28 +166,16 @@ class ItemsService {
         return nameMatch && educationMatch;
       });
 
-      console.log(
-        `[createItem] Query result: Found ${
-          allActiveItems?.length || 0
-        } active items total, ${
-          finalExistingItems.length
-        } with matching name+education_level`
-      );
-
-      if (queryError) {
-        console.error(
-          "[createItem] Error querying existing items:",
-          queryError
+      // Logging only in development or when needed
+      if (!isProduction || finalExistingItems.length > 0) {
+        console.log(
+          `[createItem] Query result: Found ${
+            potentialItems?.length || 0
+          } potential items, ${
+            finalExistingItems.length
+          } with exact matching name+education_level`
         );
-        // Don't throw - continue with creation if query fails
-        // This prevents blocking item creation due to query issues
       }
-
-      console.log(
-        `[createItem] Found ${
-          finalExistingItems?.length || 0
-        } existing items with matching name and education_level (after filtering)`
-      );
 
       // Log all existing items for debugging
       if (finalExistingItems && finalExistingItems.length > 0) {

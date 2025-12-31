@@ -1,4 +1,5 @@
 const supabase = require("../config/supabase");
+const isProduction = process.env.NODE_ENV === "production";
 
 /**
  * Inventory Service
@@ -23,13 +24,14 @@ class InventoryService {
 
       const beginningInventory = item.beginning_inventory || 0;
       const purchases = item.purchases || 0;
-      
+
       // TODO: Calculate released and returns from orders/transactions
       // For now, we'll use stock as a proxy
       const released = 0;
       const returns = 0;
 
-      const endingInventory = beginningInventory + purchases - released + returns;
+      const endingInventory =
+        beginningInventory + purchases - released + returns;
       return Math.max(endingInventory, 0);
     } catch (error) {
       console.error("Calculate ending inventory error:", error);
@@ -44,7 +46,7 @@ class InventoryService {
   async calculateAvailable(itemId, size = null) {
     try {
       const endingInventory = await this.calculateEndingInventory(itemId, size);
-      
+
       // TODO: Calculate unreleased from orders table
       // Unreleased = SUM(quantity) from orders where status = 'pending' or 'confirmed'
       const unreleased = 0;
@@ -92,7 +94,8 @@ class InventoryService {
 
       // Check if expired (>365 days)
       const daysSinceStart = Math.floor(
-        (new Date() - new Date(item.beginning_inventory_date)) / (1000 * 60 * 60 * 24)
+        (new Date() - new Date(item.beginning_inventory_date)) /
+          (1000 * 60 * 60 * 24)
       );
 
       if (daysSinceStart > 365) {
@@ -117,9 +120,7 @@ class InventoryService {
       return { reset: false, daysSinceStart };
     } catch (error) {
       console.error("Check and reset beginning inventory error:", error);
-      throw new Error(
-        `Failed to check beginning inventory: ${error.message}`
-      );
+      throw new Error(`Failed to check beginning inventory: ${error.message}`);
     }
   }
 
@@ -128,8 +129,12 @@ class InventoryService {
    */
   async getInventoryReport(filters = {}) {
     try {
-      console.log(`[getInventoryReport] 🔄 Starting inventory report generation at ${new Date().toISOString()}`);
-      
+      if (!isProduction) {
+        console.log(
+          `[getInventoryReport] 🔄 Starting inventory report generation at ${new Date().toISOString()}`
+        );
+      }
+
       // Force fresh data by not using any caching
       let query = supabase
         .from("items")
@@ -150,46 +155,25 @@ class InventoryService {
 
       const { data: items, error, count } = await query;
       if (error) throw error;
-      
-      // Log all items with purchases > 0 to verify data is being read correctly
-      const itemsWithPurchases = items?.filter(i => (i.purchases || 0) > 0) || [];
-      if (itemsWithPurchases.length > 0) {
-        console.log(`[getInventoryReport] ✅ Found ${itemsWithPurchases.length} items with purchases > 0:`, 
-          itemsWithPurchases.map(i => ({
-            id: i.id,
-            name: i.name,
-            size: i.size,
-            purchases: i.purchases,
-            beginning_inventory: i.beginning_inventory,
-            stock: i.stock
-          }))
-        );
-      } else {
-        console.log(`[getInventoryReport] ⚠️ WARNING: No items found with purchases > 0! This might indicate a data issue.`);
-      }
 
-      // Log raw data from database to verify purchases values
-      console.log(`[getInventoryReport] Fetched ${items?.length || 0} items from database`);
-      if (items && items.length > 0) {
-        // Log items that might be the one we're looking for (Jersey, Junior Dress, etc.)
-        const sampleItems = items.filter(i => 
-          i.name?.toLowerCase().includes('jersey') || 
-          i.name?.toLowerCase().includes('junior dress') || 
-          i.name?.toLowerCase().includes('dress')
-        );
-        if (sampleItems.length > 0) {
-          console.log(`[getInventoryReport] Sample items from DB (Jersey/Dress):`, 
-            sampleItems.map(item => ({
-              id: item.id,
-              name: item.name,
-              size: item.size,
-              stock: item.stock,
-              beginning_inventory: item.beginning_inventory,
-              purchases: item.purchases,
-              created_at: item.created_at
-            }))
+      // Log all items with purchases > 0 to verify data is being read correctly (dev only)
+      if (!isProduction) {
+        const itemsWithPurchases =
+          items?.filter((i) => (i.purchases || 0) > 0) || [];
+        if (itemsWithPurchases.length > 0) {
+          console.log(
+            `[getInventoryReport] ✅ Found ${itemsWithPurchases.length} items with purchases > 0`
+          );
+        } else {
+          console.log(
+            `[getInventoryReport] ⚠️ WARNING: No items found with purchases > 0! This might indicate a data issue.`
           );
         }
+        console.log(
+          `[getInventoryReport] Fetched ${
+            items?.length || 0
+          } items from database`
+        );
       }
 
       // Split items by size - each size becomes a separate row
@@ -229,29 +213,30 @@ class InventoryService {
             if (variant.purchases !== undefined && variant.purchases !== null) {
               // Variant has its own purchases field - use it
               variantPurchases = Number(variant.purchases) || 0;
-              console.log(`[getInventoryReport] ✅ Using variant-level purchases for "${item.name}" size "${variantSize}": ${variantPurchases}`);
             } else {
               // Variant doesn't have purchases field - fall back to item-level (backward compatibility)
               variantPurchases = item.purchases || 0;
-              console.log(`[getInventoryReport] ⚠️ Variant "${variantSize}" for "${item.name}" lacks purchases field, using item-level purchases: ${variantPurchases}`);
             }
 
             // Read beginning_inventory from variant JSON field if available
             // Otherwise, fall back to item-level beginning_inventory
             let variantBeginningInventory;
-            if (variant.beginning_inventory !== undefined && variant.beginning_inventory !== null) {
-              variantBeginningInventory = Number(variant.beginning_inventory) || 0;
-              console.log(`[getInventoryReport] ✅ Using variant-level beginning_inventory for "${item.name}" size "${variantSize}": ${variantBeginningInventory}`);
+            if (
+              variant.beginning_inventory !== undefined &&
+              variant.beginning_inventory !== null
+            ) {
+              variantBeginningInventory =
+                Number(variant.beginning_inventory) || 0;
             } else {
               // Fallback: use item-level beginning_inventory (for items without per-variant tracking)
               variantBeginningInventory = item.beginning_inventory || 0;
-              console.log(`[getInventoryReport] ⚠️ Variant "${variantSize}" for "${item.name}" lacks beginning_inventory field, using item-level: ${variantBeginningInventory}`);
             }
 
             // Calculate ending inventory: Beginning Inventory + Purchases - Released + Returns
             // For now, Released and Returns are 0 (will be calculated from orders in frontend)
-            const endingInventory = variantBeginningInventory + variantPurchases;
-            
+            const endingInventory =
+              variantBeginningInventory + variantPurchases;
+
             // Calculate available: Ending Inventory - Unreleased
             // Unreleased will be calculated from orders in frontend, so for now use ending inventory
             // The frontend will subtract unreleased orders
@@ -283,7 +268,9 @@ class InventoryService {
               available,
               ending_inventory: endingInventory,
               unit_price: variantPrice,
-              total_amount: variantBeginningInventory * variantPrice + variantPurchases * variantPrice,
+              total_amount:
+                variantBeginningInventory * variantPrice +
+                variantPurchases * variantPrice,
               status: variantStatus,
               beginning_inventory_date: item.beginning_inventory_date,
               fiscal_year_start: item.fiscal_year_start,
@@ -331,7 +318,7 @@ class InventoryService {
 
               // Calculate ending inventory: Beginning Inventory + Purchases - Released + Returns
               const endingInventory = sizeBeginningInventory + sizePurchases;
-              
+
               // Calculate available: Ending Inventory - Unreleased
               // Unreleased will be calculated from orders in frontend
               const available = endingInventory; // Will be adjusted by frontend with unreleased count
@@ -345,39 +332,39 @@ class InventoryService {
               else if (sizeStock < 20) sizeStatus = "Critical";
               else if (sizeStock < 50) sizeStatus = "At Reorder Point";
 
-            reportData.push({
-              id: `${item.id}-${size}-${item.created_at || Date.now()}`, // Ensure uniqueness even for duplicates
-              item_id: item.id, // Keep original item ID
-              name: item.name,
-              education_level: item.education_level,
-              category: item.category,
-              item_type: item.item_type,
-              size: size,
-              stock: sizeStock,
-              beginning_inventory: sizeBeginningInventory,
-              purchases: sizePurchases,
-              released,
-              returns,
-              unreleased,
-              available,
-              ending_inventory: endingInventory,
-              unit_price: item.price,
-              total_amount:
-                sizeBeginningInventory * item.price +
-                sizePurchases * item.price,
-              status: sizeStatus,
-              beginning_inventory_date: item.beginning_inventory_date,
-              fiscal_year_start: item.fiscal_year_start,
-              created_at: item.created_at,
-              updated_at: item.updated_at,
-            });
+              reportData.push({
+                id: `${item.id}-${size}-${item.created_at || Date.now()}`, // Ensure uniqueness even for duplicates
+                item_id: item.id, // Keep original item ID
+                name: item.name,
+                education_level: item.education_level,
+                category: item.category,
+                item_type: item.item_type,
+                size: size,
+                stock: sizeStock,
+                beginning_inventory: sizeBeginningInventory,
+                purchases: sizePurchases,
+                released,
+                returns,
+                unreleased,
+                available,
+                ending_inventory: endingInventory,
+                unit_price: item.price,
+                total_amount:
+                  sizeBeginningInventory * item.price +
+                  sizePurchases * item.price,
+                status: sizeStatus,
+                beginning_inventory_date: item.beginning_inventory_date,
+                fiscal_year_start: item.fiscal_year_start,
+                created_at: item.created_at,
+                updated_at: item.updated_at,
+              });
             });
           } else {
             // Single size item - add as is
             // Calculate ending inventory: Beginning Inventory + Purchases - Released + Returns
             const endingInventory =
               (item.beginning_inventory || 0) + (item.purchases || 0);
-            
+
             // Calculate available: Ending Inventory - Unreleased
             // Don't use item.available from database as it might be outdated
             // The frontend will calculate unreleased from orders and subtract it
@@ -386,14 +373,17 @@ class InventoryService {
             const released = 0; // Calculated in frontend from orders
             const returns = 0;
 
-            // Log purchases value from database for debugging
-            // Log ALL items, but highlight items with purchases > 0
-            if ((item.purchases || 0) > 0) {
-              console.log(`[getInventoryReport] ✅ Single-size item WITH PURCHASES: id=${item.id}, name="${item.name}", size="${itemSize}", stock=${item.stock}, beginning_inventory=${item.beginning_inventory || 0}, purchases=${item.purchases || 0} (from DB)`);
-            } else {
-              console.log(`[getInventoryReport] Single-size item: id=${item.id}, name="${item.name}", size="${itemSize}", stock=${item.stock}, beginning_inventory=${item.beginning_inventory || 0}, purchases=${item.purchases || 0} (from DB)`);
+            // Log purchases value from database for debugging (dev only)
+            if (!isProduction && (item.purchases || 0) > 0) {
+              console.log(
+                `[getInventoryReport] ✅ Single-size item WITH PURCHASES: id=${
+                  item.id
+                }, name="${item.name}", size="${itemSize}", purchases=${
+                  item.purchases || 0
+                }`
+              );
             }
-            
+
             reportData.push({
               id: `${item.id}-${item.created_at || Date.now()}`, // Ensure uniqueness even for duplicates
               item_id: item.id, // Keep original item ID
@@ -424,90 +414,23 @@ class InventoryService {
         }
       }
 
-      // Comprehensive logging to track purchases values through report generation
-      console.log(`[getInventoryReport] ✅ Generated ${reportData.length} rows`);
-      
-      // Log summary of purchases values by item type
-      // Track which items had JSON variations for better logging
-      const itemsWithJsonVariations = new Set();
-      items.forEach(item => {
-        if (item.note) {
-          try {
-            const parsed = JSON.parse(item.note);
-            if (parsed?._type === "sizeVariations" && parsed?.sizeVariations?.length > 0) {
-              itemsWithJsonVariations.add(item.id);
-            }
-          } catch (e) {}
-        }
-      });
-      
-      const jsonVariantRows = reportData.filter(row => itemsWithJsonVariations.has(row.item_id));
-      const singleSizeRows = reportData.filter(row => !itemsWithJsonVariations.has(row.item_id));
-      
-      console.log(`[getInventoryReport] 📊 Report breakdown: ${jsonVariantRows.length} JSON variant rows, ${singleSizeRows.length} single-size/comma-separated rows`);
-      
-      // Log all items with purchases > 0 to verify they're included
-      const rowsWithPurchases = reportData.filter(row => (row.purchases || 0) > 0);
-      if (rowsWithPurchases.length > 0) {
-        console.log(`[getInventoryReport] ✅ Found ${rowsWithPurchases.length} rows with purchases > 0:`, 
-          rowsWithPurchases.map(r => ({
-            name: r.name,
-            size: r.size,
-            purchases: r.purchases,
-            beginning_inventory: r.beginning_inventory,
-            stock: r.stock,
-            source: itemsWithJsonVariations.has(r.item_id) ? 'JSON variant' : 'Single-size'
-          }))
+      // Comprehensive logging to track purchases values through report generation (dev only)
+      if (!isProduction) {
+        console.log(
+          `[getInventoryReport] ✅ Generated ${reportData.length} rows`
         );
-      } else {
-        console.log(`[getInventoryReport] ⚠️ WARNING: No rows with purchases > 0 in report!`);
-      }
-      
-      // Log JSON variant rows specifically to verify purchases are being read correctly
-      const jsonVariantRowsWithPurchases = jsonVariantRows.filter(row => (row.purchases || 0) > 0);
-      if (jsonVariantRowsWithPurchases.length > 0) {
-        console.log(`[getInventoryReport] ✅ JSON variant rows with purchases: ${jsonVariantRowsWithPurchases.length}`, 
-          jsonVariantRowsWithPurchases.map(r => ({
-            name: r.name,
-            size: r.size,
-            purchases: r.purchases,
-            beginning_inventory: r.beginning_inventory
-          }))
+
+        const rowsWithPurchases = reportData.filter(
+          (row) => (row.purchases || 0) > 0
         );
-      } else if (jsonVariantRows.length > 0) {
-        console.log(`[getInventoryReport] ⚠️ WARNING: ${jsonVariantRows.length} JSON variant rows found, but none have purchases > 0!`);
-      }
-      
-      // Log sample rows to verify purchases values
-      if (reportData.length > 0) {
-        // Find items that might be the problematic ones (Jersey, etc.)
-        const sampleRows = reportData.filter(r => 
-          r.name?.toLowerCase().includes('jersey') || 
-          r.name?.toLowerCase().includes('junior dress') ||
-          r.name?.toLowerCase().includes('dress')
-        );
-        if (sampleRows.length > 0) {
-          console.log('[getInventoryReport] Sample rows (Jersey/Dress):', 
-            sampleRows.map(r => ({
-              id: r.id,
-              name: r.name,
-              size: r.size,
-              beginning_inventory: r.beginning_inventory,
-              purchases: r.purchases,
-              stock: r.stock,
-              item_id: r.item_id
-            }))
+        if (rowsWithPurchases.length > 0) {
+          console.log(
+            `[getInventoryReport] ✅ Found ${rowsWithPurchases.length} rows with purchases > 0`
           );
         } else {
-          console.log('[getInventoryReport] Sample row (first):', {
-            id: reportData[0].id,
-            name: reportData[0].name,
-            size: reportData[0].size,
-            beginning_inventory: reportData[0].beginning_inventory,
-            purchases: reportData[0].purchases,
-            stock: reportData[0].stock,
-            item_id: reportData[0].item_id
-          });
+          console.log(
+            `[getInventoryReport] ⚠️ WARNING: No rows with purchases > 0 in report!`
+          );
         }
       }
 
@@ -532,8 +455,12 @@ class InventoryService {
    */
   async addStock(itemId, quantity, size = null, unitPrice = null, io = null) {
     try {
-      console.log(`[addStock] 🚀 Starting addStock: itemId=${itemId}, quantity=${quantity}, size="${size}", unitPrice=${unitPrice}`);
-      
+      if (!isProduction) {
+        console.log(
+          `[addStock] 🚀 Starting addStock: itemId=${itemId}, quantity=${quantity}, size="${size}", unitPrice=${unitPrice}`
+        );
+      }
+
       // Check and reset beginning inventory if expired
       await this.checkAndResetBeginningInventory(itemId);
 
@@ -551,8 +478,16 @@ class InventoryService {
         console.error(`[addStock] ❌ Item not found: itemId=${itemId}`);
         throw new Error("Item not found");
       }
-      
-      console.log(`[addStock] 📦 Current item state: stock=${item.stock}, purchases=${item.purchases || 0}, beginning_inventory=${item.beginning_inventory || 0}, size="${item.size}"`);
+
+      if (!isProduction) {
+        console.log(
+          `[addStock] 📦 Current item state: stock=${item.stock}, purchases=${
+            item.purchases || 0
+          }, beginning_inventory=${item.beginning_inventory || 0}, size="${
+            item.size
+          }"`
+        );
+      }
 
       // Check if this is a size-specific item with JSON variations
       let isJsonVariant = false;
@@ -607,7 +542,8 @@ class InventoryService {
 
         // IMPORTANT: Add to purchases per variant in JSON structure
         // Store purchases at variant level for accurate tracking per size
-        const currentVariantPurchases = Number(parsedNote.sizeVariations[variantIndex].purchases) || 0;
+        const currentVariantPurchases =
+          Number(parsedNote.sizeVariations[variantIndex].purchases) || 0;
         const newVariantPurchases = currentVariantPurchases + quantity;
         parsedNote.sizeVariations[variantIndex].purchases = newVariantPurchases;
 
@@ -615,7 +551,11 @@ class InventoryService {
         const newPurchases = (item.purchases || 0) + quantity;
         // beginning_inventory remains the same - never changes after first creation
 
-        console.log(`[addStock] 📊 Variant purchases update (JSON variant): variant="${variant.size}", current=${currentVariantPurchases}, adding=${quantity}, new=${newVariantPurchases}`);
+        if (!isProduction) {
+          console.log(
+            `[addStock] 📊 Variant purchases update (JSON variant): variant="${variant.size}", current=${currentVariantPurchases}, adding=${quantity}, new=${newVariantPurchases}`
+          );
+        }
 
         const updateData = {
           stock: newTotalStock,
@@ -630,8 +570,6 @@ class InventoryService {
           updateData.note = JSON.stringify(parsedNote);
         }
 
-        console.log(`[addStock] 📝 Updating database (JSON variant) with:`, updateData);
-        
         const { data, error } = await supabase
           .from("items")
           .update(updateData)
@@ -640,51 +578,52 @@ class InventoryService {
           .single();
 
         if (error) {
-          console.error(`[addStock] ❌ Database update error (JSON variant):`, error);
+          console.error(
+            `[addStock] ❌ Database update error (JSON variant):`,
+            error
+          );
           throw error;
         }
 
-        console.log(
-          `[addStock] ✅ Update successful (JSON variant): updated_stock=${data?.stock}, updated_purchases=${data?.purchases}, beginning_inventory=${data?.beginning_inventory}`
-        );
-        
-        // Verify purchases was actually updated
-        if (data.purchases === undefined || data.purchases === null) {
-          console.error(`[addStock] ⚠️ WARNING: Updated item (JSON variant) does not have purchases field! Data:`, JSON.stringify(data, null, 2));
-        } else if (data.purchases !== newPurchases) {
-          console.error(`[addStock] ⚠️ WARNING: Purchases mismatch (JSON variant)! Expected ${newPurchases}, got ${data.purchases}`);
-        } else {
-          console.log(`[addStock] ✅ Verified (JSON variant): purchases correctly updated to ${data.purchases}`);
+        if (!isProduction) {
+          console.log(
+            `[addStock] ✅ Update successful (JSON variant): updated_stock=${data?.stock}, updated_purchases=${data?.purchases}, beginning_inventory=${data?.beginning_inventory}`
+          );
         }
-        
-        // CRITICAL: Re-fetch the item from database to verify the update persisted
-        console.log(`[addStock] 🔍 Re-fetching item from database to verify persistence (JSON variant)...`);
-        await new Promise(resolve => setTimeout(resolve, 100)); // Small delay to ensure commit
-        const { data: verifyData, error: verifyError } = await supabase
-          .from("items")
-          .select("*")
-          .eq("id", itemId)
-          .single();
-        
-        if (verifyError) {
-          console.error(`[addStock] ❌ Error verifying update (JSON variant):`, verifyError);
-        } else {
-          console.log(`[addStock] 🔍 Verification query result (JSON variant):`, {
-            id: verifyData.id,
-            stock: verifyData.stock,
-            purchases: verifyData.purchases,
-            beginning_inventory: verifyData.beginning_inventory,
-            updated_at: verifyData.updated_at
-          });
-          
-          if (verifyData.purchases !== newPurchases) {
-            console.error(`[addStock] ❌ CRITICAL: Database verification failed (JSON variant)! Purchases not persisted correctly. Expected ${newPurchases}, got ${verifyData.purchases}`);
+
+        // Verify purchases was actually updated (always check, but only log errors)
+        if (data.purchases === undefined || data.purchases === null) {
+          console.error(
+            `[addStock] ⚠️ WARNING: Updated item (JSON variant) does not have purchases field!`
+          );
+        } else if (data.purchases !== newPurchases) {
+          console.error(
+            `[addStock] ⚠️ WARNING: Purchases mismatch (JSON variant)! Expected ${newPurchases}, got ${data.purchases}`
+          );
+        }
+
+        // CRITICAL: Re-fetch the item from database to verify the update persisted (dev only)
+        if (!isProduction) {
+          await new Promise((resolve) => setTimeout(resolve, 100)); // Small delay to ensure commit
+          const { data: verifyData, error: verifyError } = await supabase
+            .from("items")
+            .select("*")
+            .eq("id", itemId)
+            .single();
+
+          if (verifyError) {
+            console.error(
+              `[addStock] ❌ Error verifying update (JSON variant):`,
+              verifyError
+            );
+          } else if (verifyData.purchases !== newPurchases) {
+            console.error(
+              `[addStock] ❌ CRITICAL: Database verification failed (JSON variant)! Purchases not persisted correctly. Expected ${newPurchases}, got ${verifyData.purchases}`
+            );
             // Use verified data if it's different
             data.purchases = verifyData.purchases;
             data.stock = verifyData.stock;
             data.beginning_inventory = verifyData.beginning_inventory;
-          } else {
-            console.log(`[addStock] ✅ Database verification passed (JSON variant): purchases=${verifyData.purchases} persisted correctly`);
           }
         }
 
@@ -699,14 +638,16 @@ class InventoryService {
         const currentPurchases = item.purchases || 0;
         const currentBeginningInventory = item.beginning_inventory || 0;
         const newStock = currentStock + quantity;
-        
+
         // IMPORTANT: Add to purchases, beginning_inventory stays unchanged
         const newPurchases = currentPurchases + quantity;
         // beginning_inventory remains the same - never changes after first creation
 
-        console.log(
-          `[addStock] Updating item ${itemId}: current_stock=${currentStock}, current_purchases=${currentPurchases}, adding=${quantity}, new_stock=${newStock}, new_purchases=${newPurchases}, beginning_inventory=${currentBeginningInventory} (unchanged)`
-        );
+        if (!isProduction) {
+          console.log(
+            `[addStock] Updating item ${itemId}: current_stock=${currentStock}, current_purchases=${currentPurchases}, adding=${quantity}, new_stock=${newStock}, new_purchases=${newPurchases}, beginning_inventory=${currentBeginningInventory} (unchanged)`
+          );
+        }
 
         const updateData = {
           stock: newStock,
@@ -719,8 +660,6 @@ class InventoryService {
           updateData.price = unitPrice;
         }
 
-        console.log(`[addStock] 📝 Updating database with:`, updateData);
-        
         const { data, error } = await supabase
           .from("items")
           .update(updateData)
@@ -733,48 +672,45 @@ class InventoryService {
           throw error;
         }
 
-        console.log(
-          `[addStock] ✅ Update successful: updated_stock=${data?.stock}, updated_purchases=${data?.purchases}, beginning_inventory=${data?.beginning_inventory}`
-        );
-        
-        // Verify purchases was actually updated
-        if (data.purchases === undefined || data.purchases === null) {
-          console.error(`[addStock] ⚠️ WARNING: Updated item does not have purchases field! Data:`, JSON.stringify(data, null, 2));
-        } else if (data.purchases !== newPurchases) {
-          console.error(`[addStock] ⚠️ WARNING: Purchases mismatch! Expected ${newPurchases}, got ${data.purchases}`);
-        } else {
-          console.log(`[addStock] ✅ Verified: purchases correctly updated to ${data.purchases}`);
+        if (!isProduction) {
+          console.log(
+            `[addStock] ✅ Update successful: updated_stock=${data?.stock}, updated_purchases=${data?.purchases}, beginning_inventory=${data?.beginning_inventory}`
+          );
         }
-        
-        // CRITICAL: Re-fetch the item from database to verify the update persisted
-        console.log(`[addStock] 🔍 Re-fetching item from database to verify persistence...`);
-        await new Promise(resolve => setTimeout(resolve, 100)); // Small delay to ensure commit
-        const { data: verifyData, error: verifyError } = await supabase
-          .from("items")
-          .select("*")
-          .eq("id", itemId)
-          .single();
-        
-        if (verifyError) {
-          console.error(`[addStock] ❌ Error verifying update:`, verifyError);
-        } else {
-          console.log(`[addStock] 🔍 Verification query result:`, {
-            id: verifyData.id,
-            stock: verifyData.stock,
-            purchases: verifyData.purchases,
-            beginning_inventory: verifyData.beginning_inventory,
-            updated_at: verifyData.updated_at
-          });
-          
-          if (verifyData.purchases !== newPurchases) {
-            console.error(`[addStock] ❌ CRITICAL: Database verification failed! Purchases not persisted correctly. Expected ${newPurchases}, got ${verifyData.purchases}`);
-            console.error(`[addStock] This suggests a trigger or transaction issue. Check database triggers.`);
+
+        // Verify purchases was actually updated (always check, but only log errors)
+        if (data.purchases === undefined || data.purchases === null) {
+          console.error(
+            `[addStock] ⚠️ WARNING: Updated item does not have purchases field!`
+          );
+        } else if (data.purchases !== newPurchases) {
+          console.error(
+            `[addStock] ⚠️ WARNING: Purchases mismatch! Expected ${newPurchases}, got ${data.purchases}`
+          );
+        }
+
+        // CRITICAL: Re-fetch the item from database to verify the update persisted (dev only)
+        if (!isProduction) {
+          await new Promise((resolve) => setTimeout(resolve, 100)); // Small delay to ensure commit
+          const { data: verifyData, error: verifyError } = await supabase
+            .from("items")
+            .select("*")
+            .eq("id", itemId)
+            .single();
+
+          if (verifyError) {
+            console.error(`[addStock] ❌ Error verifying update:`, verifyError);
+          } else if (verifyData.purchases !== newPurchases) {
+            console.error(
+              `[addStock] ❌ CRITICAL: Database verification failed! Purchases not persisted correctly. Expected ${newPurchases}, got ${verifyData.purchases}`
+            );
+            console.error(
+              `[addStock] This suggests a trigger or transaction issue. Check database triggers.`
+            );
             // Use verified data if it's different
             data.purchases = verifyData.purchases;
             data.stock = verifyData.stock;
             data.beginning_inventory = verifyData.beginning_inventory;
-          } else {
-            console.log(`[addStock] ✅ Database verification passed: purchases=${verifyData.purchases} persisted correctly`);
           }
         }
 
@@ -789,16 +725,18 @@ class InventoryService {
             size: data.size,
             updated_at: data.updated_at,
           });
-          console.log(`[addStock] Emitted item:updated event for item ${data.id}`);
+          console.log(
+            `[addStock] Emitted item:updated event for item ${data.id}`
+          );
         }
 
-        // Verify response includes purchases
+        // Verify response includes purchases (always check, but only log errors)
         if (!data.purchases && data.purchases !== 0) {
-          console.error(`[addStock] ⚠️ WARNING: Response data missing purchases field!`, JSON.stringify(data, null, 2));
+          console.error(
+            `[addStock] ⚠️ WARNING: Response data missing purchases field!`
+          );
         }
-        
-        console.log(`[addStock] ✅ Returning response with purchases=${data.purchases}`);
-        
+
         return {
           success: true,
           data,
@@ -840,12 +778,9 @@ class InventoryService {
       };
     } catch (error) {
       console.error("Reset beginning inventory error:", error);
-      throw new Error(
-        `Failed to reset beginning inventory: ${error.message}`
-      );
+      throw new Error(`Failed to reset beginning inventory: ${error.message}`);
     }
   }
 }
 
 module.exports = new InventoryService();
-

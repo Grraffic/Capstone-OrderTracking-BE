@@ -3,6 +3,10 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
+const compression = require("compression");
+const helmet = require("helmet");
+const morgan = require("morgan");
+const rateLimit = require("express-rate-limit");
 const routes = require("./src/routes");
 const passport = require("passport");
 // const { notFound, errorHandler } = require("./middleware/errorHandler");
@@ -10,6 +14,7 @@ const passport = require("passport");
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
+const isProduction = process.env.NODE_ENV === "production";
 
 // ============================================================================
 // SOCKET.IO CONFIGURATION
@@ -38,6 +43,34 @@ app.set("io", io);
 // ============================================================================
 // MIDDLEWARE CONFIGURATION
 // ============================================================================
+
+// Security headers
+app.use(helmet({
+  contentSecurityPolicy: false, // Disable CSP for API (can be configured if needed)
+  crossOriginEmbedderPolicy: false,
+}));
+
+// Compression middleware - compress responses
+app.use(compression());
+
+// Request logging - only in development or with specific format
+if (!isProduction) {
+  app.use(morgan("dev"));
+} else {
+  app.use(morgan("combined"));
+}
+
+// Rate limiting - protect against brute force attacks
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: isProduction ? 100 : 1000, // Limit each IP to 100 requests per windowMs in production
+  message: "Too many requests from this IP, please try again later.",
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Apply rate limiting to all API routes
+app.use("/api", limiter);
 
 // CORS Configuration - Allow requests from frontend
 const corsOptions = {

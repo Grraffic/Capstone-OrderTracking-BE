@@ -1,0 +1,244 @@
+BACKEND DEPENDENCY GRAPH
+========================
+
+This is a text-based representation of how all files connect in the backend.
+
+ENTRY POINT
+-----------
+server.js
+  ├─> src/routes/index.js (main router)
+  ├─> src/config/database.js (DB connection)
+  └─> Socket.IO (real-time)
+
+MAIN ROUTER
+-----------
+src/routes/index.js
+  ├─> src/routes/auth.js
+  ├─> src/routes/items.js
+  ├─> src/routes/orders.js
+  ├─> src/routes/cart.js
+  ├─> src/routes/notification.js
+  └─> src/controllers/contact.controller.js
+
+AUTHENTICATION ROUTES
+---------------------
+src/routes/auth.js
+  ├─> src/config/passport.js
+  │     ├─> src/config/supabase.js
+  │     ├─> src/config/admin.js
+  │     └─> src/utils/avatarGenerator.js
+  ├─> src/controllers/auth.controller.js
+  ├─> src/middleware/auth.js
+  │     └─> jsonwebtoken (package)
+  ├─> src/config/supabase.js
+  ├─> src/services/cloudinary.service.js
+  │     └─> src/config/cloudinary.js
+  └─> src/utils/avatarGenerator.js
+
+ITEMS ROUTES
+------------
+src/routes/items.js
+  └─> src/controllers/items.controller.js
+        ├─> src/services/items.service.js
+        │     ├─> src/config/supabase.js
+        │     ├─> src/services/notification.service.js
+        │     │     └─> src/config/supabase.js
+        │     ├─> src/services/order.service.js
+        │     │     ├─> src/config/supabase.js
+        │     │     └─> src/utils/qrCodeGenerator.js
+        │     └─> src/services/inventory.service.js
+        │           └─> src/config/supabase.js
+        └─> src/services/cloudinary.service.js
+              └─> src/config/cloudinary.js
+
+ORDERS ROUTES
+-------------
+src/routes/orders.js
+  └─> src/controllers/order.controller.js
+        └─> src/services/order.service.js
+              ├─> src/config/supabase.js
+              └─> src/utils/qrCodeGenerator.js
+
+CART ROUTES
+-----------
+src/routes/cart.js
+  └─> src/controllers/cart.controller.js
+        └─> src/services/cart.service.js
+              └─> src/config/supabase.js
+
+NOTIFICATION ROUTES
+-------------------
+src/routes/notification.js
+  └─> src/controllers/notification.controller.js
+        └─> src/services/notification.service.js
+              └─> src/config/supabase.js
+
+CONFIGURATION FILES
+-------------------
+src/config/database.js
+  ├─> postgres (package)
+  └─> dotenv (package)
+
+src/config/supabase.js
+  ├─> @supabase/supabase-js (package)
+  └─> dotenv (package)
+
+src/config/passport.js
+  ├─> passport (package)
+  ├─> passport-google-oauth20 (package)
+  ├─> src/config/supabase.js
+  ├─> src/config/admin.js
+  └─> src/utils/avatarGenerator.js
+
+src/config/cloudinary.js
+  ├─> cloudinary (package)
+  └─> dotenv (package)
+
+src/config/admin.js
+  (standalone configuration file)
+
+MIDDLEWARE
+----------
+src/middleware/auth.js
+  ├─> jsonwebtoken (package)
+  └─> dotenv (package)
+
+UTILITIES
+---------
+src/utils/avatarGenerator.js
+  (standalone utility functions)
+
+src/utils/qrCodeGenerator.js
+  (standalone utility functions)
+
+MODELS
+------
+src/models/contactFormSchema/contactSchema.js
+  (validation schema)
+
+SERVICES LAYER
+--------------
+src/services/items.service.js
+  ├─> src/config/supabase.js
+  ├─> src/services/notification.service.js
+  ├─> src/services/order.service.js
+  └─> src/services/inventory.service.js
+
+src/services/order.service.js
+  ├─> src/config/supabase.js
+  └─> src/utils/qrCodeGenerator.js
+
+src/services/inventory.service.js
+  └─> src/config/supabase.js
+
+src/services/notification.service.js
+  └─> src/config/supabase.js
+
+src/services/cart.service.js
+  └─> src/config/supabase.js
+
+src/services/cloudinary.service.js
+  └─> src/config/cloudinary.js
+
+src/services/product.service.js
+  └─> src/models/productSchema (if exists)
+
+EXTERNAL DEPENDENCIES
+--------------------
+Packages:
+  - express
+  - @supabase/supabase-js
+  - passport
+  - passport-google-oauth20
+  - socket.io
+  - jsonwebtoken
+  - cloudinary
+  - helmet
+  - cors
+  - compression
+  - express-rate-limit
+  - morgan
+  - postgres
+  - dotenv
+
+CIRCULAR DEPENDENCIES
+---------------------
+⚠️  Note: Circular dependency exists between:
+    - src/services/items.service.js
+    - src/services/order.service.js
+    
+    This is handled by requiring OrderService inside methods
+    rather than at the top level.
+
+DATA FLOW EXAMPLE: Creating an Order
+-------------------------------------
+1. POST /api/orders
+   ↓
+2. routes/orders.js
+   ↓
+3. controllers/order.controller.js
+   ↓
+4. services/order.service.js
+   ├─> Generate QR code (utils/qrCodeGenerator.js)
+   ├─> Insert order (config/supabase.js → Database)
+   └─> Update inventory (config/supabase.js → Database)
+   ↓
+5. Socket.IO emit (server.js → io instance)
+   ↓
+6. Response to client
+
+DATA FLOW EXAMPLE: Restocking an Item
+--------------------------------------
+1. PUT /api/items/:id
+   ↓
+2. routes/items.js
+   ↓
+3. controllers/items.controller.js
+   ↓
+4. services/items.service.js
+   ├─> Update item (config/supabase.js → Database)
+   └─> Handle restock notifications
+       ↓
+5. services/notification.service.js
+   ├─> Find pre-orders (config/supabase.js → Database)
+   └─> Create notifications (config/supabase.js → Database)
+       ↓
+6. services/order.service.js
+   └─> Convert pre-orders to regular (config/supabase.js → Database)
+       ↓
+7. Socket.IO emit notifications
+   ↓
+8. Response to client
+
+DATA FLOW EXAMPLE: Google OAuth Login
+--------------------------------------
+1. GET /api/auth/google
+   ↓
+2. routes/auth.js
+   ↓
+3. config/passport.js → GoogleStrategy
+   ├─> Validate email domain (config/admin.js)
+   ├─> Upsert user (config/supabase.js → Database)
+   └─> Generate avatar (utils/avatarGenerator.js)
+   ↓
+4. controllers/auth.controller.js → oauthCallback()
+   ├─> Generate JWT (jsonwebtoken)
+   └─> Return token
+   ↓
+5. Response to client
+
+SUMMARY
+-------
+Total Files: ~50+ files
+- Entry Point: 1 (server.js)
+- Routes: 6 files
+- Controllers: 7 files
+- Services: 7 files
+- Config: 5 files
+- Middleware: 1 file
+- Utils: 2 files
+- Models: 1+ files
+
+All files follow a clear dependency chain:
+Routes → Controllers → Services → Database
+
