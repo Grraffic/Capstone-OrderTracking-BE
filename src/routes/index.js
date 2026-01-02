@@ -2,10 +2,12 @@ const express = require("express");
 const router = express.Router();
 const contactController = require("../controllers/contact.controller");
 const authRoutes = require("./auth");
-const itemsRoutes = require("./items");
-const orderRoutes = require("./orders");
+const itemsRoutes = require("./property_custodian/items");
+const orderRoutes = require("./property_custodian/orders");
 const cartRoutes = require("./cart");
 const notificationRoutes = require("./notification");
+const userRoutes = require("./system_admin/users");
+const emailRoleAssignmentRoutes = require("./system_admin/emailRoleAssignments");
 
 // Contact routes
 router.post("/contact", contactController.createContact);
@@ -28,5 +30,11 @@ router.use("/cart", cartRoutes);
 
 // Notification routes
 router.use("/notifications", notificationRoutes);
+
+// User management routes (System Admin only)
+router.use("/users", userRoutes);
+
+// Email role assignment routes (System Admin only)
+router.use("/system-admin/email-role-assignments", emailRoleAssignmentRoutes);
 
 module.exports = router;

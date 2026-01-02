@@ -39,6 +39,8 @@ function requireRole(requiredRoles) {
 module.exports = {
   verifyToken,
   requireRole,
-  requireAdmin: requireRole("admin"),
+  requireAdmin: requireRole("admin"), // Keep for backward compatibility
+  requirePropertyCustodian: requireRole("property_custodian"),
+  requireSystemAdmin: requireRole("system_admin"),
   requireStudent: requireRole("student"),
 };

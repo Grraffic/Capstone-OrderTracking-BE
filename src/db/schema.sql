@@ -59,9 +59,9 @@ create policy "Read active products"
   on products for select
   using (is_active = true);
 
--- Policy for admin operations (create, update, delete)
-create policy "Admin full access"
+-- Policy for property custodian and system admin operations (create, update, delete)
+create policy "Property Custodian and System Admin full access"
   on products for all
   using (auth.role() = 'authenticated' and auth.user_id() in (
-    select user_id from user_roles where role = 'admin'
+    select user_id from user_roles where role IN ('property_custodian', 'system_admin')
   ));

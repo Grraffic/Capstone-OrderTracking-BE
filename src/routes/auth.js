@@ -44,7 +44,7 @@ router.get("/profile", verifyToken, async (req, res) => {
     }
 
     const userRole = data?.role || tokenUser.role;
-    const isAdmin = userRole === "admin";
+    const isAdmin = userRole === "property_custodian" || userRole === "system_admin";
 
     const profile = {
       id: tokenUser.id,
@@ -154,7 +154,7 @@ router.put("/profile", verifyToken, async (req, res) => {
       .maybeSingle();
 
     const userRole = currentUser?.role || tokenUser.role;
-    const isAdmin = userRole === "admin";
+    const isAdmin = userRole === "property_custodian" || userRole === "system_admin";
 
     // Prepare update data
     const updateData = {

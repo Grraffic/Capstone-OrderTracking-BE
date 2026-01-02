@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const itemsController = require("../controllers/items.controller");
+const itemsController = require("../../controllers/property_custodian/items.controller");
 // const auth = require("../middleware/auth"); // Uncomment when auth middleware is ready
 
 /**

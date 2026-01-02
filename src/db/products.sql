@@ -60,12 +60,12 @@ create policy "Enable read access for all users"
   on products for select
   using (is_active = true);
 
-create policy "Enable all access for authenticated users with admin role"
+create policy "Enable all access for authenticated users with property custodian or system admin role"
   on products for all
   using (
     auth.role() = 'authenticated' 
     and auth.uid() in (
-      select user_id from user_roles where role = 'admin'
+      select user_id from user_roles where role IN ('property_custodian', 'system_admin')
     )
   );
 

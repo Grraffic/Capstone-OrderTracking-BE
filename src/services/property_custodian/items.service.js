@@ -1,5 +1,5 @@
-const supabase = require("../config/supabase");
-const NotificationService = require("./notification.service");
+const supabase = require("../../config/supabase");
+const NotificationService = require("../notification.service");
 const OrderService = require("./order.service");
 const isProduction = process.env.NODE_ENV === "production";
 

@@ -1,5 +1,5 @@
-const supabase = require("../config/supabase");
-const { generateOrderReceiptQRData } = require("../utils/qrCodeGenerator");
+const supabase = require("../../config/supabase");
+const { generateOrderReceiptQRData } = require("../../utils/qrCodeGenerator");
 const isProduction = process.env.NODE_ENV === "production";
 
 /**

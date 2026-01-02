@@ -1,4 +1,4 @@
-const OrderService = require("../services/order.service");
+const OrderService = require("../../services/property_custodian/order.service");
 
 /**
  * Order Controller

@@ -1,6 +1,6 @@
-const ItemsService = require("../services/items.service");
-const NotificationService = require("../services/notification.service");
-const { uploadImage } = require("../services/cloudinary.service");
+const ItemsService = require("../../services/property_custodian/items.service");
+const NotificationService = require("../../services/notification.service");
+const { uploadImage } = require("../../services/cloudinary.service");
 
 /**
  * Items Controller
@@ -340,7 +340,7 @@ class ItemsController {
    */
   async getInventoryReport(req, res) {
     try {
-      const InventoryService = require("../services/inventory.service");
+      const InventoryService = require("../../services/property_custodian/inventory.service");
       const result = await InventoryService.getInventoryReport(req.query);
       res.json(result);
     } catch (error) {
@@ -370,7 +370,7 @@ class ItemsController {
         });
       }
 
-      const InventoryService = require("../services/inventory.service");
+      const InventoryService = require("../../services/property_custodian/inventory.service");
       const result = await InventoryService.addStock(id, quantity, size, unitPrice, io);
       res.json(result);
     } catch (error) {
@@ -389,7 +389,7 @@ class ItemsController {
   async resetBeginningInventory(req, res) {
     try {
       const { id } = req.params;
-      const InventoryService = require("../services/inventory.service");
+      const InventoryService = require("../../services/property_custodian/inventory.service");
       const result = await InventoryService.resetBeginningInventory(id);
       res.json(result);
     } catch (error) {

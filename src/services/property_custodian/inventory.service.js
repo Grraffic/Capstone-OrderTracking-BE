@@ -1,4 +1,4 @@
-const supabase = require("../config/supabase");
+const supabase = require("../../config/supabase");
 const isProduction = process.env.NODE_ENV === "production";
 
 /**

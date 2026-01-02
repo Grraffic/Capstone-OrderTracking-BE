@@ -2,7 +2,13 @@ const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 const supabase = require("./supabase");
 const { getProfilePictureUrl } = require("../utils/avatarGenerator");
-const { isSpecialAdmin, getSpecialAdminEmails } = require("./admin");
+const {
+  isSpecialAdmin,
+  isSystemAdmin,
+  getSpecialAdminEmails,
+  getSystemAdminEmails,
+} = require("./admin");
+const emailRoleAssignmentService = require("../services/system_admin/emailRoleAssignment.service");
 
 require("dotenv").config();
 
@@ -47,21 +53,74 @@ passport.use(
 
         const normalizedEmail = email.toLowerCase();
 
-        const isStudent = normalizedEmail.endsWith("@student.laverdad.edu.ph");
-        // Allow standard admin domain and specific personal admin emails
-        // See backend/src/config/admin.js for configuration
-        const isSpecialAdminEmail = isSpecialAdmin(normalizedEmail);
-        const isAdmin =
-          normalizedEmail.endsWith("@laverdad.edu.ph") || isSpecialAdminEmail;
+        // Debug logging
+        console.log("🔍 Role determination for email:", normalizedEmail);
 
-        if (!isStudent && !isAdmin) {
-          console.error("Invalid email domain:", email);
-          console.error("Allowed Special Admins:", getSpecialAdminEmails());
-          return done(new Error("Email domain not allowed"));
+        // STEP 1: Check email_role_assignments table first (system admin assigned roles)
+        let role = null;
+        let assignedRole = null;
+        try {
+          const assignment =
+            await emailRoleAssignmentService.getEmailRoleAssignment(
+              normalizedEmail
+            );
+          if (assignment) {
+            assignedRole = assignment.role;
+            role = assignedRole;
+            console.log("✅ Found role assignment in database:", assignedRole);
+          }
+        } catch (error) {
+          console.warn(
+            "⚠️ Error checking email_role_assignments:",
+            error.message
+          );
+          // Continue to fallback logic
         }
 
-        const role = isAdmin ? "admin" : "student";
-        console.log("Assigned role:", role);
+        // STEP 2: If no assignment found, check for student email
+        if (!role) {
+          const isStudent = normalizedEmail.endsWith(
+            "@student.laverdad.edu.ph"
+          );
+          if (isStudent) {
+            role = "student";
+            console.log(
+              "✅ Assigning STUDENT role (automatic for @student.laverdad.edu.ph)"
+            );
+          } else {
+            // STEP 3: Check admin.js for initial bootstrap (only for first system admin setup)
+            // This is a fallback for initial system admin setup via env vars
+            const isSystemAdminEmail = isSystemAdmin(normalizedEmail);
+            const isSpecialAdminEmail = isSpecialAdmin(normalizedEmail);
+
+            if (isSystemAdminEmail) {
+              role = "system_admin";
+              console.log(
+                "✅ Assigning SYSTEM_ADMIN role (from env var bootstrap)"
+              );
+            } else if (isSpecialAdminEmail) {
+              role = "property_custodian";
+              console.log(
+                "✅ Assigning PROPERTY_CUSTODIAN role (from env var bootstrap)"
+              );
+            } else {
+              // No assignment found and not a student email - reject login
+              console.error("❌ Invalid email domain:", email);
+              console.error("  - Not found in email_role_assignments table");
+              console.error(
+                "  - Not a student email (@student.laverdad.edu.ph)"
+              );
+              console.error("  - Not in admin.js bootstrap list");
+              return done(
+                new Error(
+                  "Email not authorized. Please contact system administrator to be added to the system."
+                )
+              );
+            }
+          }
+        }
+
+        console.log("Final assigned role:", role);
 
         // Extract profile picture from Google or generate initials-based avatar
         // Log the profile structure to debug photo extraction
@@ -80,10 +139,10 @@ passport.use(
           photo_url: photoUrl,
           avatar_url: photoUrl, // Keep both fields in sync for compatibility
           updated_at: new Date().toISOString(), // Ensure updated_at is set
-          // Ensure student fields are NULL for admins
-          course_year_level: isAdmin ? null : undefined,
-          student_number: isAdmin ? null : undefined,
-          education_level: isAdmin ? null : undefined,
+          // Ensure student fields are NULL for admins (both property_custodian and system_admin)
+          course_year_level: role !== "student" ? null : undefined,
+          student_number: role !== "student" ? null : undefined,
+          education_level: role !== "student" ? null : undefined,
         };
 
         console.log("Upserting user:", userRow);
@@ -119,8 +178,8 @@ passport.use(
           updated_at: new Date().toISOString(),
         };
 
-        // Ensure student fields are NULL for admins
-        if (isAdmin) {
+        // Ensure student fields are NULL for admins (both property_custodian and system_admin)
+        if (role !== "student") {
           updatePayload.course_year_level = null;
           updatePayload.student_number = null;
           updatePayload.education_level = null;
