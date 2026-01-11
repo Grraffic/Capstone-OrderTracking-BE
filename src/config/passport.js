@@ -56,28 +56,67 @@ passport.use(
         // Debug logging
         console.log("🔍 Role determination for email:", normalizedEmail);
 
-        // STEP 1: Check email_role_assignments table first (system admin assigned roles)
+        // STEP 1: Check if user already exists in users table (manually created by admin)
+        // This allows users with any email domain to log in if they were manually added
+        let existingUser = null;
         let role = null;
-        let assignedRole = null;
         try {
-          const assignment =
-            await emailRoleAssignmentService.getEmailRoleAssignment(
-              normalizedEmail
-            );
-          if (assignment) {
-            assignedRole = assignment.role;
-            role = assignedRole;
-            console.log("✅ Found role assignment in database:", assignedRole);
+          const { data: userData, error: userError } = await supabase
+            .from("users")
+            .select("id, email, role, is_active")
+            .eq("email", normalizedEmail)
+            .single();
+
+          if (!userError && userData) {
+            existingUser = userData;
+            // If user exists and is active, use their existing role
+            if (userData.is_active !== false) {
+              role = userData.role;
+              console.log(
+                `✅ Found existing user in database with role: ${role}`
+              );
+            } else {
+              console.warn(
+                `⚠️ User ${normalizedEmail} exists but is inactive`
+              );
+              return done(
+                new Error(
+                  "Your account has been deactivated. Please contact system administrator."
+                )
+              );
+            }
           }
         } catch (error) {
           console.warn(
-            "⚠️ Error checking email_role_assignments:",
+            "⚠️ Error checking existing user in database:",
             error.message
           );
-          // Continue to fallback logic
+          // Continue to other checks
         }
 
-        // STEP 2: If no assignment found, check for student email
+        // STEP 2: If no existing user found, check email_role_assignments table (system admin assigned roles)
+        if (!role) {
+          let assignedRole = null;
+          try {
+            const assignment =
+              await emailRoleAssignmentService.getEmailRoleAssignment(
+                normalizedEmail
+              );
+            if (assignment) {
+              assignedRole = assignment.role;
+              role = assignedRole;
+              console.log("✅ Found role assignment in database:", assignedRole);
+            }
+          } catch (error) {
+            console.warn(
+              "⚠️ Error checking email_role_assignments:",
+              error.message
+            );
+            // Continue to fallback logic
+          }
+        }
+
+        // STEP 3: If no assignment found, check for student email
         if (!role) {
           const isStudent = normalizedEmail.endsWith(
             "@student.laverdad.edu.ph"
@@ -106,6 +145,7 @@ passport.use(
             } else {
               // No assignment found and not a student email - reject login
               console.error("❌ Invalid email domain:", email);
+              console.error("  - Not found in users table");
               console.error("  - Not found in email_role_assignments table");
               console.error(
                 "  - Not a student email (@student.laverdad.edu.ph)"
@@ -113,7 +153,7 @@ passport.use(
               console.error("  - Not in admin.js bootstrap list");
               return done(
                 new Error(
-                  "Email not authorized. Please contact system administrator to be added to the system."
+                  "Your email is not allowed. Students must use @student.laverdad.edu.ph and admins must use @laverdad.edu.ph (or the approved admin email on file)."
                 )
               );
             }
