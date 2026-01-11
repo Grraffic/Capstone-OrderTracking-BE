@@ -112,7 +112,8 @@ exports.createUser = async (req, res) => {
       });
     }
 
-    const user = await userService.createUser(userData);
+    const createdByUserId = req.user?.id; // Get authenticated user ID for email_role_assignments
+    const user = await userService.createUser(userData, createdByUserId);
 
     return res.status(201).json({
       success: true,
