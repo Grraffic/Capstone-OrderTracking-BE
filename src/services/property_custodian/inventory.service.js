@@ -232,6 +232,19 @@ class InventoryService {
               variantBeginningInventory = item.beginning_inventory || 0;
             }
 
+            // Read reorder_point from variant JSON field if available
+            // Otherwise, fall back to item-level reorder_point
+            let variantReorderPoint;
+            if (
+              variant.reorder_point !== undefined &&
+              variant.reorder_point !== null
+            ) {
+              variantReorderPoint = Number(variant.reorder_point) || 0;
+            } else {
+              // Fallback: use item-level reorder_point (for items without per-variant tracking)
+              variantReorderPoint = item.reorder_point || 0;
+            }
+
             // Calculate ending inventory: Beginning Inventory + Purchases - Released + Returns
             // For now, Released and Returns are 0 (will be calculated from orders in frontend)
             const endingInventory =
@@ -272,6 +285,7 @@ class InventoryService {
                 variantBeginningInventory * variantPrice +
                 variantPurchases * variantPrice,
               status: variantStatus,
+              reorder_point: variantReorderPoint, // Now reads from variant JSON or item-level
               beginning_inventory_date: item.beginning_inventory_date,
               fiscal_year_start: item.fiscal_year_start,
               created_at: item.created_at,
@@ -353,6 +367,7 @@ class InventoryService {
                   sizeBeginningInventory * item.price +
                   sizePurchases * item.price,
                 status: sizeStatus,
+                reorder_point: item.reorder_point || 0, // Include reorder_point from item
                 beginning_inventory_date: item.beginning_inventory_date,
                 fiscal_year_start: item.fiscal_year_start,
                 created_at: item.created_at,
@@ -405,6 +420,7 @@ class InventoryService {
                 (item.beginning_inventory || 0) * item.price +
                 (item.purchases || 0) * item.price,
               status: item.status,
+              reorder_point: item.reorder_point || 0, // Include reorder_point from item
               beginning_inventory_date: item.beginning_inventory_date,
               fiscal_year_start: item.fiscal_year_start,
               created_at: item.created_at,

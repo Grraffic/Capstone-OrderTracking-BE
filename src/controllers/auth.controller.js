@@ -1,6 +1,7 @@
 const jwt = require("jsonwebtoken");
 const supabase = require("../config/supabase");
 const { isSpecialAdmin, isSystemAdmin } = require("../config/admin");
+const emailRoleAssignmentService = require("../services/system_admin/emailRoleAssignment.service");
 require("dotenv").config();
 
 const JWT_SECRET = process.env.JWT_SECRET || "change-me";
@@ -64,8 +65,32 @@ exports.oauthCallback = async (req, res) => {
       console.warn("Error checking existing user in database:", error.message);
     }
 
-    // If user doesn't exist in database, check domain patterns
-    if (!existingUser) {
+    // STEP 2: If no existing user found, check email_role_assignments table (system admin assigned roles)
+    // This allows any email added by system admin to login regardless of domain
+    if (!role) {
+      let assignedRole = null;
+      try {
+        const assignment =
+          await emailRoleAssignmentService.getEmailRoleAssignment(
+            normalizedEmail
+          );
+        if (assignment) {
+          assignedRole = assignment.role;
+          role = assignedRole;
+          console.log("✅ Found role assignment in database:", assignedRole);
+        }
+      } catch (error) {
+        console.warn(
+          "⚠️ Error checking email_role_assignments:",
+          error.message
+        );
+        // Continue to fallback logic
+      }
+    }
+
+    // STEP 3: If no assignment found, check domain patterns
+    // Only apply domain restrictions if email is NOT in database (neither users nor email_role_assignments)
+    if (!role) {
       const isStudent = normalizedEmail.endsWith("@student.laverdad.edu.ph");
       // Check for system admin first (highest priority)
       const isSystemAdminEmail = isSystemAdmin(normalizedEmail);
