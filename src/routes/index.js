@@ -6,6 +6,7 @@ const itemsRoutes = require("./property_custodian/items");
 const orderRoutes = require("./property_custodian/orders");
 const cartRoutes = require("./cart");
 const notificationRoutes = require("./notification");
+const transactionRoutes = require("./transaction");
 const userRoutes = require("./system_admin/users");
 const emailRoleAssignmentRoutes = require("./system_admin/emailRoleAssignments");
 
@@ -30,6 +31,9 @@ router.use("/cart", cartRoutes);
 
 // Notification routes
 router.use("/notifications", notificationRoutes);
+
+// Transaction routes (Property Custodian only)
+router.use("/transactions", transactionRoutes);
 
 // User management routes (System Admin only)
 router.use("/users", userRoutes);

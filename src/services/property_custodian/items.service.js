@@ -98,7 +98,7 @@ class ItemsService {
   /**
    * Create new item
    */
-  async createItem(itemData, io = null) {
+  async createItem(itemData, io = null, userId = null, userEmail = null) {
     try {
       const requiredFields = [
         "name",
@@ -261,14 +261,10 @@ class ItemsService {
                                 const existingVariantSize = this._normalizeSize(
                                   existingVariant.size
                                 );
-                                // Match exact or partial (e.g., "Small (S)" matches "Small" or "S")
-                                return (
-                                  newVariantSize === existingVariantSize ||
-                                  newVariantSize.includes(
-                                    existingVariantSize
-                                  ) ||
-                                  existingVariantSize.includes(newVariantSize)
-                                );
+                                // Match exact only - don't use includes() as it causes false matches
+                                // (e.g., "Small" would incorrectly match "XSmall")
+                                // Only match if normalized sizes are exactly equal
+                                return newVariantSize === existingVariantSize;
                               }
                             );
 
@@ -305,12 +301,11 @@ class ItemsService {
                   .split(",")
                   .map((s) => this._normalizeSize(s));
                 const targetSizeNormalized = this._normalizeSize(itemSize);
+                // Only match exact - don't use includes() as it causes false matches
+                // (e.g., "Small" would incorrectly match "XSmall")
                 if (
                   normalizedSizes.some(
-                    (s) =>
-                      s === targetSizeNormalized ||
-                      s.includes(targetSizeNormalized) ||
-                      targetSizeNormalized.includes(s)
+                    (s) => s === targetSizeNormalized
                   )
                 ) {
                   // Item+size already exists in comma-separated sizes - add to purchases
@@ -385,7 +380,9 @@ class ItemsService {
           stockToAdd,
           matchingSize || itemSize,
           itemData.price,
-          io // Pass socket.io instance for real-time updates
+          io, // Pass socket.io instance for real-time updates
+          userId, // Pass userId for transaction logging
+          userEmail // Pass userEmail for transaction logging
         );
 
         console.log(
@@ -470,6 +467,58 @@ class ItemsService {
       let notificationInfo = { notified: 0 };
       if (data.stock > 0)
         notificationInfo = await this.handleRestockNotifications(data, io);
+
+      // Log transaction for item creation
+      try {
+        const TransactionService = require("../../services/transaction.service");
+        const itemSize = data.size || "N/A";
+        const variantCount = data.note ? (JSON.parse(data.note)?.sizeVariations?.length || 0) : 0;
+        const details = variantCount > 0 
+          ? `Item created: ${data.name} (${data.education_level}) with ${variantCount} variant(s)`
+          : `Item created: ${data.name} (${data.education_level})${itemSize !== "N/A" ? ` - Size: ${itemSize}` : ""}`;
+        // Format details to match reference: "Beginning inventory: 20 units at 100 pesos"
+        const formattedDetails = data.beginning_inventory > 0
+          ? `Beginning Inventory: ${data.beginning_inventory} units${data.price > 0 ? ` at P${data.price}` : ""}`
+          : details;
+        
+        console.log(`[createItem] 📝 Logging transaction for new item:`, {
+          type: "Item",
+          action: `ITEM CREATED ${data.name}`,
+          userId: userId,
+          details: formattedDetails,
+          beginning_inventory: data.beginning_inventory,
+          price: data.price,
+        });
+        
+        // Pass both userId and userEmail to transaction service for better lookup
+        const txResult = await TransactionService.logTransaction(
+          "Item",
+          `ITEM CREATED ${data.name}`,
+          userId, // Pass userId (may be UUID, email, or Google ID)
+          formattedDetails,
+          {
+            item_id: data.id,
+            item_name: data.name,
+            education_level: data.education_level,
+            category: data.category,
+            item_type: data.item_type,
+            size: itemSize,
+            stock: data.stock,
+            price: data.price,
+            beginning_inventory: data.beginning_inventory,
+            variant_count: variantCount,
+          },
+          userEmail // Pass userEmail as fallback for user lookup
+        );
+        
+        console.log(`[createItem] ✅ Transaction logged successfully:`, txResult);
+      } catch (txError) {
+        console.error("[createItem] ❌ Failed to log transaction for item creation:", txError);
+        console.error("[createItem] Transaction error details:", {
+          message: txError.message,
+          stack: txError.stack,
+        });
+      }
 
       return {
         success: true,
@@ -617,6 +666,30 @@ class ItemsService {
         }
       }
 
+      // Log transaction for item update
+      try {
+        const TransactionService = require("../../services/transaction.service");
+        const updatedFields = Object.keys(allowedUpdates).filter(key => key !== 'updated_at');
+        const finalData = updatedItemData || data;
+        const details = `Item details updated: ${finalData.name} (${finalData.education_level}) - Changed: ${updatedFields.join(", ")}`;
+        await TransactionService.logTransaction(
+          "Item",
+          `ITEM DETAILS UPDATED ${finalData.name}`,
+          null, // Will be set by controller if available
+          details,
+          {
+            item_id: finalData.id,
+            item_name: finalData.name,
+            education_level: finalData.education_level,
+            updated_fields: updatedFields,
+            previous_data: currentItem,
+            new_data: finalData,
+          }
+        );
+      } catch (txError) {
+        console.error("Failed to log transaction for item update:", txError);
+      }
+
       return {
         success: true,
         data: updatedItemData || data,
@@ -743,14 +816,20 @@ class ItemsService {
    */
   async getAvailableSizes(name, educationLevel) {
     try {
-      // Select note field as well to check for JSON variations
+      // Use case-insensitive matching for name and education_level
+      // This ensures we find items regardless of case differences
       const { data, error } = await supabase
         .from("items")
         .select("size, stock, status, id, note, price")
-        .eq("name", name)
-        .eq("education_level", educationLevel)
+        .ilike("name", name) // Case-insensitive match
+        .ilike("education_level", educationLevel) // Case-insensitive match
         .eq("is_active", true)
         .order("size", { ascending: true });
+      
+      console.log(`🔍 getAvailableSizes: Found ${data?.length || 0} items for "${name}" (${educationLevel})`);
+      if (data && data.length > 0) {
+        console.log(`📦 Sizes found:`, data.map(item => ({ size: item.size, stock: item.stock })));
+      }
 
       if (error) throw error;
 
@@ -820,18 +899,32 @@ class ItemsService {
 
         // If not processed as JSON variations, process as standard item row
         if (!hasJsonVariations) {
-          if (item.size === "N/A") return;
+          if (item.size === "N/A" || !item.size) return;
 
-          if (sizeMap.has(item.size)) {
-            const existing = sizeMap.get(item.size);
+          // Normalize size for consistent mapping (trim whitespace, but keep original case for display)
+          const normalizedSize = item.size.trim();
+          
+          // Check if we already have this size (case-insensitive check)
+          let existingSizeKey = null;
+          for (const [key] of sizeMap.entries()) {
+            if (key.toLowerCase().trim() === normalizedSize.toLowerCase()) {
+              existingSizeKey = key;
+              break;
+            }
+          }
+
+          if (existingSizeKey) {
+            // Combine with existing size entry
+            const existing = sizeMap.get(existingSizeKey);
             existing.stock += item.stock;
             if (existing.stock === 0) existing.status = "Out of Stock";
             else if (existing.stock <= 10) existing.status = "Critical";
             else if (existing.stock <= 20) existing.status = "At Reorder Point";
             else existing.status = "Above Threshold";
           } else {
-            sizeMap.set(item.size, {
-              size: item.size,
+            // Add new size entry (use original size value for display)
+            sizeMap.set(normalizedSize, {
+              size: normalizedSize, // Keep original size format
               stock: item.stock,
               status: item.status,
               id: item.id,
@@ -967,43 +1060,10 @@ class ItemsService {
 
       console.log(`📧 Notifying ${studentsWithPreOrders.length} students...`);
       const notificationResults = [];
-      const conversionResults = [];
 
       for (const student of studentsWithPreOrders) {
         try {
-          // Step 1: Convert pre-order to regular order
-          console.log(
-            `🔄 Converting pre-order ${student.orderId} to regular order...`
-          );
-          const conversionResult = await OrderService.convertPreOrderToRegular(
-            student.orderId,
-            item.name,
-            student.item.size || sizeToMatch || null
-          );
-
-          if (conversionResult.success) {
-            conversionResults.push({
-              orderId: student.orderId,
-              orderNumber: student.orderNumber,
-              success: true,
-            });
-            console.log(
-              `✅ Pre-order ${student.orderId} converted to regular order`
-            );
-          } else {
-            console.warn(
-              `⚠️ Failed to convert pre-order ${student.orderId}: ${conversionResult.message}`
-            );
-            conversionResults.push({
-              orderId: student.orderId,
-              orderNumber: student.orderNumber,
-              success: false,
-              error: conversionResult.message,
-            });
-            // Continue with notification even if conversion failed
-          }
-
-          // Step 2: Create notification (enhanced message)
+          // Create notification (manual conversion - student must click "Order" button)
           const notification =
             await NotificationService.createRestockNotification({
               studentId: student.studentId,
@@ -1012,7 +1072,7 @@ class ItemsService {
               size: student.item.size || item.size || null,
               orderNumber: student.orderNumber,
               inventoryId: item.id,
-              orderConverted: conversionResult.success,
+              orderConverted: false, // Manual conversion - student must order manually
             });
 
           if (io) {
@@ -1029,7 +1089,7 @@ class ItemsService {
               order: {
                 id: student.orderId,
                 orderNumber: student.orderNumber,
-                converted: conversionResult.success,
+                converted: false, // Manual conversion required
               },
             });
             console.log(
@@ -1042,12 +1102,11 @@ class ItemsService {
             studentName: student.studentName,
             orderNumber: student.orderNumber,
             orderId: student.orderId,
-            converted: conversionResult.success,
             success: true,
           });
         } catch (error) {
           console.error(
-            `Failed to process pre-order conversion for student ${student.studentId}:`,
+            `Failed to create notification for student ${student.studentId}:`,
             error
           );
           notificationResults.push({
@@ -1055,13 +1114,6 @@ class ItemsService {
             studentName: student.studentName,
             orderNumber: student.orderNumber,
             orderId: student.orderId,
-            converted: false,
-            success: false,
-            error: error.message,
-          });
-          conversionResults.push({
-            orderId: student.orderId,
-            orderNumber: student.orderNumber,
             success: false,
             error: error.message,
           });
@@ -1069,20 +1121,19 @@ class ItemsService {
       }
 
       const successCount = notificationResults.filter((r) => r.success).length;
-      const convertedCount = conversionResults.filter((r) => r.success).length;
       console.log(
         `✅ Successfully notified ${successCount}/${studentsWithPreOrders.length} students`
       );
       console.log(
-        `✅ Successfully converted ${convertedCount}/${studentsWithPreOrders.length} pre-orders to regular orders`
+        `ℹ️ Students can now manually convert their pre-orders to regular orders when items are available`
       );
 
       return {
         notified: successCount,
-        converted: convertedCount,
+        converted: 0, // No automatic conversions
         total: studentsWithPreOrders.length,
         students: notificationResults,
-        conversions: conversionResults,
+        conversions: [], // No conversions performed automatically
       };
     } catch (error) {
       console.error("Handle restock notifications error:", error);

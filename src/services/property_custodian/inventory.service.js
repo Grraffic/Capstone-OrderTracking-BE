@@ -468,8 +468,9 @@ class InventoryService {
    * @param {string} size - Optional size (for size-specific items)
    * @param {number} unitPrice - Optional unit price
    * @param {object} io - Optional Socket.IO instance for real-time updates
+   * @param {string} userId - Optional user ID who performed the action
    */
-  async addStock(itemId, quantity, size = null, unitPrice = null, io = null) {
+  async addStock(itemId, quantity, size = null, unitPrice = null, io = null, userId = null, userEmail = null) {
     try {
       if (!isProduction) {
         console.log(
@@ -522,13 +523,14 @@ class InventoryService {
             variantIndex = parsedNote.sizeVariations.findIndex((v) => {
               const vSize = (v.size || "").toLowerCase().trim();
               const targetSize = size.toLowerCase().trim();
-              // Match exact or partial (e.g., "Small (S)" matches "Small" or "S")
+              // Match exact only - don't use includes() as it causes false matches
+              // (e.g., "Small" would incorrectly match "XSmall")
+              // Match with or without parentheses (e.g., "Small (S)" matches "Small")
+              const vSizeNoParens = vSize.replace(/\([^)]*\)/g, "").trim();
+              const targetSizeNoParens = targetSize.replace(/\([^)]*\)/g, "").trim();
               return (
                 vSize === targetSize ||
-                vSize.includes(targetSize) ||
-                targetSize.includes(vSize) ||
-                vSize.replace(/\([^)]*\)/g, "").trim() === targetSize ||
-                targetSize.replace(/\([^)]*\)/g, "").trim() === vSize
+                vSizeNoParens === targetSizeNoParens
               );
             });
 
@@ -643,6 +645,33 @@ class InventoryService {
           }
         }
 
+        // Log transaction for stock addition (purchase) - JSON variant
+        try {
+          const TransactionService = require("../../services/transaction.service");
+          const itemName = data.name;
+          const variantSize = variant.size || "N/A";
+          const details = `Purchase recorded: ${quantity} unit(s) of ${itemName} (Size: ${variantSize})${unitPrice ? ` at ₱${unitPrice} per unit` : ""}`;
+          await TransactionService.logTransaction(
+            "Inventory",
+            "PURCHASE RECORDED",
+            userId,
+            details,
+            {
+              item_id: data.id,
+              item_name: itemName,
+              size: variantSize,
+              quantity: quantity,
+              unit_price: unitPrice,
+              previous_stock: currentVariantStock,
+              new_stock: newVariantStock,
+              previous_purchases: currentVariantPurchases,
+              new_purchases: newVariantPurchases,
+            }
+          );
+        } catch (txError) {
+          console.error("Failed to log transaction for stock addition:", txError);
+        }
+
         return {
           success: true,
           data,
@@ -751,6 +780,64 @@ class InventoryService {
           console.error(
             `[addStock] ⚠️ WARNING: Response data missing purchases field!`
           );
+        }
+
+        // Log transaction for stock addition (purchase)
+        try {
+          const TransactionService = require("../../services/transaction.service");
+          const itemName = data.name;
+          const itemSize = size || data.size || "N/A";
+          const details = `Purchase recorded: ${quantity} unit(s) of ${itemName}${itemSize !== "N/A" ? ` (Size: ${itemSize})` : ""}${unitPrice ? ` at ₱${unitPrice} per unit` : ""}`;
+          // Note: userId will be passed from controller if available
+          await TransactionService.logTransaction(
+            "Inventory",
+            `PURCHASE RECORDED ${itemName}`,
+            userId, // Use userId passed from controller
+            details,
+            {
+              item_id: data.id,
+              item_name: itemName,
+              size: itemSize,
+              quantity: quantity,
+              unit_price: unitPrice,
+              previous_stock: currentVariantStock || item.stock,
+              new_stock: newVariantStock || newStock,
+              previous_purchases: currentVariantPurchases || item.purchases || 0,
+              new_purchases: newVariantPurchases || newPurchases,
+            },
+            userEmail // Pass userEmail as fallback for user lookup
+          );
+        } catch (txError) {
+          // Don't fail stock addition if transaction logging fails
+          console.error("Failed to log transaction for stock addition:", txError);
+        }
+
+        // Log transaction for stock addition (purchase) - regular item
+        try {
+          const TransactionService = require("../../services/transaction.service");
+          const itemName = data.name;
+          const itemSize = size || data.size || "N/A";
+          const details = `Purchase recorded: ${quantity} unit(s) of ${itemName}${itemSize !== "N/A" ? ` (Size: ${itemSize})` : ""}${unitPrice ? ` at ₱${unitPrice} per unit` : ""}`;
+          await TransactionService.logTransaction(
+            "Inventory",
+            `PURCHASE RECORDED ${itemName}`,
+            userId,
+            details,
+            {
+              item_id: data.id,
+              item_name: itemName,
+              size: itemSize,
+              quantity: quantity,
+              unit_price: unitPrice,
+              previous_stock: currentStock,
+              new_stock: newStock,
+              previous_purchases: currentPurchases,
+              new_purchases: newPurchases,
+            },
+            userEmail // Pass userEmail as fallback for user lookup
+          );
+        } catch (txError) {
+          console.error("Failed to log transaction for stock addition:", txError);
         }
 
         return {

@@ -77,5 +77,12 @@ router.put("/:id", orderController.updateOrder);
  */
 router.delete("/:id", orderController.deleteOrder);
 
+/**
+ * POST /api/orders/:id/convert-pre-order
+ * Convert pre-order to regular order (manual conversion)
+ * Allows students to manually convert their pre-orders when items become available
+ */
+router.post("/:id/convert-pre-order", orderController.convertPreOrder);
+
 module.exports = router;
 

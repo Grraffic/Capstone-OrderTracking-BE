@@ -181,7 +181,17 @@ class ItemsController {
         education_level: req.body.education_level
       });
       
-      const result = await ItemsService.createItem(req.body, io);
+      const userId = req.user?.id || null;
+      const userEmail = req.user?.email || null;
+      console.log(`[ItemsController] 👤 User info from request:`, {
+        userId: userId,
+        userEmail: userEmail,
+        userName: req.user?.name,
+        userRole: req.user?.role,
+        allUserKeys: Object.keys(req.user || {}),
+      });
+      // Pass both userId and userEmail to service for better user lookup
+      const result = await ItemsService.createItem(req.body, io, userId, userEmail);
 
       console.log(`[ItemsController] 📤 Sending response:`, {
         success: result.success,
@@ -190,6 +200,16 @@ class ItemsController {
         beginning_inventory: result.data?.beginning_inventory,
         stock: result.data?.stock
       });
+
+      // Emit socket event for item creation to trigger transaction refresh
+      if (io && result.success) {
+        io.emit("item:created", {
+          itemId: result.data?.id,
+          itemName: result.data?.name,
+          isExisting: result.isExisting || false,
+        });
+        console.log(`📡 Socket.IO: Emitted item:created for item ${result.data?.name}`);
+      }
 
       if (result.notificationInfo && result.notificationInfo.notified > 0) {
         console.log(
@@ -223,6 +243,31 @@ class ItemsController {
         console.log(
           `✅ Notified ${result.notificationInfo.notified} students about restock`
         );
+      }
+
+      // Update transaction with user ID if available
+      if (result.success && req.user?.id) {
+        try {
+          const TransactionService = require("../../services/transaction.service");
+          const { data: transactions } = await TransactionService.getTransactions({
+            type: "Item",
+            action: "ITEM DETAILS UPDATED",
+            limit: 1,
+          });
+          if (transactions && transactions.length > 0 && transactions[0].metadata?.item_id === result.data.id) {
+            const supabase = require("../../config/supabase");
+            await supabase
+              .from("transactions")
+              .update({
+                user_id: req.user.id,
+                user_name: req.user.name || "Unknown User",
+                user_role: req.user.role || "unknown",
+              })
+              .eq("id", transactions[0].id);
+          }
+        } catch (txError) {
+          console.error("Failed to update transaction with user ID:", txError);
+        }
       }
 
       res.json(result);
@@ -371,7 +416,9 @@ class ItemsController {
       }
 
       const InventoryService = require("../../services/property_custodian/inventory.service");
-      const result = await InventoryService.addStock(id, quantity, size, unitPrice, io);
+      const userId = req.user?.id || null;
+      const userEmail = req.user?.email || null;
+      const result = await InventoryService.addStock(id, quantity, size, unitPrice, io, userId, userEmail);
       res.json(result);
     } catch (error) {
       console.error("Add stock error:", error);

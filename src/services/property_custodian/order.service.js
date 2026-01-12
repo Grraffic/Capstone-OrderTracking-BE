@@ -178,6 +178,8 @@ class OrderService {
    */
   async getOrderById(id) {
     try {
+      console.log(`🔍 Fetching order by ID: ${id}`);
+      
       const { data, error } = await supabase
         .from("orders")
         .select("*")
@@ -185,8 +187,22 @@ class OrderService {
         .eq("is_active", true)
         .single();
 
-      if (error) throw error;
-      if (!data) throw new Error("Order not found");
+      if (error) {
+        console.error(`❌ Error fetching order ${id}:`, error);
+        throw error;
+      }
+      
+      if (!data) {
+        console.error(`❌ Order ${id} not found in database`);
+        throw new Error("Order not found");
+      }
+      
+      console.log(`✅ Order ${id} found:`, { 
+        order_number: data.order_number, 
+        order_type: data.order_type,
+        status: data.status,
+        student_id: data.student_id 
+      });
 
       // Attach student data
       let enhancedOrder = data;
@@ -536,6 +552,33 @@ class OrderService {
         });
       }
 
+      // Log transaction for order creation
+      try {
+        const TransactionService = require("../../services/transaction.service");
+        const itemCount = items.length;
+        const details = `Order #${orderData.order_number} created with ${itemCount} item(s) by ${orderData.student_name} (${orderData.education_level})`;
+        await TransactionService.logTransaction(
+          "Order",
+          "ORDER CREATED",
+          orderData.student_id || null,
+          details,
+          {
+            order_id: data.id,
+            order_number: orderData.order_number,
+            student_id: orderData.student_id,
+            student_name: orderData.student_name,
+            student_email: orderData.student_email,
+            education_level: orderData.education_level,
+            item_count: itemCount,
+            total_amount: orderData.total_amount,
+            order_type: orderData.order_type,
+          }
+        );
+      } catch (txError) {
+        // Don't fail order creation if transaction logging fails
+        console.error("Failed to log transaction for order creation:", txError);
+      }
+
       return {
         success: true,
         data,
@@ -568,6 +611,14 @@ class OrderService {
         updates.claimed_date = new Date().toISOString();
       }
 
+      // Get order before update to capture previous status
+      const { data: orderBeforeUpdate } = await supabase
+        .from("orders")
+        .select("status, order_number, student_id, student_name")
+        .eq("id", id)
+        .eq("is_active", true)
+        .single();
+
       const { data, error } = await supabase
         .from("orders")
         .update(updates)
@@ -578,6 +629,30 @@ class OrderService {
 
       if (error) throw error;
       if (!data) throw new Error("Order not found");
+
+      // Log transaction for order status update
+      try {
+        const TransactionService = require("../../services/transaction.service");
+        const action = status === "claimed" ? "ORDER CLAIMED" : "ORDER STATUS UPDATED";
+        const details = `Order #${data.order_number} status changed from ${orderBeforeUpdate?.status || "unknown"} to ${status}${data.student_name ? ` for ${data.student_name}` : ""}`;
+        await TransactionService.logTransaction(
+          "Order",
+          action,
+          data.student_id || null,
+          details,
+          {
+            order_id: data.id,
+            order_number: data.order_number,
+            previous_status: orderBeforeUpdate?.status,
+            new_status: status,
+            student_id: data.student_id,
+            student_name: data.student_name,
+          }
+        );
+      } catch (txError) {
+        // Don't fail status update if transaction logging fails
+        console.error("Failed to log transaction for order status update:", txError);
+      }
 
       return {
         success: true,

@@ -160,8 +160,8 @@ class NotificationService {
           : `Great news! ${itemName} (${educationLevel}) is now available. Your order #${orderNumber} has been moved to Orders and your QR code is ready for viewing!`;
       } else {
         message = size
-          ? `Good news! ${itemName} (${educationLevel}, Size: ${size}) is now available for your order #${orderNumber}`
-          : `Good news! ${itemName} (${educationLevel}) is now available for your order #${orderNumber}`;
+          ? `Good news! ${itemName} (${educationLevel}, Size: ${size}) is now available for your pre-order #${orderNumber}. Go to My Orders → Pre-Orders to place your order.`
+          : `Good news! ${itemName} (${educationLevel}) is now available for your pre-order #${orderNumber}. Go to My Orders → Pre-Orders to place your order.`;
       }
 
       const notification = {

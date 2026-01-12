@@ -99,6 +99,10 @@ class OrderController {
   async createOrder(req, res) {
     try {
       const io = req.app.get("io");
+      // Add user_id from authenticated user if available
+      if (req.user && req.user.id && !req.body.student_id) {
+        req.body.student_id = req.user.id;
+      }
       const result = await OrderService.createOrder(req.body, io);
       
       // Emit Socket.IO events for real-time updates
@@ -248,6 +252,112 @@ class OrderController {
       res.status(500).json({
         success: false,
         message: error.message || "Failed to fetch order statistics",
+      });
+    }
+  }
+
+  /**
+   * Convert pre-order to regular order (manual conversion)
+   * POST /api/orders/:id/convert-pre-order
+   *
+   * This endpoint allows students to manually convert their pre-orders
+   * to regular orders when items become available.
+   */
+  async convertPreOrder(req, res) {
+    try {
+      const { id } = req.params;
+
+      // Validate UUID format
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidRegex.test(id)) {
+        console.error(`Invalid UUID format received: ${id}`);
+        return res.status(400).json({
+          success: false,
+          message: `Invalid order ID format. Expected UUID, got: ${id}`,
+        });
+      }
+
+      console.log(`🔄 Converting pre-order with ID: ${id}`);
+
+      // Get the order first to check if it's a pre-order
+      let order;
+      try {
+        const result = await OrderService.getOrderById(id);
+        order = result;
+      } catch (fetchError) {
+        console.error(`Error fetching order ${id}:`, fetchError);
+        return res.status(404).json({
+          success: false,
+          message: `Order not found: ${fetchError.message || "Order does not exist"}`,
+        });
+      }
+      
+      if (!order || !order.success) {
+        console.error(`Order ${id} not found or invalid response:`, order);
+        return res.status(404).json({
+          success: false,
+          message: "Order not found",
+        });
+      }
+
+      const orderData = order.data;
+
+      // Verify it's a pre-order
+      if (orderData.order_type !== "pre-order") {
+        return res.status(400).json({
+          success: false,
+          message: "Order is not a pre-order",
+        });
+      }
+
+      // Convert the entire pre-order (all items)
+      // We'll convert using the first item's name as a trigger
+      // The service function will handle converting all items
+      const items = orderData.items || [];
+      if (items.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Pre-order has no items",
+        });
+      }
+
+      // Use the first item to trigger conversion (the function converts the entire order)
+      const firstItem = items[0];
+      const result = await OrderService.convertPreOrderToRegular(
+        id,
+        firstItem.name,
+        firstItem.size || null
+      );
+
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: result.message || "Failed to convert pre-order",
+        });
+      }
+
+      // Emit Socket.IO event for real-time updates
+      const io = req.app.get("io");
+      if (io) {
+        io.emit("order:converted", {
+          orderId: id,
+          orderNumber: orderData.order_number,
+          userId: orderData.student_id,
+          order: result.data,
+        });
+        console.log(`📡 Socket.IO: Emitted order:converted for order ${id}`);
+      }
+
+      res.json({
+        success: true,
+        message: "Pre-order converted to regular order successfully",
+        data: result.data,
+      });
+    } catch (error) {
+      console.error("Convert pre-order error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to convert pre-order",
       });
     }
   }

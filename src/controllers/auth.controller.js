@@ -123,11 +123,35 @@ exports.oauthCallback = async (req, res) => {
     // Ensure email is always a string in the JWT payload
     const emailString = typeof email === "string" ? email : String(email);
 
+    // Ensure role is always set - prioritize: database > email assignment > domain check > user.role > default
+    const finalRole = role || user.role || "student";
+    
+    // Validate that role is not null/undefined/empty
+    if (!finalRole || finalRole.trim() === "") {
+      console.error("[Auth Controller] ❌ CRITICAL: Role is empty after all checks!", {
+        role,
+        userRole: user.role,
+        email: emailString,
+        existingUser: existingUser ? { id: existingUser.id, role: existingUser.role } : null,
+      });
+      return res.status(500).json({ 
+        message: "Authentication error",
+        details: "Unable to determine user role. Please contact administrator."
+      });
+    }
+
     const payload = {
       id: existingUser?.id || user.id || emailString,
       email: emailString,
-      role: role || user.role || "student", // Use determined role (from database or domain check)
+      role: finalRole, // Always include role in JWT payload
     };
+
+    console.log("[Auth Controller] ✅ Creating JWT token with payload:", {
+      id: payload.id,
+      email: payload.email,
+      role: payload.role,
+      roleSource: role ? "determined" : user.role ? "from user object" : "default (student)",
+    });
 
     const token = jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 
