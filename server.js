@@ -12,6 +12,10 @@ const passport = require("passport");
 // const { notFound, errorHandler } = require("./middleware/errorHandler");
 
 const app = express();
+
+// Trust proxy so req.ip is the client IP behind Render's reverse proxy
+app.set("trust proxy", 1);
+
 const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
 const isProduction = process.env.NODE_ENV === "production";
@@ -60,17 +64,24 @@ if (!isProduction) {
   app.use(morgan("combined"));
 }
 
-// Rate limiting - protect against brute force attacks
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: isProduction ? 100 : 1000, // Limit each IP to 100 requests per windowMs in production
-  message: "Too many requests from this IP, please try again later.",
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-// Apply rate limiting to all API routes
-app.use("/api", limiter);
+// Rate limiting - disabled by default for testing; set RATE_LIMIT_ENABLED=true to enable in production
+const rateLimitEnabled = process.env.RATE_LIMIT_ENABLED === "true";
+if (rateLimitEnabled) {
+  const rateLimitWindowMs = parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000;
+  const rateLimitMax = (() => {
+    const env = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS, 10);
+    if (!Number.isNaN(env)) return env;
+    return isProduction ? 300 : 1000;
+  })();
+  const limiter = rateLimit({
+    windowMs: rateLimitWindowMs,
+    max: rateLimitMax,
+    message: "Too many requests from this IP, please try again later.",
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+  app.use("/api", limiter);
+}
 
 // CORS Configuration - Allow requests from frontend
 const corsOptions = {
