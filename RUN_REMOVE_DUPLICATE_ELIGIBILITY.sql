@@ -1,0 +1,31 @@
+-- ============================================================================
+-- Remove Duplicate Eligibility Entries
+-- ============================================================================
+-- This script removes duplicate eligibility entries for items with the same name
+-- but different sizes. It consolidates eligibility so all size variations
+-- of the same item share the same eligibility settings.
+-- ============================================================================
+-- 
+-- HOW TO USE:
+-- 1. Run this script in your Supabase SQL Editor, OR
+-- 2. Call the API endpoint: POST /api/system-admin/eligibility/remove-duplicates
+--    (requires system admin authentication)
+-- ============================================================================
+
+-- This script is handled by the backend service function
+-- To run it, use the API endpoint or call the service function directly
+-- 
+-- The service function will:
+-- 1. Group items by name (same name = same item, different sizes)
+-- 2. For each group, get all eligibility records
+-- 3. Consolidate eligibility (union of all education levels)
+-- 4. Update all size variations to have the same eligibility
+-- 5. Remove duplicate records
+
+-- To run via API:
+-- POST /api/system-admin/eligibility/remove-duplicates
+-- Headers: Authorization: Bearer <system_admin_token>
+
+-- To run via backend service (Node.js):
+-- const eligibilityService = require('./src/services/system_admin/eligibility.service');
+-- await eligibilityService.removeDuplicateEligibility();

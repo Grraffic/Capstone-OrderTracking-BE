@@ -17,6 +17,15 @@ const isProduction = process.env.NODE_ENV === "production";
 class ItemsService {
   /**
    * Get all items with optional filtering and pagination
+   * @param {Object} filters - Filter options
+   * @param {string} filters.userEducationLevel - User's education level for eligibility filtering (for students)
+   * @param {string} filters.educationLevel - Direct education level filter (for admin)
+   * @param {string} filters.category - Category filter
+   * @param {string} filters.itemType - Item type filter
+   * @param {string} filters.status - Status filter
+   * @param {string} filters.search - Search term
+   * @param {number} page - Page number
+   * @param {number} limit - Items per page
    */
   async getItems(filters = {}, page = 1, limit = 10) {
     try {
@@ -25,8 +34,77 @@ class ItemsService {
         .select("*", { count: "exact" })
         .eq("is_active", true);
 
-      if (filters.educationLevel)
+      // If userEducationLevel is provided, filter by eligibility table AND approval status
+      // This is for students - they should only see approved items they're eligible for
+      if (filters.userEducationLevel) {
+        // Only show approved items to students
+        // Note: If is_approved column doesn't exist (migration not run), error will be caught below
+        // and query will be retried without approval filter for backward compatibility
+        query = query.eq("is_approved", true);
+        // Map user education level to eligibility table format
+        // Users table: "Kindergarten" -> Eligibility: "Kindergarten" (Preschool checkbox)
+        // Users table: "Elementary" -> Eligibility: "Elementary"
+        // Users table: "High School" -> Eligibility: "Junior High School" (JHS checkbox)
+        // Users table: "Senior High School" -> Eligibility: "Senior High School" (SHS checkbox)
+        // Users table: "College" -> Eligibility: "College"
+        const educationLevelMap = {
+          "Kindergarten": "Kindergarten",
+          "Elementary": "Elementary",
+          "High School": "Junior High School",
+          "Senior High School": "Senior High School",
+          "College": "College",
+        };
+        
+        const eligibilityLevel = educationLevelMap[filters.userEducationLevel] || filters.userEducationLevel;
+        
+        // Get all item IDs that are eligible for this education level
+        const { data: eligibleItems, error: eligibilityError } = await supabase
+          .from("item_eligibility")
+          .select("item_id")
+          .eq("education_level", eligibilityLevel);
+        
+        if (eligibilityError) {
+          // If table doesn't exist, log warning and show all items (backward compatibility)
+          console.warn("Eligibility filtering error (table may not exist):", eligibilityError.message);
+        } else if (eligibleItems && eligibleItems.length > 0) {
+          // Filter to only show eligible items
+          const eligibleItemIds = eligibleItems.map(e => e.item_id);
+          query = query.in("id", eligibleItemIds);
+        } else {
+          // No eligible items found - check if there are items without eligibility records
+          // (backward compatibility: items without eligibility records are shown to all)
+          const { data: allEligibilityRecords, error: allEligibilityError } = await supabase
+            .from("item_eligibility")
+            .select("item_id");
+          
+          if (!allEligibilityError && allEligibilityRecords) {
+            const itemsWithEligibilityIds = new Set(allEligibilityRecords.map(e => e.item_id));
+            
+            // Get all active item IDs
+            const { data: allItems, error: allItemsError } = await supabase
+              .from("items")
+              .select("id")
+              .eq("is_active", true);
+            
+            if (!allItemsError && allItems) {
+              const allItemIds = allItems.map(i => i.id);
+              // Items without eligibility records should be shown to all
+              const itemsWithoutEligibility = allItemIds.filter(id => !itemsWithEligibilityIds.has(id));
+              
+              if (itemsWithoutEligibility.length > 0) {
+                query = query.in("id", itemsWithoutEligibility);
+              } else {
+                // All items have eligibility records but none match - return empty
+                query = query.eq("id", "00000000-0000-0000-0000-000000000000");
+              }
+            }
+          }
+        }
+      } else if (filters.educationLevel) {
+        // Direct education level filter (for admin/property custodian)
         query = query.eq("education_level", filters.educationLevel);
+      }
+      
       if (filters.category) query = query.eq("category", filters.category);
       if (filters.itemType) query = query.eq("item_type", filters.itemType);
       if (filters.status) query = query.eq("status", filters.status);
@@ -41,7 +119,66 @@ class ItemsService {
         .range(from, from + limit - 1)
         .order("created_at", { ascending: false });
 
-      const { data, error, count } = await query;
+      let { data, error, count } = await query;
+      
+      // If error is due to missing is_approved column, retry without approval filter
+      if (error && error.message && (
+        error.message.includes("is_approved") || 
+        error.message.includes("column") ||
+        error.code === "42703" // PostgreSQL undefined column error code
+      )) {
+        console.warn("Approval column may not exist, retrying without approval filter:", error.message);
+        // Rebuild query without approval filter for backward compatibility
+        let fallbackQuery = supabase
+          .from("items")
+          .select("*", { count: "exact" })
+          .eq("is_active", true);
+        
+        // Reapply all filters except approval
+        if (filters.userEducationLevel) {
+          // Reapply eligibility filter (without approval)
+          const educationLevelMap = {
+            "Kindergarten": "Kindergarten",
+            "Elementary": "Elementary",
+            "High School": "Junior High School",
+            "Senior High School": "Senior High School",
+            "College": "College",
+          };
+          
+          const eligibilityLevel = educationLevelMap[filters.userEducationLevel] || filters.userEducationLevel;
+          
+          const { data: eligibleItems, error: eligibilityError } = await supabase
+            .from("item_eligibility")
+            .select("item_id")
+            .eq("education_level", eligibilityLevel);
+          
+          if (!eligibilityError && eligibleItems && eligibleItems.length > 0) {
+            const eligibleItemIds = eligibleItems.map(e => e.item_id);
+            fallbackQuery = fallbackQuery.in("id", eligibleItemIds);
+          }
+        } else if (filters.educationLevel) {
+          fallbackQuery = fallbackQuery.eq("education_level", filters.educationLevel);
+        }
+        
+        if (filters.category) fallbackQuery = fallbackQuery.eq("category", filters.category);
+        if (filters.itemType) fallbackQuery = fallbackQuery.eq("item_type", filters.itemType);
+        if (filters.status) fallbackQuery = fallbackQuery.eq("status", filters.status);
+        if (filters.search) {
+          fallbackQuery = fallbackQuery.or(
+            `name.ilike.%${filters.search}%,category.ilike.%${filters.search}%,description.ilike.%${filters.search}%`
+          );
+        }
+        
+        fallbackQuery = fallbackQuery
+          .range(from, from + limit - 1)
+          .order("created_at", { ascending: false });
+        
+        const fallbackResult = await fallbackQuery;
+        data = fallbackResult.data;
+        error = fallbackResult.error;
+        count = fallbackResult.count;
+      }
+      
       if (error) throw error;
 
       return {
@@ -428,6 +565,93 @@ class ItemsService {
           isExisting: true,
         });
 
+        // Auto-approve existing items (they were already approved before)
+        // Update approval status if not already approved
+        // Only update if approval columns exist
+        try {
+          const { error: testError } = await supabase
+            .from("items")
+            .select("is_approved")
+            .limit(0);
+          
+          // If column exists, try to update approval
+          if (!testError || testError.code !== '42703') {
+            if (!responseData.is_approved) {
+              const updateData = {
+                is_approved: true,
+              };
+              
+              // Only add approved_at if column exists
+              const { error: approvedAtTestError } = await supabase
+                .from("items")
+                .select("approved_at")
+                .limit(0);
+              
+              if (!approvedAtTestError || approvedAtTestError.code !== '42703') {
+                updateData.approved_at = new Date().toISOString();
+              }
+              
+              const { error: approveError } = await supabase
+                .from("items")
+                .update(updateData)
+                .eq("id", existingItem.id);
+              
+              if (approveError) {
+                console.warn("[createItem] Failed to auto-approve existing item:", approveError);
+              } else {
+                responseData.is_approved = true;
+                if (updateData.approved_at) {
+                  responseData.approved_at = updateData.approved_at;
+                }
+              }
+            }
+          }
+        } catch (err) {
+          console.warn("[createItem] Could not update approval status:", err.message);
+        }
+
+        // Ensure eligibility entry exists for existing items
+        // This handles cases where items were created before eligibility system was implemented
+        try {
+          const educationLevelMap = {
+            "Kindergarten": "Kindergarten",
+            "Elementary": "Elementary",
+            "Junior High School": "Junior High School",
+            "Senior High School": "Senior High School",
+            "College": "College",
+          };
+
+          const eligibilityLevel = educationLevelMap[existingItem.education_level] || existingItem.education_level;
+
+          // Check if eligibility entry already exists
+          const { data: existingEligibility, error: checkError } = await supabase
+            .from("item_eligibility")
+            .select("id")
+            .eq("item_id", existingItem.id)
+            .eq("education_level", eligibilityLevel)
+            .maybeSingle();
+
+          if (checkError && checkError.code !== '42P01') {
+            console.warn(`[createItem] Error checking eligibility for item ${existingItem.id}:`, checkError.message);
+          } else if (!existingEligibility && checkError?.code !== '42P01') {
+            // Eligibility entry doesn't exist, create it
+            const { error: eligibilityError } = await supabase
+              .from("item_eligibility")
+              .insert({
+                item_id: existingItem.id,
+                education_level: eligibilityLevel,
+              });
+
+            if (eligibilityError) {
+              console.warn(`[createItem] Failed to create eligibility entry for existing item ${existingItem.id}:`, eligibilityError.message);
+            } else {
+              console.log(`[createItem] ✅ Created missing eligibility entry for existing item "${existingItem.name}" (${eligibilityLevel})`);
+            }
+          }
+        } catch (eligibilityErr) {
+          console.warn("[createItem] Error ensuring eligibility for existing item:", eligibilityErr.message);
+        }
+
         return {
           success: true,
           data: responseData,
@@ -449,6 +673,7 @@ class ItemsService {
 
       // Only for truly NEW item+size combinations: Set beginning inventory
       // Beginning inventory is set ONLY on first creation and never changes
+      // New items are NOT approved by default - require system admin approval
       const itemToInsert = {
         ...itemData,
         beginning_inventory: itemData.stock || 0,
@@ -457,12 +682,92 @@ class ItemsService {
         fiscal_year_start: new Date().toISOString().split("T")[0], // Current date
       };
 
-      const { data, error } = await supabase
+      // Try to insert item
+      // Handle case where approval columns might not exist (migration not run)
+      let data, error;
+      
+      // First, try with approval fields (if migration has been run)
+      const itemWithApproval = {
+        ...itemToInsert,
+        is_approved: false, // New items require approval
+        approved_by: null, // Will be set when system admin approves
+        approved_at: null, // Will be set when system admin approves
+      };
+
+      const result = await supabase
         .from("items")
-        .insert([itemToInsert])
+        .insert([itemWithApproval])
         .select()
         .single();
+      
+      data = result.data;
+      error = result.error;
+
+      // If error is due to missing approval columns, retry without them
+      if (error && (
+        error.message?.includes("approved_at") ||
+        error.message?.includes("approved_by") ||
+        error.message?.includes("is_approved") ||
+        error.message?.includes("Could not find") ||
+        error.code === '42703' || // PostgreSQL undefined_column
+        error.code === 'PGRST204' // PostgREST column not found
+      )) {
+        console.log("[createItem] Approval columns don't exist, retrying without approval fields");
+        // Retry without approval fields
+        const result2 = await supabase
+          .from("items")
+          .insert([itemToInsert])
+          .select()
+          .single();
+        
+        data = result2.data;
+        error = result2.error;
+      }
+
       if (error) throw error;
+
+      // Automatically create eligibility entry based on item's education_level
+      // This ensures items are visible to students in the correct education level
+      try {
+        const educationLevelMap = {
+          "Kindergarten": "Kindergarten",
+          "Elementary": "Elementary",
+          "Junior High School": "Junior High School",
+          "Senior High School": "Senior High School",
+          "College": "College",
+        };
+
+        // Map the item's education_level to the eligibility format
+        const eligibilityLevel = educationLevelMap[itemData.education_level] || itemData.education_level;
+
+        // Check if item_eligibility table exists before inserting
+        const { error: tableCheck } = await supabase
+          .from("item_eligibility")
+          .select("id")
+          .limit(1);
+
+        if (!tableCheck || tableCheck.code !== '42P01') {
+          // Table exists, create eligibility entry
+          const { error: eligibilityError } = await supabase
+            .from("item_eligibility")
+            .insert({
+              item_id: data.id,
+              education_level: eligibilityLevel,
+            });
+
+          if (eligibilityError) {
+            console.warn(`[createItem] Failed to create eligibility entry for item ${data.id}:`, eligibilityError.message);
+            // Don't throw - item creation should succeed even if eligibility creation fails
+          } else {
+            console.log(`[createItem] ✅ Created eligibility entry for "${data.name}" (${eligibilityLevel})`);
+          }
+        } else {
+          console.warn("[createItem] item_eligibility table does not exist. Skipping eligibility creation.");
+        }
+      } catch (eligibilityErr) {
+        console.warn("[createItem] Error creating eligibility entry:", eligibilityErr.message);
+        // Don't throw - item creation should succeed even if eligibility creation fails
+      }
 
       let notificationInfo = { notified: 0 };
       if (data.stock > 0)
@@ -725,7 +1030,7 @@ class ItemsService {
   /**
    * Adjust item stock
    */
-  async adjustStock(id, adjustment, reason = "", io = null) {
+  async adjustStock(id, adjustment, reason = "", io = null, size = null) {
     try {
       const { data: currentItem, error: fetchError } = await supabase
         .from("items")
@@ -738,28 +1043,122 @@ class ItemsService {
 
       const wasOutOfStock =
         currentItem.stock === 0 || currentItem.status === "Out of Stock";
-      const newStock = Math.max(0, currentItem.stock + adjustment);
+      
+      let updatedItem;
+      let newStock;
+
+      // Check if this is a size-specific item with JSON variations
+      let isJsonVariant = false;
+      let variantIndex = -1;
+      let parsedNote = null;
+
+      if (currentItem.note && size) {
+        try {
+          parsedNote = JSON.parse(currentItem.note);
+          if (
+            parsedNote?._type === "sizeVariations" &&
+            Array.isArray(parsedNote.sizeVariations)
+          ) {
+            isJsonVariant = true;
+            // Find the variant index for the specified size
+            // Use flexible matching: "Large" should match "Large (L)" or "Large(L)"
+            const normalizedSize = size.toLowerCase().trim();
+            variantIndex = parsedNote.sizeVariations.findIndex((v) => {
+              if (!v.size) return false;
+              const variantSize = v.size.toLowerCase().trim();
+              // Exact match
+              if (variantSize === normalizedSize) return true;
+              // Check if variant size contains the order size (e.g., "Large (L)" contains "Large")
+              if (variantSize.includes(normalizedSize)) return true;
+              // Check if order size contains variant size (e.g., "Large" contains "Large")
+              if (normalizedSize.includes(variantSize)) return true;
+              // Extract base size from variant (e.g., "Large (L)" -> "Large")
+              const baseSize = variantSize.split(/[(\[]/)[0].trim();
+              if (baseSize === normalizedSize) return true;
+              return false;
+            });
+            
+            if (variantIndex === -1) {
+              console.warn(
+                `⚠️ Size "${size}" not found in JSON variations for item ${currentItem.name}. Available sizes: ${parsedNote.sizeVariations.map(v => v.size).join(", ")}`
+              );
+            }
+          }
+        } catch (e) {
+          console.warn("Failed to parse item note for size variant:", e);
+        }
+      }
+
+      if (isJsonVariant && variantIndex !== -1) {
+        // Handle JSON variant stock update
+        const variant = parsedNote.sizeVariations[variantIndex];
+        const currentVariantStock = Number(variant.stock) || 0;
+        const newVariantStock = Math.max(0, currentVariantStock + adjustment);
+
+        // Update variant stock
+        parsedNote.sizeVariations[variantIndex].stock = newVariantStock;
+
+        // Recalculate total stock from all variants
+        newStock = parsedNote.sizeVariations.reduce(
+          (sum, v) => sum + (Number(v.stock) || 0),
+          0
+        );
+
+        const { data, error } = await supabase
+          .from("items")
+          .update({
+            stock: newStock,
+            note: JSON.stringify(parsedNote),
+          })
+          .eq("id", id)
+          .select()
+          .single();
+        if (error) throw error;
+        updatedItem = data;
+
+        console.log(
+          `📦 Adjusted JSON variant stock: ${currentItem.name} (${currentItem.education_level}) - Size: ${size}, Variant: ${currentVariantStock} -> ${newVariantStock}, Total: ${newStock}`
+        );
+      } else {
+        // Handle regular stock update (no size-specific variant)
+        newStock = Math.max(0, currentItem.stock + adjustment);
+        const { data, error } = await supabase
+          .from("items")
+          .update({ stock: newStock })
+          .eq("id", id)
+          .select()
+          .single();
+        if (error) throw error;
+        updatedItem = data;
+
+        console.log(
+          `📦 Adjusted stock: ${currentItem.name} (${currentItem.education_level}) - ${currentItem.stock} -> ${newStock}`
+        );
+      }
+
       const isRestocked = wasOutOfStock && newStock > 0;
 
-      const { data, error } = await supabase
-        .from("items")
-        .update({ stock: newStock })
-        .eq("id", id)
-        .select()
-        .single();
-      if (error) throw error;
+      // Emit Socket.IO event for real-time updates
+      if (io) {
+        io.emit("item:updated", {
+          itemId: id,
+          item: updatedItem,
+          reason: reason || "Stock adjusted",
+        });
+        console.log(`📡 Socket.IO: Emitted item:updated for item ${id}`);
+      }
 
       let notificationInfo = null;
       if (isRestocked) {
         console.log(
-          `📦 Item restocked via adjustment: ${data.name} (${data.education_level})`
+          `📦 Item restocked via adjustment: ${updatedItem.name} (${updatedItem.education_level})`
         );
-        notificationInfo = await this.handleRestockNotifications(data, io);
+        notificationInfo = await this.handleRestockNotifications(updatedItem, io);
       }
 
       return {
         success: true,
-        data,
+        data: updatedItem,
         message: `Stock adjusted successfully. ${reason}`,
         notificationInfo,
       };

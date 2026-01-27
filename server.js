@@ -88,6 +88,18 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
+// Request interceptor for eligibility bulk update debugging
+app.use('/api/system-admin/eligibility/bulk', (req, res, next) => {
+  if (req.method === 'PUT') {
+    console.log('\n=== BULK UPDATE REQUEST INTERCEPTED ===');
+    console.log('Raw body:', JSON.stringify(req.body, null, 2));
+    console.log('Content-Type:', req.get('Content-Type'));
+    console.log('Method:', req.method);
+    console.log('URL:', req.url);
+  }
+  next();
+});
+
 // Passport initialization
 app.use(passport.initialize());
 

@@ -17,6 +17,49 @@ exports.getUsers = async (req, res) => {
     const search = req.query.search || "";
     const role = req.query.role || "";
     const status = req.query.status || "";
+    // Handle education_level: if undefined, null, or empty string, use empty string (means "show all")
+    // Empty string from "All Education Levels" means "show all" (no filter applied)
+    // Express may parse empty query params as undefined or empty string, so handle both
+    let education_level = "";
+    if (req.query.education_level !== undefined && req.query.education_level !== null) {
+      const rawValue = String(req.query.education_level);
+      education_level = rawValue.trim(); // Trim whitespace
+    }
+    
+    // Handle course_year_level: if undefined, null, or empty string, use empty string (means "show all")
+    let course_year_level = "";
+    if (req.query.course_year_level !== undefined && req.query.course_year_level !== null) {
+      const rawValue = String(req.query.course_year_level);
+      course_year_level = rawValue.trim(); // Trim whitespace
+    }
+    
+    // Handle school_year: 2-digit year prefix for filtering student_number (e.g., "29" from "S.Y. 2029 - 2030")
+    let school_year = "";
+    if (req.query.school_year !== undefined && req.query.school_year !== null) {
+      const rawValue = String(req.query.school_year);
+      school_year = rawValue.trim(); // Trim whitespace
+    }
+    
+    // Handle excludeRole: exclude specific roles (e.g., "student" to exclude all students)
+    let excludeRole = "";
+    if (req.query.excludeRole !== undefined && req.query.excludeRole !== null) {
+      const rawValue = String(req.query.excludeRole);
+      excludeRole = rawValue.trim(); // Trim whitespace
+    }
+
+    // Debug logging
+    console.log(`[getUsers Controller] Received params:`, {
+      raw_education_level: req.query.education_level,
+      processed_education_level: education_level,
+      is_empty: education_level === "",
+      raw_course_year_level: req.query.course_year_level,
+      processed_course_year_level: course_year_level,
+      raw_school_year: req.query.school_year,
+      processed_school_year: school_year,
+      raw_excludeRole: req.query.excludeRole,
+      processed_excludeRole: excludeRole,
+      role: req.query.role
+    });
 
     const result = await userService.getUsers({
       page,
@@ -24,6 +67,10 @@ exports.getUsers = async (req, res) => {
       search,
       role,
       status,
+      education_level,
+      course_year_level,
+      school_year,
+      excludeRole,
     });
 
     return res.json({
@@ -193,6 +240,57 @@ exports.deleteUser = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to delete user",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Bulk update users
+ * PATCH /api/users/bulk-update
+ */
+exports.bulkUpdateUsers = async (req, res) => {
+  try {
+    const { userIds, updateData } = req.body;
+
+    if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "User IDs array is required",
+      });
+    }
+
+    if (!updateData || Object.keys(updateData).length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Update data is required",
+      });
+    }
+
+    // Validate updateData fields
+    const allowedFields = ["max_items_per_order", "order_lockout_period"];
+    const updateFields = Object.keys(updateData);
+    const invalidFields = updateFields.filter((field) => !allowedFields.includes(field));
+
+    if (invalidFields.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid update fields: ${invalidFields.join(", ")}`,
+      });
+    }
+
+    const result = await userService.bulkUpdateUsers(userIds, updateData);
+
+    return res.json({
+      success: true,
+      data: result,
+      message: `Successfully updated ${result.updatedCount} user(s)`,
+    });
+  } catch (error) {
+    console.error("Error in bulkUpdateUsers controller:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to bulk update users",
       error: error.message,
     });
   }

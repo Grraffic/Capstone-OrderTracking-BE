@@ -66,9 +66,17 @@ class ItemsController {
    */
   async getItems(req, res) {
     try {
-      const { page, limit, ...filters } = req.query;
+      const { page, limit, userEducationLevel, ...filters } = req.query;
+      
+      // If userEducationLevel is provided, use it for eligibility filtering
+      // This is typically sent by students to see only items they're eligible for
+      const filtersWithEligibility = {
+        ...filters,
+        ...(userEducationLevel ? { userEducationLevel } : {}),
+      };
+      
       const result = await ItemsService.getItems(
-        filters,
+        filtersWithEligibility,
         parseInt(page) || 1,
         parseInt(limit) || 10
       );
@@ -309,7 +317,7 @@ class ItemsController {
   async adjustStock(req, res) {
     try {
       const { id } = req.params;
-      const { adjustment, reason } = req.body;
+      const { adjustment, reason, size } = req.body;
 
       if (typeof adjustment !== "number") {
         return res
@@ -321,7 +329,7 @@ class ItemsController {
       }
 
       const io = req.app.get("io");
-      const result = await ItemsService.adjustStock(id, adjustment, reason, io);
+      const result = await ItemsService.adjustStock(id, adjustment, reason, io, size);
 
       if (result.notificationInfo && result.notificationInfo.notified > 0) {
         console.log(

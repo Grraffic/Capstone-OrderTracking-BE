@@ -70,6 +70,8 @@ passport.use(
           if (!userError && userData) {
             existingUser = userData;
             // If user exists and is active, use their existing role
+            // Note: Inactive user check is handled in auth.controller.js oauthCallback
+            // to allow proper redirect to frontend with error parameter
             if (userData.is_active !== false) {
               role = userData.role;
               console.log(
@@ -77,13 +79,10 @@ passport.use(
               );
             } else {
               console.warn(
-                `⚠️ User ${normalizedEmail} exists but is inactive`
+                `⚠️ User ${normalizedEmail} exists but is inactive - will be handled in controller`
               );
-              return done(
-                new Error(
-                  "Your account has been deactivated. Please contact system administrator."
-                )
-              );
+              // Don't throw error here - let controller handle redirect to frontend
+              // Pass user data so controller can check is_active and redirect properly
             }
           }
         } catch (error) {

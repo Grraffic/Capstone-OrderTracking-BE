@@ -15,6 +15,8 @@ const emailRoleAssignmentService = require("./emailRoleAssignment.service");
  * @param {string} options.search - Search term for name, email, username
  * @param {string} options.role - Filter by role
  * @param {string} options.status - Filter by status (active/inactive/pending)
+ * @param {string} options.education_level - Filter by education level
+ * @param {string} options.course_year_level - Filter by course/year level
  * @returns {Promise<Object>} Users data with pagination info
  */
 async function getUsers({
@@ -23,6 +25,10 @@ async function getUsers({
   search = "",
   role = "",
   status = "",
+  education_level = "",
+  course_year_level = "",
+  school_year = "",
+  excludeRole = "",
 }) {
   try {
     let query = supabase
@@ -32,12 +38,19 @@ async function getUsers({
 
     // Apply search filter
     if (search) {
-      query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%`);
+      query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%,student_number.ilike.%${search}%`);
     }
 
     // Apply role filter
     if (role && role !== "All Roles") {
       query = query.eq("role", role);
+    }
+    
+    // Exclude specific roles (e.g., exclude "student" to hide all students)
+    if (excludeRole && typeof excludeRole === "string" && excludeRole.trim() !== "") {
+      const trimmedExcludeRole = excludeRole.trim();
+      query = query.neq("role", trimmedExcludeRole);
+      console.log(`[getUsers] ✅ Excluding role: "${trimmedExcludeRole}" - students will not be shown`);
     }
 
     // Apply status filter
@@ -48,6 +61,70 @@ async function getUsers({
         query = query.eq("is_active", false);
       }
       // Note: "Pending" status might need additional logic based on your requirements
+    }
+
+    // Apply education level filter
+    // Only filter if education_level is provided and not empty/placeholder
+    // Empty string means "show all" (no filter applied)
+    // "All Education Levels" maps to "" which means show all students
+    // IMPORTANT: Do NOT filter when education_level is empty string - this shows ALL students
+    const trimmedEducationLevel = (education_level !== undefined && education_level !== null) 
+      ? String(education_level).trim() 
+      : "";
+    
+    // Apply filter ONLY if education_level is a non-empty string
+    // Empty string (from "All Education Levels") = show all students (NO FILTER APPLIED)
+    // Non-empty string (from specific education level) = filter by that level
+    // Also check for explicit "All Education Levels" string for backward compatibility
+    const shouldSkipFilter = !trimmedEducationLevel || 
+                             trimmedEducationLevel === "" || 
+                             trimmedEducationLevel === "All Education Levels";
+    
+    if (!shouldSkipFilter) {
+      // Apply the filter - this will only show students with matching education_level
+      query = query.eq("education_level", trimmedEducationLevel);
+      console.log(`[getUsers] ✅ APPLYING FILTER - education_level: "${trimmedEducationLevel}"`);
+    } else {
+      // NO FILTER - this will show ALL students regardless of education_level (including NULL values)
+      console.log(`[getUsers] ⚠️ NO FILTER APPLIED - education_level is empty (original: "${education_level}", trimmed: "${trimmedEducationLevel}") - showing ALL students`);
+    }
+
+    // Apply course/year level filter
+    // Only filter if course_year_level is provided and not empty/placeholder
+    // Empty string means "show all" (no filter applied)
+    // Frontend mapper normalizes format (e.g., "BSIS 4th yr" -> "BSIS 4th Year")
+    // Use case-insensitive matching to handle any remaining format variations
+    if (
+      course_year_level && 
+      typeof course_year_level === "string" && 
+      course_year_level.trim() !== "" && 
+      course_year_level !== "All Grade Levels"
+    ) {
+      const trimmedLevel = course_year_level.trim();
+      // Use ilike for case-insensitive matching (handles "Year" vs "yr", etc.)
+      // Match the normalized format from the mapper
+      query = query.ilike("course_year_level", trimmedLevel);
+      console.log(`[getUsers] Filtering by course_year_level (case-insensitive): "${trimmedLevel}"`);
+    } else {
+      console.log(`[getUsers] No course_year_level filter (value: "${course_year_level}")`);
+    }
+
+    // NOTE: School year filter is NOT applied here because:
+    // - student_number represents the ENROLLMENT year (when student first enrolled), not current school year
+    // - Example: "22 - 00023RSR" means student enrolled in 2022, but they may still be enrolled in 2026-2027
+    // - The student_number prefix stays fixed until graduation, so filtering by it would exclude valid students
+    // - To filter by current school year, we would need a separate enrollment_year or current_school_year field
+    // For now, when school_year is selected, we show all students (no filter applied)
+    if (
+      school_year && 
+      typeof school_year === "string" && 
+      school_year.trim() !== ""
+    ) {
+      console.log(`[getUsers] ℹ️ School year selected: ${school_year} - showing all students (student_number represents enrollment year, not current school year)`);
+      // No filter applied - student_number prefix represents enrollment year, not current school year
+      // Students enrolled in previous years may still be active in the selected school year
+    } else {
+      console.log(`[getUsers] ℹ️ No school_year filter (value: "${school_year}") - showing all students`);
     }
 
     // Apply pagination
@@ -442,10 +519,54 @@ async function deleteUser(userId) {
   }
 }
 
+/**
+ * Bulk update users
+ * @param {Array<string>} userIds - Array of user IDs to update
+ * @param {Object} updateData - Data to update (max_items_per_order, order_lockout_period)
+ * @returns {Promise<Object>} Update result with count of updated users
+ */
+async function bulkUpdateUsers(userIds, updateData) {
+  try {
+    if (!userIds || userIds.length === 0) {
+      throw new Error("User IDs array is required");
+    }
+
+    if (!updateData || Object.keys(updateData).length === 0) {
+      throw new Error("Update data is required");
+    }
+
+    // Prepare update object
+    const updateObject = {
+      ...updateData,
+      updated_at: new Date().toISOString(),
+    };
+
+    // Update all users in the array
+    const { data, error } = await supabase
+      .from("users")
+      .update(updateObject)
+      .in("id", userIds)
+      .select();
+
+    if (error) {
+      throw error;
+    }
+
+    return {
+      updatedCount: data?.length || 0,
+      updatedUsers: data || [],
+    };
+  } catch (error) {
+    console.error("Error bulk updating users:", error);
+    throw error;
+  }
+}
+
 module.exports = {
   getUsers,
   getUserById,
   createUser,
   updateUser,
   deleteUser,
+  bulkUpdateUsers,
 };

@@ -23,10 +23,19 @@ router.get("/profile", verifyToken, async (req, res) => {
     const { data, error } = await supabase
       .from("users")
       .select(
-        "email, name, role, avatar_url, photo_url, course_year_level, student_number, education_level"
+        "email, name, role, avatar_url, photo_url, course_year_level, student_number, education_level, is_active"
       )
       .eq("email", tokenUser.email)
       .maybeSingle();
+    
+    // Check if user is inactive
+    if (data && data.is_active === false) {
+      return res.status(403).json({ 
+        message: "Account is inactive",
+        error: "account_inactive",
+        is_active: false
+      });
+    }
 
     if (error) {
       console.warn("Supabase profile fetch error:", error.message || error);
@@ -52,6 +61,7 @@ router.get("/profile", verifyToken, async (req, res) => {
       role: userRole,
       name: data?.name || null,
       photoURL: data?.photo_url || data?.avatar_url || null,
+      is_active: data?.is_active !== undefined ? data.is_active : true, // Default to true if not set
       // Only include student fields for students, set to null for admins
       courseYearLevel: isAdmin ? null : (data?.course_year_level || null),
       studentNumber: isAdmin ? null : (data?.student_number || null),
