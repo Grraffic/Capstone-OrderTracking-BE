@@ -39,6 +39,17 @@ router.get("/inventory-report", itemsController.getInventoryReport);
 router.get("/sizes/:name/:educationLevel", itemsController.getAvailableSizes);
 
 /**
+ * GET /api/items/name-suggestions
+ * Get curated item name suggestions (optionally filtered by education level and search term)
+ *
+ * Query Parameters:
+ * - educationLevel: Filter suggestions by education level (also returns global suggestions)
+ * - search: Search within suggestions by name (case-insensitive)
+ * - limit: Max suggestions to return (default: 100, max: 500)
+ */
+router.get("/name-suggestions", itemsController.getNameSuggestions);
+
+/**
  * POST /api/items/upload-image
  * Upload an item image to Cloudinary and return its URL
  */
@@ -109,6 +120,13 @@ router.post("/:id/add-stock", itemsController.addStock);
  * Note: Add auth.requireAdmin middleware when ready
  */
 router.post("/:id/reset-beginning-inventory", itemsController.resetBeginningInventory);
+
+/**
+ * PATCH /api/items/:id/archive
+ * Archive item (hidden from default list; show when filter "Archived")
+ * Note: Add auth.requireAdmin middleware when ready
+ */
+router.patch("/:id/archive", itemsController.archiveItem);
 
 /**
  * DELETE /api/items/:id

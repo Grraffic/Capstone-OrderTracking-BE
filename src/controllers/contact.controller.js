@@ -1,4 +1,5 @@
 const supabase = require("../config/supabase");
+const { sendContactNotificationToCustodians } = require("../services/contact.service");
 
 /**
  * Contact Controller - CRUD Operations
@@ -39,6 +40,11 @@ exports.createContact = async (req, res) => {
         details: error.message,
       });
     }
+
+    // Notify all property custodians via email (fire-and-forget; do not block response)
+    sendContactNotificationToCustodians(contactData).catch((err) =>
+      console.error("Contact notification email error:", err)
+    );
 
     // Return success response
     return res.status(201).json({

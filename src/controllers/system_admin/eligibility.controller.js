@@ -15,11 +15,13 @@ exports.getEligibilityData = async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const search = req.query.search || "";
+    const filter = req.query.filter === "without_eligibility" ? "without_eligibility" : "all";
 
     const result = await eligibilityService.getEligibilityData({
       page,
       limit,
       search,
+      filter,
     });
 
     res.json(result);

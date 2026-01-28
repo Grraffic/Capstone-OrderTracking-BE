@@ -1,5 +1,6 @@
 const supabase = require("../../config/supabase");
 const { generateOrderReceiptQRData } = require("../../utils/qrCodeGenerator");
+const { getMaxQuantityForItem, normalizeItemName, resolveItemKey } = require("../../config/itemMaxOrder");
 const isProduction = process.env.NODE_ENV === "production";
 
 /**
@@ -326,6 +327,192 @@ class OrderService {
         throw new Error("Order must contain at least one item");
       }
 
+      // Enforce system-admin limits: max_items_per_order and order_lockout_period
+      const studentId = orderData.student_id || null;
+      const studentEmail = (orderData.student_email || "").trim();
+      if (studentId || studentEmail) {
+        const userFields =
+          "max_items_per_order, order_lockout_period, order_lockout_unit, education_level, student_type, gender";
+        const userQuery = studentId
+          ? supabase.from("users").select(userFields).eq("id", studentId).maybeSingle()
+          : supabase.from("users").select("id, " + userFields).eq("email", studentEmail).maybeSingle();
+        const { data: userRow, error: userErr } = await userQuery;
+        if (!userErr && userRow) {
+          const rawMaxItems = userRow.max_items_per_order;
+          const studentType = (userRow.student_type || "new").toLowerCase();
+          const baseMaxItems =
+            studentType === "new" ? 8 :
+            studentType === "old" ? 2 :
+            null;
+          // Admin override (rawMaxItems) wins; otherwise fall back to derived baseMaxItems.
+          const maxItems =
+            rawMaxItems != null && Number(rawMaxItems) > 0
+              ? Number(rawMaxItems)
+              : baseMaxItems;
+          const lockoutPeriod = userRow.order_lockout_period;
+          const lockoutUnit = userRow.order_lockout_unit;
+
+          if (maxItems == null || Number(maxItems) <= 0) {
+            throw new Error(
+              "Your order limit has not been set by the administration. Please contact your school administrator to set your Max Items Per Order before placing an order."
+            );
+          }
+
+          // max_items_per_order = number of distinct item types (slots). Only placed orders count; cart does not.
+          // Slots are reduced when the student places an order, not when items are in the cart.
+          if (maxItems != null && Number(maxItems) > 0) {
+            const slotKeys = new Set();
+            for (const item of orderData.items || []) {
+              const key = resolveItemKey((item.name || "").trim());
+              if (key) slotKeys.add(key);
+            }
+            const slotCount = slotKeys.size;
+
+            const orParts = [];
+            if (studentId) orParts.push(`student_id.eq.${studentId}`);
+            if (studentEmail) orParts.push(`student_email.eq.${studentEmail}`);
+            let slotsUsedFromPlacedOrders = 0;
+            if (orParts.length > 0) {
+              const placedStatuses = ["pending", "paid", "claimed", "processing", "ready", "payment_pending", "completed"];
+              const { data: placedOrders } = await supabase
+                .from("orders")
+                .select("items")
+                .eq("is_active", true)
+                .in("status", placedStatuses)
+                .or(orParts.join(","));
+              const placedSlotKeys = new Set();
+              for (const row of placedOrders || []) {
+                const orderItems = Array.isArray(row.items) ? row.items : [];
+                for (const it of orderItems) {
+                  let key = resolveItemKey((it.name || "").trim());
+                  if (!key && (it.name || "").trim()) {
+                    const lower = (it.name || "").trim().toLowerCase();
+                    if (lower.includes("logo patch")) key = "logo patch";
+                  }
+                  if (key && typeof key === "string" && key.toLowerCase().includes("logo patch")) key = "logo patch";
+                  if (key) placedSlotKeys.add(key);
+                }
+              }
+              slotsUsedFromPlacedOrders = placedSlotKeys.size;
+            }
+            const slotsLeftForThisOrder = Math.max(0, Number(maxItems) - slotsUsedFromPlacedOrders);
+            if (slotCount > slotsLeftForThisOrder) {
+              throw new Error(
+                `Order exceeds your item type limit. You have ${slotsLeftForThisOrder} item type${slotsLeftForThisOrder !== 1 ? "s" : ""} left for this order (max ${maxItems} total; ${slotsUsedFromPlacedOrders} already used in placed orders). This order has ${slotCount}. Only placed orders count toward the limit—cart does not.`
+              );
+            }
+          }
+
+          if (lockoutPeriod != null && Number(lockoutPeriod) > 0 && maxItems != null && Number(maxItems) > 0) {
+            const orParts = [];
+            if (studentId) orParts.push(`student_id.eq.${studentId}`);
+            if (studentEmail) orParts.push(`student_email.eq.${studentEmail}`);
+            if (orParts.length > 0) {
+              const { data: lastOrder } = await supabase
+                .from("orders")
+                .select("created_at, items")
+                .eq("is_active", true)
+                .or(orParts.join(","))
+                .order("created_at", { ascending: false })
+                .limit(1)
+                .maybeSingle();
+
+              if (lastOrder && lastOrder.created_at) {
+                // Lockout applies only when the last order used the full Max Items Per Order (slots).
+                // If the last order had fewer than maxItems item types, the student can place another order.
+                const lastOrderSlotKeys = new Set();
+                for (const item of Array.isArray(lastOrder.items) ? lastOrder.items : []) {
+                  const key = resolveItemKey((item.name || "").trim());
+                  if (key) lastOrderSlotKeys.add(key);
+                }
+                const lastOrderSlotCount = lastOrderSlotKeys.size;
+                const usedFullAllowance = lastOrderSlotCount >= Number(maxItems);
+
+                if (usedFullAllowance) {
+                  const lastDate = new Date(lastOrder.created_at);
+                  const now = new Date();
+                  const monthsPerAcademicYear = 10;
+                  const lockoutMonths =
+                    (lockoutUnit === "academic_years"
+                      ? Number(lockoutPeriod) * monthsPerAcademicYear
+                      : Number(lockoutPeriod));
+                  const lockoutEnd = new Date(lastDate);
+                  lockoutEnd.setMonth(lockoutEnd.getMonth() + lockoutMonths);
+                  if (now < lockoutEnd) {
+                    const unitLabel =
+                      lockoutUnit === "academic_years"
+                        ? "academic year(s)"
+                        : "month(s)";
+                    throw new Error(
+                      `You cannot place another order until ${lockoutEnd.toLocaleDateString()}. Order lockout period is ${lockoutPeriod} ${unitLabel}.`
+                    );
+                  }
+                }
+              }
+            }
+          }
+
+          // Per-item max enforcement: (current order + existing placed orders) must not exceed segment max
+          const educationLevelForSegment =
+            (userRow.education_level === "Preschool" ||
+            userRow.education_level === "Prekindergarten"
+              ? "Kindergarten"
+              : userRow.education_level) || orderData.education_level || null;
+          // studentType already derived earlier in this block
+          const gender = userRow.gender || null;
+
+          // Sum quantities in this order by resolved item key
+          const totalsByItem = {};
+          for (const item of orderData.items || []) {
+            const key = resolveItemKey(item.name || "");
+            if (!key) continue;
+            totalsByItem[key] = (totalsByItem[key] || 0) + (Number(item.quantity) || 0);
+          }
+
+          // Sum quantities already in placed orders for this student (pending, paid, claimed)
+          const placedStatuses = ["pending", "paid", "claimed"];
+          const orParts = [];
+          if (studentId) orParts.push(`student_id.eq.${studentId}`);
+          if (studentEmail) orParts.push(`student_email.eq.${studentEmail}`);
+          let alreadyOrderedByItem = {};
+          if (orParts.length > 0) {
+            const { data: placedOrders } = await supabase
+              .from("orders")
+              .select("items")
+              .eq("is_active", true)
+              .in("status", placedStatuses)
+              .or(orParts.join(","));
+            for (const row of placedOrders || []) {
+              const orderItems = Array.isArray(row.items) ? row.items : [];
+              for (const it of orderItems) {
+                const rawName = (it.name || "").trim();
+                let key = resolveItemKey(rawName);
+                if (!key && rawName && rawName.toLowerCase().includes("jogging pants")) key = "jogging pants";
+                if (!key) continue;
+                alreadyOrderedByItem[key] =
+                  (alreadyOrderedByItem[key] || 0) + (Number(it.quantity) || 0);
+              }
+            }
+          }
+
+          for (const [itemKey, totalQty] of Object.entries(totalsByItem)) {
+            const max = getMaxQuantityForItem(
+              itemKey,
+              educationLevelForSegment,
+              studentType,
+              gender
+            );
+            const alreadyOrdered = alreadyOrderedByItem[itemKey] || 0;
+            const totalUsed = alreadyOrdered + totalQty;
+            if (totalUsed > max) {
+              throw new Error(
+                `You have already ordered ${alreadyOrdered} of this item. Adding ${totalQty} would exceed the maximum (${max}) per student.`
+              );
+            }
+          }
+        }
+      }
+
       // Generate QR code data if missing or null
       if (!orderData.qr_code_data) {
         console.log("QR code data missing, generating...");
@@ -361,25 +548,22 @@ class OrderService {
 
       if (!isPreOrder) {
         // Only reduce inventory for regular orders
-        // Optimize: Batch fetch all potential items first to reduce queries
-        const uniqueItemNames = [...new Set(items.map(i => i.name))];
-        const itemLookupPromises = uniqueItemNames.map(itemName =>
-          supabase
-            .from("items")
-            .select("*")
-            .ilike("name", itemName)
-            .eq("education_level", orderData.education_level)
-            .eq("is_active", true)
-        );
-        
-        const itemLookupResults = await Promise.all(itemLookupPromises);
+        // Single query: fetch all items for this education level, then build lookup by name
+        const { data: allItems, error: itemsError } = await supabase
+          .from("items")
+          .select("*")
+          .eq("education_level", orderData.education_level)
+          .eq("is_active", true);
+
+        if (itemsError) throw itemsError;
+
         const itemLookupMap = new Map();
-        uniqueItemNames.forEach((name, index) => {
-          if (itemLookupResults[index].data) {
-            itemLookupMap.set(name.toLowerCase(), itemLookupResults[index].data);
-          }
-        });
-        
+        for (const row of allItems || []) {
+          const key = (row.name || "").toLowerCase();
+          if (!itemLookupMap.has(key)) itemLookupMap.set(key, []);
+          itemLookupMap.get(key).push(row);
+        }
+
         // Process each item in the order
         for (const item of items) {
           try {

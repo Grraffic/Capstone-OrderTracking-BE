@@ -201,7 +201,7 @@ class InventoryService {
         }
 
         if (hasJsonVariations && sizeVariations.length > 0) {
-          // Split by JSON variations - each variant becomes a separate row
+          // Use the size from each variant as stored on the item (refer to items data)
           sizeVariations.forEach((variant) => {
             const variantSize = variant.size || "N/A";
             const variantStock = Number(variant.stock) || 0;
@@ -233,7 +233,7 @@ class InventoryService {
             }
 
             // Read reorder_point from variant JSON field if available
-            // Otherwise, fall back to item-level reorder_point
+            // For size-variation items, each variant has its own reorder_point; missing means 0 (not item-level)
             let variantReorderPoint;
             if (
               variant.reorder_point !== undefined &&
@@ -241,8 +241,8 @@ class InventoryService {
             ) {
               variantReorderPoint = Number(variant.reorder_point) || 0;
             } else {
-              // Fallback: use item-level reorder_point (for items without per-variant tracking)
-              variantReorderPoint = item.reorder_point || 0;
+              // Per-variant mode: no reorder_point on this variant => 0 (do not use item-level)
+              variantReorderPoint = 0;
             }
 
             // Calculate ending inventory: Beginning Inventory + Purchases - Released + Returns

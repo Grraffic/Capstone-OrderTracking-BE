@@ -138,12 +138,14 @@ async function backfillEligibilityForAllItems() {
  * @param {number} options.page - Page number (default: 1)
  * @param {number} options.limit - Items per page (default: 10)
  * @param {string} options.search - Search term for item name
+ * @param {string} options.filter - "all" | "without_eligibility" to show only items with no eligibility set
  * @returns {Promise<Object>} Items data with eligibility info and pagination
  */
 async function getEligibilityData({
   page = 1,
   limit = 10,
   search = "",
+  filter = "all",
 } = {}) {
   try {
     // Check if item_eligibility table exists
@@ -161,12 +163,27 @@ async function getEligibilityData({
       console.log("✅ item_eligibility table exists and is accessible");
     }
 
+    // When filter is "without_eligibility", restrict to items that have no eligibility records
+    let eligibleItemIds = [];
+    if (filter === "without_eligibility") {
+      const { data: eligRows, error: eligErr } = await supabase
+        .from("item_eligibility")
+        .select("item_id");
+      if (!eligErr && eligRows && eligRows.length > 0) {
+        eligibleItemIds = [...new Set(eligRows.map((r) => r.item_id))];
+      }
+    }
+
     // Build query for items - group by name to show unique items only
     let itemsQuery = supabase
       .from("items")
       .select("id, name", { count: "exact" })
       .eq("is_active", true)
       .order("name", { ascending: true });
+
+    if (filter === "without_eligibility" && eligibleItemIds.length > 0) {
+      itemsQuery = itemsQuery.not("id", "in", `(${eligibleItemIds.join(",")})`);
+    }
 
     // Apply search filter
     if (search && search.trim() !== "") {

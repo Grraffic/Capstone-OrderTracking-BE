@@ -268,7 +268,7 @@ exports.bulkUpdateUsers = async (req, res) => {
     }
 
     // Validate updateData fields
-    const allowedFields = ["max_items_per_order", "order_lockout_period"];
+    const allowedFields = ["max_items_per_order", "order_lockout_period", "order_lockout_unit"];
     const updateFields = Object.keys(updateData);
     const invalidFields = updateFields.filter((field) => !allowedFields.includes(field));
 

@@ -3,6 +3,9 @@ const NotificationService = require("../notification.service");
 const OrderService = require("./order.service");
 const isProduction = process.env.NODE_ENV === "production";
 
+/** Item name pattern (ilike) for items applicable to ALL education levels (e.g. Logo Patch, New Logo Patch). */
+const ALL_LEVEL_ITEM_NAME_PATTERN = "%logo patch%";
+
 /**
  * Items Service
  *
@@ -15,6 +18,94 @@ const isProduction = process.env.NODE_ENV === "production";
  * - Restock notifications for pre-orders
  */
 class ItemsService {
+  /**
+   * Get curated item name suggestions for autocomplete/typeahead.
+   *
+   * - Returns global suggestions (education_level IS NULL) plus, when provided,
+   *   the suggestions for that specific education level.
+   * - If the curated table doesn't exist yet, returns an empty list (and a message)
+   *   so the frontend can safely fall back to static lists.
+   */
+  async getNameSuggestions({ educationLevel = null, search = null, limit } = {}) {
+    try {
+      const safeLimit = Math.max(
+        1,
+        Math.min(Number.isFinite(limit) ? Number(limit) : 100, 500)
+      );
+
+      const buildQuery = () => {
+        let q = supabase
+          .from("item_name_suggestions")
+          .select("name,education_level,created_at")
+          .order("name", { ascending: true })
+          .limit(safeLimit);
+
+        if (search) {
+          const s = String(search).trim();
+          if (s) q = q.ilike("name", `%${s}%`);
+        }
+
+        return q;
+      };
+
+      // Always fetch global suggestions (education_level IS NULL)
+      const globalQuery = buildQuery().is("education_level", null);
+      const globalResult = await globalQuery;
+
+      // Missing table → allow graceful fallback on the frontend
+      if (globalResult.error && globalResult.error.code === "42P01") {
+        return {
+          success: true,
+          data: [],
+          message:
+            'Curated suggestions are not enabled yet (missing table "item_name_suggestions").',
+        };
+      }
+      if (globalResult.error) throw globalResult.error;
+
+      // Optionally fetch level-specific suggestions separately (avoids PostgREST OR quoting issues)
+      let levelRows = [];
+      if (educationLevel) {
+        const levelQuery = buildQuery().eq("education_level", educationLevel);
+        const levelResult = await levelQuery;
+        if (levelResult.error && levelResult.error.code !== "42P01") {
+          throw levelResult.error;
+        }
+        levelRows = levelResult.data || [];
+      }
+
+      const rows = [...(globalResult.data || []), ...levelRows];
+
+      // De-dupe (prefer level-specific over global if names collide)
+      const seen = new Map(); // normalized name -> { name, education_level }
+      for (const row of rows) {
+        const name = (row.name || "").trim();
+        if (!name) continue;
+        const key = name.toLowerCase().trim().replace(/\s+/g, " ");
+
+        if (!seen.has(key)) {
+          seen.set(key, { name, education_level: row.education_level || null });
+          continue;
+        }
+
+        // If we already have global, and this one is level-specific, replace.
+        const existing = seen.get(key);
+        if (!existing.education_level && row.education_level) {
+          seen.set(key, { name, education_level: row.education_level });
+        }
+      }
+
+      const names = Array.from(seen.values())
+        .map((x) => x.name)
+        .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+
+      return { success: true, data: names };
+    } catch (error) {
+      console.error("Get name suggestions error:", error);
+      throw new Error(`Failed to fetch name suggestions: ${error.message}`);
+    }
+  }
+
   /**
    * Get all items with optional filtering and pagination
    * @param {Object} filters - Filter options
@@ -29,10 +120,24 @@ class ItemsService {
    */
   async getItems(filters = {}, page = 1, limit = 10) {
     try {
-      let query = supabase
-        .from("items")
-        .select("*", { count: "exact" })
-        .eq("is_active", true);
+      const itemStatus = filters.itemStatus || filters.item_status || "active";
+      let query;
+      if (itemStatus === "deleted") {
+        query = supabase
+          .from("items")
+          .select("*", { count: "exact" })
+          .eq("is_active", false);
+      } else {
+        query = supabase
+          .from("items")
+          .select("*", { count: "exact" })
+          .eq("is_active", true);
+        if (itemStatus === "archived") {
+          query = query.eq("is_archived", true);
+        } else {
+          query = query.eq("is_archived", false);
+        }
+      }
 
       // If userEducationLevel is provided, filter by eligibility table AND approval status
       // This is for students - they should only see approved items they're eligible for
@@ -42,12 +147,14 @@ class ItemsService {
         // and query will be retried without approval filter for backward compatibility
         query = query.eq("is_approved", true);
         // Map user education level to eligibility table format
+        // Users table: "Preschool" -> Eligibility: "Kindergarten" (item_eligibility uses Kindergarten)
         // Users table: "Kindergarten" -> Eligibility: "Kindergarten" (Preschool checkbox)
         // Users table: "Elementary" -> Eligibility: "Elementary"
         // Users table: "High School" -> Eligibility: "Junior High School" (JHS checkbox)
         // Users table: "Senior High School" -> Eligibility: "Senior High School" (SHS checkbox)
         // Users table: "College" -> Eligibility: "College"
         const educationLevelMap = {
+          "Preschool": "Kindergarten",
           "Kindergarten": "Kindergarten",
           "Elementary": "Elementary",
           "High School": "Junior High School",
@@ -68,7 +175,16 @@ class ItemsService {
           console.warn("Eligibility filtering error (table may not exist):", eligibilityError.message);
         } else if (eligibleItems && eligibleItems.length > 0) {
           // Filter to only show eligible items
-          const eligibleItemIds = eligibleItems.map(e => e.item_id);
+          let eligibleItemIds = eligibleItems.map(e => e.item_id);
+          // Include items applicable to ALL education levels (e.g. Logo Patch, New Logo Patch)
+          const { data: allLevelItems } = await supabase
+            .from("items")
+            .select("id")
+            .eq("is_active", true)
+            .eq("is_approved", true)
+            .ilike("name", ALL_LEVEL_ITEM_NAME_PATTERN);
+          const allLevelIds = (allLevelItems || []).map((i) => i.id);
+          eligibleItemIds = [...new Set([...eligibleItemIds, ...allLevelIds])];
           query = query.in("id", eligibleItemIds);
         } else {
           // No eligible items found - check if there are items without eligibility records
@@ -94,8 +210,19 @@ class ItemsService {
               if (itemsWithoutEligibility.length > 0) {
                 query = query.in("id", itemsWithoutEligibility);
               } else {
-                // All items have eligibility records but none match - return empty
-                query = query.eq("id", "00000000-0000-0000-0000-000000000000");
+                // All items have eligibility records but none match - still show all-level items (e.g. Logo Patch)
+                const { data: allLevelItems } = await supabase
+                  .from("items")
+                  .select("id")
+                  .eq("is_active", true)
+                  .eq("is_approved", true)
+                  .ilike("name", ALL_LEVEL_ITEM_NAME_PATTERN);
+                const allLevelIds = (allLevelItems || []).map((i) => i.id);
+                if (allLevelIds.length > 0) {
+                  query = query.in("id", allLevelIds);
+                } else {
+                  query = query.eq("id", "00000000-0000-0000-0000-000000000000");
+                }
               }
             }
           }
@@ -112,6 +239,29 @@ class ItemsService {
         query = query.or(
           `name.ilike.%${filters.search}%,category.ilike.%${filters.search}%,description.ilike.%${filters.search}%`
         );
+      }
+
+      // Date range filter: [startDate, endDate] (inclusive). Use received bounds as-is so
+      // client's local-day boundaries (sent as UTC via toISOString) are preserved; no setUTCHours.
+      // For archived/deleted, use updated_at (when it was archived/updated); for active, use created_at.
+      const dateColumn = itemStatus === "archived" || itemStatus === "deleted" ? "updated_at" : "created_at";
+      if (filters.startDate || filters.endDate) {
+        const start = filters.startDate
+          ? (typeof filters.startDate === "string"
+              ? new Date(filters.startDate)
+              : filters.startDate)
+          : null;
+        const end = filters.endDate
+          ? (typeof filters.endDate === "string"
+              ? new Date(filters.endDate)
+              : filters.endDate)
+          : null;
+        if (start && !isNaN(start.getTime())) {
+          query = query.gte(dateColumn, start.toISOString());
+        }
+        if (end && !isNaN(end.getTime())) {
+          query = query.lte(dateColumn, end.toISOString());
+        }
       }
 
       const from = (page - 1) * limit;
@@ -138,6 +288,7 @@ class ItemsService {
         if (filters.userEducationLevel) {
           // Reapply eligibility filter (without approval)
           const educationLevelMap = {
+            "Preschool": "Kindergarten",
             "Kindergarten": "Kindergarten",
             "Elementary": "Elementary",
             "High School": "Junior High School",
@@ -153,7 +304,14 @@ class ItemsService {
             .eq("education_level", eligibilityLevel);
           
           if (!eligibilityError && eligibleItems && eligibleItems.length > 0) {
-            const eligibleItemIds = eligibleItems.map(e => e.item_id);
+            let eligibleItemIds = eligibleItems.map(e => e.item_id);
+            const { data: allLevelItems } = await supabase
+              .from("items")
+              .select("id")
+              .eq("is_active", true)
+              .ilike("name", ALL_LEVEL_ITEM_NAME_PATTERN);
+            const allLevelIds = (allLevelItems || []).map((i) => i.id);
+            eligibleItemIds = [...new Set([...eligibleItemIds, ...allLevelIds])];
             fallbackQuery = fallbackQuery.in("id", eligibleItemIds);
           }
         } else if (filters.educationLevel) {
@@ -682,13 +840,18 @@ class ItemsService {
         fiscal_year_start: new Date().toISOString().split("T")[0], // Current date
       };
 
+      // Only include for_gender if column exists (check first)
+      // Default to Unisex if not provided, but don't include if column doesn't exist
+      const forGenderValue = itemData.for_gender || 'Unisex';
+      
       // Try to insert item
-      // Handle case where approval columns might not exist (migration not run)
+      // Handle case where approval columns or for_gender might not exist (migration not run)
       let data, error;
       
-      // First, try with approval fields (if migration has been run)
-      const itemWithApproval = {
+      // First, try with approval fields and for_gender (if migrations have been run)
+      const itemWithAllFields = {
         ...itemToInsert,
+        for_gender: forGenderValue,
         is_approved: false, // New items require approval
         approved_by: null, // Will be set when system admin approves
         approved_at: null, // Will be set when system admin approves
@@ -696,24 +859,25 @@ class ItemsService {
 
       const result = await supabase
         .from("items")
-        .insert([itemWithApproval])
+        .insert([itemWithAllFields])
         .select()
         .single();
       
       data = result.data;
       error = result.error;
 
-      // If error is due to missing approval columns, retry without them
+      // If error is due to missing columns, retry without them
       if (error && (
         error.message?.includes("approved_at") ||
         error.message?.includes("approved_by") ||
         error.message?.includes("is_approved") ||
+        error.message?.includes("for_gender") ||
         error.message?.includes("Could not find") ||
         error.code === '42703' || // PostgreSQL undefined_column
         error.code === 'PGRST204' // PostgREST column not found
       )) {
-        console.log("[createItem] Approval columns don't exist, retrying without approval fields");
-        // Retry without approval fields
+        console.log("[createItem] Some columns don't exist, retrying without optional fields");
+        // Retry without approval fields and for_gender
         const result2 = await supabase
           .from("items")
           .insert([itemToInsert])
@@ -807,6 +971,7 @@ class ItemsService {
             education_level: data.education_level,
             category: data.category,
             item_type: data.item_type,
+            for_gender: data.for_gender || 'Unisex',
             size: itemSize,
             stock: data.stock,
             price: data.price,
@@ -860,6 +1025,53 @@ class ItemsService {
           "Received base64 image. Expected a URL. Using default image."
         );
         updates.image = "/assets/image/card1.png";
+      }
+
+      // When reorder_point is sent and item has sizeVariations, update the matching variant (or the only variant) in note
+      const sizeOrVariant = updates.size ?? updates.variant;
+      const reorderValue = Number(updates.reorder_point);
+      const isValidReorder = updates.reorder_point !== undefined && !Number.isNaN(reorderValue) && reorderValue >= 0;
+      if (isValidReorder && currentItem.note) {
+        try {
+          const parsed = JSON.parse(currentItem.note);
+          if (
+            parsed &&
+            parsed._type === "sizeVariations" &&
+            Array.isArray(parsed.sizeVariations) &&
+            parsed.sizeVariations.length > 0
+          ) {
+            let idx = -1;
+            const target = (sizeOrVariant != null && String(sizeOrVariant).trim() !== "")
+              ? String(sizeOrVariant).trim()
+              : null;
+            if (target) {
+              idx = parsed.sizeVariations.findIndex((v) => {
+                const s = (v.size || "").trim();
+                const sBase = s.replace(/\([^)]*\)/g, "").trim();
+                const tBase = target.replace(/\([^)]*\)/g, "").trim();
+                return (
+                  s === target ||
+                  sBase === tBase ||
+                  s.includes(target) ||
+                  target.includes(s) ||
+                  s.toLowerCase() === target.toLowerCase()
+                );
+              });
+            }
+            // If no variant matched but item has exactly one variant, update that one (e.g. JHS necktie with one size)
+            if (idx === -1 && parsed.sizeVariations.length === 1) {
+              idx = 0;
+            }
+            if (idx !== -1) {
+              parsed.sizeVariations[idx].reorder_point = reorderValue;
+              updates.note = JSON.stringify(parsed);
+            }
+          }
+        } catch (e) {
+          console.warn("Items.updateItem: could not patch note for reorder_point by variant", e);
+        }
+        delete updates.size;
+        delete updates.variant;
       }
 
       const wasOutOfStock =
@@ -1004,6 +1216,27 @@ class ItemsService {
     } catch (error) {
       console.error("Update item error:", error);
       throw new Error(`Failed to update item: ${error.message}`);
+    }
+  }
+
+  /**
+   * Archive item (set is_archived = true). Item disappears from default list; show when filter "Archived".
+   */
+  async archiveItem(id) {
+    try {
+      const { data, error } = await supabase
+        .from("items")
+        .update({ is_archived: true, updated_at: new Date().toISOString() })
+        .eq("id", id)
+        .eq("is_active", true)
+        .select()
+        .single();
+      if (error) throw error;
+      if (!data) throw new Error("Item not found or already archived/deleted");
+      return { success: true, message: "Item archived successfully", data };
+    } catch (error) {
+      console.error("Archive item error:", error);
+      throw new Error(`Failed to archive item: ${error.message}`);
     }
   }
 

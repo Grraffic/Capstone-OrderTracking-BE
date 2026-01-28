@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const orderController = require("../../controllers/property_custodian/order.controller");
+const { verifyToken } = require("../../middleware/auth");
 
 /**
  * Orders Routes
@@ -51,10 +52,9 @@ router.get("/:id", orderController.getOrderById);
 
 /**
  * POST /api/orders
- * Create new order
- * Note: Add auth middleware when ready
+ * Create new order (requires auth so student_id/student_email align with max-quantities)
  */
-router.post("/", orderController.createOrder);
+router.post("/", verifyToken, orderController.createOrder);
 
 /**
  * PATCH /api/orders/:id/status

@@ -22,4 +22,11 @@ router.post("/approve", itemsController.approveItems.bind(itemsController));
 // Reject an item (set back to pending)
 router.post("/:id/reject", itemsController.rejectItem.bind(itemsController));
 
+// Promote an item's name into curated suggestions
+// POST /api/system-admin/items/:id/promote-name
+router.post(
+  "/:id/promote-name",
+  itemsController.promoteItemNameToSuggestions.bind(itemsController)
+);
+
 module.exports = router;

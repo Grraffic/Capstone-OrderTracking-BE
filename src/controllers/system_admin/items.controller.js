@@ -158,6 +158,50 @@ class SystemAdminItemsController {
       });
     }
   }
+
+  /**
+   * Promote an item's name into the curated suggestions list
+   * POST /api/system-admin/items/:id/promote-name
+   */
+  async promoteItemNameToSuggestions(req, res) {
+    try {
+      const { id } = req.params;
+      const createdBy = req.user?.id || null;
+
+      if (!createdBy) {
+        return res.status(401).json({
+          success: false,
+          message: "User authentication required",
+        });
+      }
+
+      const result = await SystemAdminItemsService.promoteItemNameToSuggestions(
+        id,
+        createdBy
+      );
+
+      // Emit socket event for real-time updates (admin UIs can refresh suggestions)
+      const io = req.app.get("io");
+      if (io && result?.success) {
+        io.emit("item:name_promoted", {
+          itemId: id,
+          createdBy,
+          suggestion: result.data || null,
+        });
+      }
+
+      return res.json(result);
+    } catch (error) {
+      console.error(
+        "[SystemAdminItemsController] Promote item name error:",
+        error
+      );
+      return res.status(400).json({
+        success: false,
+        message: error.message || "Failed to add name to suggestions",
+      });
+    }
+  }
 }
 
 module.exports = new SystemAdminItemsController();

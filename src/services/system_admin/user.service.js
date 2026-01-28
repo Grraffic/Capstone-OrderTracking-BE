@@ -1,5 +1,6 @@
 const supabase = require("../../config/supabase");
 const emailRoleAssignmentService = require("./emailRoleAssignment.service");
+const { resolveItemKey } = require("../../config/itemMaxOrder");
 
 /**
  * User Service
@@ -138,8 +139,40 @@ async function getUsers({
       throw error;
     }
 
+    const rows = data || [];
+    if (rows.length > 0) {
+      const userIds = rows.map((u) => u.id).filter(Boolean);
+      const placedStatuses = ["pending", "paid", "claimed", "processing", "ready", "payment_pending", "completed"];
+      const { data: placedOrders } = await supabase
+        .from("orders")
+        .select("student_id, items")
+        .eq("is_active", true)
+        .in("status", placedStatuses)
+        .in("student_id", userIds);
+      const slotsByUserId = {};
+      for (const row of placedOrders || []) {
+        const sid = row.student_id;
+        if (!sid) continue;
+        if (!slotsByUserId[sid]) slotsByUserId[sid] = new Set();
+        const items = Array.isArray(row.items) ? row.items : [];
+        for (const it of items) {
+          const rawName = (it.name || "").trim();
+          let key = resolveItemKey(rawName);
+          if (!key && rawName) {
+            const lower = rawName.toLowerCase();
+            if (lower.includes("jogging pants")) key = "jogging pants";
+            if (lower.includes("logo patch")) key = "logo patch";
+          }
+          if (key) slotsByUserId[sid].add(key);
+        }
+      }
+      for (const u of rows) {
+        u.slots_used_from_placed_orders = slotsByUserId[u.id] ? slotsByUserId[u.id].size : 0;
+      }
+    }
+
     return {
-      data: data || [],
+      data: rows,
       pagination: {
         page,
         limit,

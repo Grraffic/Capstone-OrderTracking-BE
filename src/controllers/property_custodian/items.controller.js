@@ -176,6 +176,28 @@ class ItemsController {
   }
 
   /**
+   * Get curated item name suggestions (for item name dropdown/autocomplete)
+   * GET /api/items/name-suggestions
+   */
+  async getNameSuggestions(req, res) {
+    try {
+      const { educationLevel, search, limit } = req.query;
+      const result = await ItemsService.getNameSuggestions({
+        educationLevel: educationLevel || null,
+        search: search || null,
+        limit: limit != null ? Number(limit) : undefined,
+      });
+      return res.json(result);
+    } catch (error) {
+      console.error("Get name suggestions error:", error);
+      return res.status(400).json({
+        success: false,
+        message: error.message || "Failed to fetch name suggestions",
+      });
+    }
+  }
+
+  /**
    * Create new item
    * POST /api/items
    */
@@ -286,6 +308,26 @@ class ItemsController {
         .json({
           success: false,
           message: error.message || "Failed to update item",
+        });
+    }
+  }
+
+  /**
+   * Archive item (set is_archived = true)
+   * PATCH /api/items/:id/archive
+   */
+  async archiveItem(req, res) {
+    try {
+      const { id } = req.params;
+      const result = await ItemsService.archiveItem(id);
+      res.json(result);
+    } catch (error) {
+      console.error("Archive item error:", error);
+      res
+        .status(error.message?.includes("not found") ? 404 : 400)
+        .json({
+          success: false,
+          message: error.message || "Failed to archive item",
         });
     }
   }

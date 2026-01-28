@@ -46,11 +46,30 @@ GOOGLE_CALLBACK_URL=http://localhost:5000/api/auth/google/callback
 # Cloudinary
 CLOUDINARY_URL=cloudinary://...
 
+# Email (SMTP) – used for contact-form notifications to property custodians
+# When a user submits the contact form, one email is sent BCC to all property custodians.
+EMAIL_HOST=smtp.gmail.com
+EMAIL_PORT=587
+EMAIL_USER=ramosraf278@gmail.com
+EMAIL_PASS=your-gmail-app-password
+# Optional: from address for contact notifications (defaults to EMAIL_USER)
+# CONTACT_FROM_EMAIL=noreply@example.com
+
+# Property custodians who receive contact form emails (and have property_custodian access)
+# Add ramosraf278@gmail.com and any other custodians; DB users with role property_custodian are included automatically.
+SPECIAL_ADMIN_EMAILS=ramosraf278@gmail.com
+
 # Application
 FRONTEND_URL=http://localhost:5173
 PORT=5000
 NODE_ENV=development
 ```
+
+**Contact form email setup (optional):** To send contact form submissions to ramosraf278@gmail.com and other property custodians:
+
+1. In your `.env`, set `EMAIL_HOST=smtp.gmail.com`, `EMAIL_PORT=587`, `EMAIL_USER=ramosraf278@gmail.com`, and `EMAIL_PASS` to a [Gmail App Password](https://support.google.com/accounts/answer/185833) (not your normal password).
+2. Set `SPECIAL_ADMIN_EMAILS=ramosraf278@gmail.com` (add more custodians comma-separated if needed). Users with role property_custodian in the database also receive the BCC automatically.
+3. Restart the backend. When someone submits the contact form, one email is sent BCC to all property custodians (config + DB).
 
 ### Running the Server
 

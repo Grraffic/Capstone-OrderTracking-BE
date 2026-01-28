@@ -14,20 +14,232 @@ router.get(
   authController.oauthCallback
 );
 
+// Max quantities per item for current student (requires student auth).
+// Also returns alreadyOrdered: { "jogging pants": 1, ... } from placed orders (pending/paid/claimed).
+router.get("/max-quantities", verifyToken, async (req, res) => {
+  try {
+    const supabase = require("../config/supabase");
+    const { getMaxQuantitiesForStudent, resolveItemKey } = require("../config/itemMaxOrder");
+    const tokenUser = req.user;
+    if (!tokenUser?.email) {
+      return res.status(401).json({ message: "Invalid token: missing email", error: "invalid_token" });
+    }
+
+    // Load user profile; retry with fewer columns if gender/student_type/education_level don't exist yet
+    let data = null;
+    let error = null;
+    let result = await supabase
+      .from("users")
+      .select("id, role, education_level, gender, student_type, max_items_per_order")
+      .eq("email", tokenUser.email)
+      .maybeSingle();
+    data = result.data;
+    error = result.error;
+
+    if (error && (String(error.message || "").toLowerCase().includes("does not exist") || String(error.message || "").toLowerCase().includes("column"))) {
+      result = await supabase
+        .from("users")
+        .select("id, role, education_level, max_items_per_order")
+        .eq("email", tokenUser.email)
+        .maybeSingle();
+      data = result.data;
+      error = result.error;
+    }
+    if (error && (String(error.message || "").toLowerCase().includes("does not exist") || String(error.message || "").toLowerCase().includes("column"))) {
+      result = await supabase
+        .from("users")
+        .select("id, role")
+        .eq("email", tokenUser.email)
+        .maybeSingle();
+      data = result.data;
+      error = result.error;
+    }
+
+    if (error) {
+      console.error("Max quantities: profile fetch error", error);
+      return res.status(500).json({ message: "Failed to load profile", details: error.message });
+    }
+    if (!data) {
+      return res.status(404).json({ message: "User profile not found. Please try logging in again.", error: "profile_not_found" });
+    }
+
+    const role = data.role || tokenUser.role;
+    if (role !== "student") {
+      return res.status(403).json({
+        message: "Max quantities are only available for students",
+        error: "not_student",
+      });
+    }
+
+    // Map Preschool/Prekindergarten → Kindergarten for segment lookup; use student_type from DB or default "new"
+    const rawLevel = data.education_level || null;
+    const educationLevel =
+      rawLevel === "Preschool" || rawLevel === "Prekindergarten"
+        ? "Kindergarten"
+        : rawLevel;
+    const studentType = (data.student_type || "new").toLowerCase();
+    const gender = data.gender || null;
+
+    // Derived Max Items Per Order defaults based on student type.
+    // System admins can override via max_items_per_order on users; if not set, we fall back to these values.
+    const baseMaxItemsPerOrder =
+      studentType === "new" ? 8 :
+      studentType === "old" ? 2 :
+      null;
+    const effectiveMaxItemsPerOrder =
+      data.max_items_per_order != null && Number(data.max_items_per_order) > 0
+        ? Number(data.max_items_per_order)
+        : baseMaxItemsPerOrder;
+
+    if (!gender && educationLevel) {
+      // Still compute alreadyOrdered so the UI can disable items the user has already ordered
+      const email = (tokenUser.email || "").trim();
+      const orParts = [];
+      if (tokenUser.id) orParts.push(`student_id.eq.${tokenUser.id}`);
+      if (data.id && String(data.id) !== String(tokenUser.id)) orParts.push(`student_id.eq.${data.id}`);
+      if (email) orParts.push(`student_email.eq.${email}`);
+      let alreadyOrdered = {};
+      if (orParts.length > 0) {
+        const placedStatusesIncomplete = ["pending", "paid", "claimed", "processing", "ready", "payment_pending", "completed"];
+        const { data: placedOrders } = await supabase
+          .from("orders")
+          .select("items")
+          .eq("is_active", true)
+          .in("status", placedStatusesIncomplete)
+          .or(orParts.join(","));
+        for (const row of placedOrders || []) {
+          const orderItems = Array.isArray(row.items) ? row.items : [];
+          for (const it of orderItems) {
+            const rawName = (it.name || "").trim();
+            let key = resolveItemKey(rawName);
+            if (!key && rawName) {
+              const lower = rawName.toLowerCase();
+              if (lower.includes("jogging pants")) key = "jogging pants";
+              if (lower.includes("logo patch")) key = "logo patch";
+            }
+            if (key && typeof key === "string" && key.toLowerCase().includes("logo patch")) key = "logo patch";
+            if (key) alreadyOrdered[key] = (alreadyOrdered[key] || 0) + (Number(it.quantity) || 0);
+          }
+        }
+      }
+      const slotsUsedFromPlacedOrders = Object.keys(alreadyOrdered).length;
+      return res.status(200).json({
+        maxQuantities: {},
+        alreadyOrdered,
+        profileIncomplete: true,
+        message: "Complete your profile (gender) to see order limits.",
+        maxItemsPerOrder: effectiveMaxItemsPerOrder ?? null,
+        slotsUsedFromPlacedOrders,
+      });
+    }
+
+    const maxQuantities = getMaxQuantitiesForStudent(
+      educationLevel,
+      studentType,
+      gender
+    );
+
+    // Sum quantities per item from this student's placed orders.
+    // Include all statuses that appear in the student's "Orders" and "Claimed" tabs so "already ordered" matches what they see.
+    const placedStatuses = ["pending", "paid", "claimed", "processing", "ready", "payment_pending", "completed"];
+    const email = (tokenUser.email || "").trim();
+    const orParts = [];
+    if (tokenUser.id) orParts.push(`student_id.eq.${tokenUser.id}`);
+    if (data.id && String(data.id) !== String(tokenUser.id)) orParts.push(`student_id.eq.${data.id}`);
+    if (email) orParts.push(`student_email.eq.${email}`);
+    // Defensive: ensure we have at least one condition when we have the user's email
+    if (orParts.length === 0 && email) orParts.push(`student_email.eq.${email}`);
+    let alreadyOrdered = {};
+    if (orParts.length > 0) {
+      const orFilter = orParts.join(",");
+      const { data: placedOrders, error: ordersErr } = await supabase
+        .from("orders")
+        .select("items")
+        .eq("is_active", true)
+        .in("status", placedStatuses)
+        .or(orFilter);
+      if (ordersErr) {
+        console.error("Max quantities: placed orders query error", ordersErr);
+      }
+      for (const row of placedOrders || []) {
+        const orderItems = Array.isArray(row.items) ? row.items : [];
+        for (const it of orderItems) {
+          const rawName = (it.name || "").trim();
+          let key = resolveItemKey(rawName);
+          if (!key && rawName) {
+            const lower = rawName.toLowerCase();
+            if (lower.includes("jogging pants")) key = "jogging pants";
+            if (lower.includes("logo patch")) key = "logo patch";
+          }
+          if (key && typeof key === "string" && key.toLowerCase().includes("logo patch")) key = "logo patch";
+          if (!key) continue;
+          alreadyOrdered[key] = (alreadyOrdered[key] || 0) + (Number(it.quantity) || 0);
+        }
+      }
+      // Debug: confirm placed orders are included in alreadyOrdered
+      const orderCount = placedOrders?.length ?? 0;
+      const keys = Object.keys(alreadyOrdered);
+      if (orderCount > 0 || keys.length > 0) {
+        console.log("Max quantities: alreadyOrdered from", orderCount, "placed order(s) -> keys:", keys.join(", ") || "(none)");
+      }
+    }
+
+    const slotsUsedFromPlacedOrders = Object.keys(alreadyOrdered || {}).length;
+    return res.json({
+      maxQuantities,
+      alreadyOrdered,
+      maxItemsPerOrder: effectiveMaxItemsPerOrder ?? null,
+      slotsUsedFromPlacedOrders,
+    });
+  } catch (err) {
+    console.error("Max quantities endpoint error:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+});
+
 // Profile endpoint - returns user info from token
 router.get("/profile", verifyToken, async (req, res) => {
   try {
     const supabase = require("../config/supabase");
     const tokenUser = req.user; // from JWT payload
-    // Try to fetch user details from users table for richer profile
-    const { data, error } = await supabase
+    // Try full select first (includes gender, student_type if columns exist)
+    let data = null;
+    let error = null;
+    let result = await supabase
       .from("users")
       .select(
-        "email, name, role, avatar_url, photo_url, course_year_level, student_number, education_level, is_active"
+        "email, name, role, avatar_url, photo_url, course_year_level, student_number, education_level, is_active, gender, student_type, onboarding_completed, onboarding_completed_at"
       )
       .eq("email", tokenUser.email)
       .maybeSingle();
-    
+    data = result.data;
+    error = result.error;
+
+    // If column(s) like gender/student_type don't exist yet, retry without them
+    if (error && (error.message || "").toLowerCase().includes("does not exist")) {
+      result = await supabase
+        .from("users")
+        .select(
+          "email, name, role, avatar_url, photo_url, course_year_level, student_number, education_level, is_active, onboarding_completed, onboarding_completed_at"
+        )
+        .eq("email", tokenUser.email)
+        .maybeSingle();
+      data = result.data;
+      error = result.error;
+    }
+    // If onboarding columns are missing (older DB), retry without them as well
+    if (error && (error.message || "").toLowerCase().includes("does not exist")) {
+      result = await supabase
+        .from("users")
+        .select(
+          "email, name, role, avatar_url, photo_url, course_year_level, student_number, education_level, is_active"
+        )
+        .eq("email", tokenUser.email)
+        .maybeSingle();
+      data = result.data;
+      error = result.error;
+    }
+
     // Check if user is inactive
     if (data && data.is_active === false) {
       return res.status(403).json({ 
@@ -66,6 +278,12 @@ router.get("/profile", verifyToken, async (req, res) => {
       courseYearLevel: isAdmin ? null : (data?.course_year_level || null),
       studentNumber: isAdmin ? null : (data?.student_number || null),
       educationLevel: isAdmin ? null : (data?.education_level || null),
+      gender: isAdmin ? null : (data?.gender || null),
+      studentType: isAdmin ? null : (data?.student_type || null),
+      onboardingCompleted: isAdmin ? null : (data?.onboarding_completed ?? false),
+      onboarding_completed: isAdmin ? null : (data?.onboarding_completed ?? false),
+      onboardingCompletedAt: isAdmin ? null : (data?.onboarding_completed_at ?? null),
+      onboarding_completed_at: isAdmin ? null : (data?.onboarding_completed_at ?? null),
     };
 
     // Debug logging to verify photo URL is being returned
@@ -148,70 +366,166 @@ router.post("/profile/upload-image", verifyToken, async (req, res) => {
   }
 });
 
+// Normalize gender for DB constraint: 'Male' | 'Female' | null
+function normalizeGender(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const s = String(value).trim();
+  if (!s) return null;
+  const lower = s.toLowerCase();
+  if (lower === "male") return "Male";
+  if (lower === "female") return "Female";
+  return s; // already "Male"/"Female" or invalid (DB will reject)
+}
+
 // Update profile endpoint - updates user profile information
 router.put("/profile", verifyToken, async (req, res) => {
   try {
     const supabase = require("../config/supabase");
     const tokenUser = req.user; // from JWT payload
-    const { name, photoURL, courseYearLevel, studentNumber, educationLevel } =
+    const { name, photoURL, courseYearLevel, studentNumber, educationLevel, gender, studentType } =
       req.body;
 
-    // Get user's current role to determine if they're an admin
-    const { data: currentUser } = await supabase
-      .from("users")
-      .select("role")
-      .eq("email", tokenUser.email)
-      .maybeSingle();
+    // Load current user (needed for role + onboarding completion checks).
+    // Retry with fewer columns if some optional columns don't exist yet.
+    let currentUser = null;
+    {
+      let cur = await supabase
+        .from("users")
+        .select(
+          "role, course_year_level, student_number, education_level, gender, student_type, onboarding_completed, onboarding_completed_at"
+        )
+        .eq("email", tokenUser.email)
+        .maybeSingle();
+      if (cur.error && (String(cur.error.message || "").toLowerCase().includes("does not exist") || String(cur.error.message || "").toLowerCase().includes("column"))) {
+        cur = await supabase
+          .from("users")
+          .select("role, course_year_level, student_number, education_level, onboarding_completed, onboarding_completed_at")
+          .eq("email", tokenUser.email)
+          .maybeSingle();
+      }
+      if (cur.error && (String(cur.error.message || "").toLowerCase().includes("does not exist") || String(cur.error.message || "").toLowerCase().includes("column"))) {
+        cur = await supabase
+          .from("users")
+          .select("role, course_year_level, student_number, education_level")
+          .eq("email", tokenUser.email)
+          .maybeSingle();
+      }
+      currentUser = cur.data || null;
+    }
 
     const userRole = currentUser?.role || tokenUser.role;
     const isAdmin = userRole === "property_custodian" || userRole === "system_admin";
 
-    // Prepare update data
+    // Prepare update data (core fields that exist on all schemas)
     const updateData = {
       updated_at: new Date().toISOString(),
     };
 
-    // Add name if provided (for admin updates)
     if (name && typeof name === "string" && name.trim().length > 0) {
       updateData.name = name.trim();
     }
 
-    // Add photo URL if provided
     if (photoURL) {
       updateData.photo_url = photoURL;
-      updateData.avatar_url = photoURL; // Keep both fields in sync
+      updateData.avatar_url = photoURL;
     }
 
-    // Only add student-specific fields if user is a student
-    // Admins should never have these fields set
     if (!isAdmin) {
-      if (courseYearLevel !== undefined) {
-        updateData.course_year_level = courseYearLevel;
-      }
-
-      if (studentNumber !== undefined) {
-        updateData.student_number = studentNumber;
-      }
-
-      if (educationLevel !== undefined) {
-        updateData.education_level = educationLevel;
-      }
+      if (courseYearLevel !== undefined) updateData.course_year_level = courseYearLevel;
+      if (studentNumber !== undefined) updateData.student_number = studentNumber;
+      if (educationLevel !== undefined) updateData.education_level = educationLevel;
     } else {
-      // For admins, explicitly set these fields to NULL to ensure they're not set
       updateData.course_year_level = null;
       updateData.student_number = null;
       updateData.education_level = null;
     }
 
-    // Update user in database
-    const { data, error } = await supabase
-      .from("users")
-      .update(updateData)
-      .eq("email", tokenUser.email)
-      .select(
-        "email, name, role, avatar_url, photo_url, course_year_level, student_number, education_level"
-      )
-      .single();
+    // Determine if onboarding should be marked complete (students only)
+    const nextCourseYearLevel =
+      courseYearLevel !== undefined ? courseYearLevel : currentUser?.course_year_level;
+    const nextStudentNumber =
+      studentNumber !== undefined ? studentNumber : currentUser?.student_number;
+    const nextEducationLevel =
+      educationLevel !== undefined ? educationLevel : currentUser?.education_level;
+    const nextGender =
+      gender !== undefined ? normalizeGender(gender) : currentUser?.gender;
+    const nextStudentType =
+      studentType !== undefined ? studentType : currentUser?.student_type;
+
+    const isNonEmpty = (v) =>
+      v !== null &&
+      v !== undefined &&
+      String(v).trim() !== "" &&
+      String(v).trim().toLowerCase() !== "n/a";
+
+    const shouldMarkOnboardingComplete =
+      !isAdmin &&
+      isNonEmpty(nextCourseYearLevel) &&
+      isNonEmpty(nextStudentNumber) &&
+      isNonEmpty(nextEducationLevel) &&
+      isNonEmpty(nextGender) &&
+      isNonEmpty(nextStudentType);
+
+    if (shouldMarkOnboardingComplete && currentUser?.onboarding_completed !== true) {
+      updateData.onboarding_completed = true;
+      // Only set once if possible
+      if (!currentUser?.onboarding_completed_at) {
+        updateData.onboarding_completed_at = new Date().toISOString();
+      }
+    }
+
+    // Core select columns (always exist in current schema)
+    const selectCore =
+      "email, name, role, avatar_url, photo_url, course_year_level, student_number, education_level, onboarding_completed, onboarding_completed_at";
+
+    // Normalize gender for DB constraint (Male/Female)
+    const genderValue = gender !== undefined ? normalizeGender(gender) : undefined;
+
+    // Try update with optional gender/student_type if not admin (columns may not exist yet)
+    let data = null;
+    let error = null;
+
+    if (!isAdmin && (genderValue !== undefined || studentType !== undefined)) {
+      const updateWithOptional = { ...updateData };
+      if (genderValue !== undefined) updateWithOptional.gender = genderValue;
+      if (studentType !== undefined) updateWithOptional.student_type = studentType === null || studentType === "" ? null : studentType;
+      // Only select columns we're updating (student_type column may not exist in DB yet)
+      const selectOptional = [selectCore];
+      if (genderValue !== undefined) selectOptional.push("gender");
+      if (studentType !== undefined) selectOptional.push("student_type");
+      const result = await supabase
+        .from("users")
+        .update(updateWithOptional)
+        .eq("email", tokenUser.email)
+        .select(selectOptional.join(", "))
+        .single();
+      data = result.data;
+      error = result.error;
+    }
+
+    // If failed with "column does not exist", retry with updateData and gender only (gender column exists; student_type may not)
+    if (error && (String(error.message || "").toLowerCase().includes("does not exist") || String(error.message || "").toLowerCase().includes("column"))) {
+      const fallbackUpdate = { ...updateData };
+      if (genderValue !== undefined) fallbackUpdate.gender = genderValue;
+      const fallbackSelect = Object.keys(fallbackUpdate).includes("gender") ? `${selectCore}, gender` : selectCore;
+      const fallback = await supabase
+        .from("users")
+        .update(fallbackUpdate)
+        .eq("email", tokenUser.email)
+        .select(fallbackSelect)
+        .single();
+      data = fallback.data;
+      error = fallback.error;
+    } else if (!data && !error) {
+      const result = await supabase
+        .from("users")
+        .update(updateData)
+        .eq("email", tokenUser.email)
+        .select(selectCore)
+        .single();
+      data = result.data;
+      error = result.error;
+    }
 
     if (error) {
       console.error("Supabase profile update error:", error);
@@ -225,8 +539,6 @@ router.put("/profile", verifyToken, async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // Return updated profile
-    // For admins, always return null for student fields
     const profile = {
       id: tokenUser.id,
       email: data.email,
@@ -236,6 +548,12 @@ router.put("/profile", verifyToken, async (req, res) => {
       courseYearLevel: isAdmin ? null : (data.course_year_level || null),
       studentNumber: isAdmin ? null : (data.student_number || null),
       educationLevel: isAdmin ? null : (data.education_level || null),
+      gender: isAdmin ? null : (data.gender ?? null),
+      studentType: isAdmin ? null : (data.student_type ?? null),
+      onboardingCompleted: isAdmin ? null : (data.onboarding_completed ?? false),
+      onboarding_completed: isAdmin ? null : (data.onboarding_completed ?? false),
+      onboardingCompletedAt: isAdmin ? null : (data.onboarding_completed_at ?? null),
+      onboarding_completed_at: isAdmin ? null : (data.onboarding_completed_at ?? null),
     };
 
     return res.json(profile);

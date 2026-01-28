@@ -99,9 +99,11 @@ class OrderController {
   async createOrder(req, res) {
     try {
       const io = req.app.get("io");
-      // Add user_id from authenticated user if available
-      if (req.user && req.user.id && !req.body.student_id) {
-        req.body.student_id = req.user.id;
+      // Always set student identity from JWT when authenticated so "already ordered"
+      // (GET /auth/max-quantities) matches the same id/email
+      if (req.user) {
+        if (req.user.id) req.body.student_id = req.user.id;
+        if (req.user.email) req.body.student_email = req.user.email;
       }
       const result = await OrderService.createOrder(req.body, io);
       
