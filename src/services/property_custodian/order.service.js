@@ -531,7 +531,10 @@ class OrderService {
         console.log("QR code data generated successfully");
       }
 
-      // Step 1: Create the order
+      // Step 1: Create the order (student_confirmed_at = null until student confirms within claim window)
+      if (orderData.student_confirmed_at === undefined) {
+        orderData.student_confirmed_at = null;
+      }
       const { data, error } = await supabase
         .from("orders")
         .insert([orderData])
@@ -776,12 +779,142 @@ class OrderService {
   }
 
   /**
+   * Restore inventory for a cancelled order (add quantities back to items table).
+   * Only runs for regular orders; pre-orders did not reduce inventory.
+   * @param {Object} order - Order with items, education_level, order_type
+   * @returns {Promise<void>}
+   */
+  async restoreInventoryForOrder(order) {
+    if (!order || order.order_type === "pre-order") return;
+
+    const items = order.items || [];
+    if (items.length === 0) return;
+
+    const { data: allItems, error: itemsError } = await supabase
+      .from("items")
+      .select("*")
+      .eq("education_level", order.education_level)
+      .eq("is_active", true);
+
+    if (itemsError) {
+      console.error("restoreInventoryForOrder: failed to fetch items", itemsError);
+      return;
+    }
+
+    const itemLookupMap = new Map();
+    for (const row of allItems || []) {
+      const key = (row.name || "").toLowerCase();
+      if (!itemLookupMap.has(key)) itemLookupMap.set(key, []);
+      itemLookupMap.get(key).push(row);
+    }
+
+    for (const item of items) {
+      try {
+        const itemSize = item.size || "N/A";
+        const potentialItems = itemLookupMap.get((item.name || "").toLowerCase()) || [];
+
+        if (!potentialItems.length) {
+          console.error(
+            `restoreInventoryForOrder: item not found ${item.name} (Education Level: ${order.education_level})`
+          );
+          continue;
+        }
+
+        let inventoryItem = null;
+        let isJsonVariant = false;
+        let variantIndex = -1;
+
+        for (const pItem of potentialItems) {
+          if (pItem.note) {
+            try {
+              const parsedNote = JSON.parse(pItem.note);
+              if (parsedNote && parsedNote._type === "sizeVariations" && Array.isArray(parsedNote.sizeVariations)) {
+                const vIndex = parsedNote.sizeVariations.findIndex((v) => {
+                  const vSize = v.size || "";
+                  if (vSize === itemSize) return true;
+                  return vSize.includes(itemSize) || itemSize.includes(vSize);
+                });
+                if (vIndex !== -1) {
+                  inventoryItem = pItem;
+                  isJsonVariant = true;
+                  variantIndex = vIndex;
+                  break;
+                }
+              }
+            } catch (e) {
+              // Not JSON
+            }
+          }
+          if (!inventoryItem) {
+            const dbSize = pItem.size || "N/A";
+            if (dbSize === itemSize || (itemSize === "N/A" && (!pItem.size || pItem.size === "N/A"))) {
+              inventoryItem = pItem;
+              break;
+            }
+          }
+        }
+
+        if (!inventoryItem) {
+          console.error(
+            `restoreInventoryForOrder: item not found ${item.name} (Size: ${itemSize}, Education Level: ${order.education_level})`
+          );
+          continue;
+        }
+
+        const quantity = Number(item.quantity) || 0;
+        if (quantity <= 0) continue;
+
+        if (isJsonVariant) {
+          const parsedNote = JSON.parse(inventoryItem.note);
+          const variant = parsedNote.sizeVariations[variantIndex];
+          const previousStock = Number(variant.stock) || 0;
+          const newVariantStock = previousStock + quantity;
+          parsedNote.sizeVariations[variantIndex].stock = newVariantStock;
+          const newStock = parsedNote.sizeVariations.reduce((sum, v) => sum + (Number(v.stock) || 0), 0);
+
+          const { error: updateError } = await supabase
+            .from("items")
+            .update({ stock: newStock, note: JSON.stringify(parsedNote) })
+            .eq("id", inventoryItem.id);
+
+          if (updateError) {
+            console.error(`restoreInventoryForOrder: failed to update ${item.name} (JSON variant):`, updateError);
+          } else if (!isProduction) {
+            console.log(
+              `Restored inventory: ${item.name} size ${variant.size} +${quantity} (${previousStock} -> ${newVariantStock})`
+            );
+          }
+        } else {
+          const previousStock = inventoryItem.stock;
+          const newStock = previousStock + quantity;
+
+          const { error: updateError } = await supabase
+            .from("items")
+            .update({ stock: newStock })
+            .eq("id", inventoryItem.id);
+
+          if (updateError) {
+            console.error(`restoreInventoryForOrder: failed to update ${item.name}:`, updateError);
+          } else if (!isProduction) {
+            console.log(
+              `Restored inventory: ${item.name} (Size: ${itemSize}) +${quantity} (${previousStock} -> ${newStock})`
+            );
+          }
+        }
+      } catch (itemError) {
+        console.error(`restoreInventoryForOrder: error processing item ${item.name}:`, itemError);
+      }
+    }
+  }
+
+  /**
    * Update order status
    * @param {string} id - Order ID
    * @param {string} status - New status
+   * @param {string} [optionalNote] - Optional note (e.g. for auto-void reason when status is 'cancelled')
    * @returns {Promise<Object>} - Updated order
    */
-  async updateOrderStatus(id, status) {
+  async updateOrderStatus(id, status, optionalNote) {
     try {
       const updates = {
         status,
@@ -793,6 +926,10 @@ class OrderService {
         updates.payment_date = new Date().toISOString();
       } else if (status === "claimed") {
         updates.claimed_date = new Date().toISOString();
+      }
+
+      if (status === "cancelled" && optionalNote) {
+        updates.notes = optionalNote;
       }
 
       // Get order before update to capture previous status
@@ -813,6 +950,24 @@ class OrderService {
 
       if (error) throw error;
       if (!data) throw new Error("Order not found");
+
+      // When order is cancelled, restore inventory (regular orders only)
+      if (status === "cancelled") {
+        try {
+          const { data: fullOrder } = await supabase
+            .from("orders")
+            .select("id, items, education_level, order_type")
+            .eq("id", id)
+            .eq("is_active", true)
+            .single();
+          if (fullOrder) {
+            await this.restoreInventoryForOrder(fullOrder);
+          }
+        } catch (restoreErr) {
+          console.error("Failed to restore inventory for cancelled order:", restoreErr);
+          // Do not rethrow; status was already updated
+        }
+      }
 
       // Log transaction for order status update
       try {
@@ -847,6 +1002,201 @@ class OrderService {
       console.error("Update order status error:", error);
       throw error;
     }
+  }
+
+  /**
+   * Set student's max_items_per_order to 0 when their order is auto-voided (unclaimed).
+   * Only called from void-unclaimed code paths. Does not run on manual/admin cancel.
+   * @param {Object} order - Order with student_id and/or student_email
+   * @returns {Promise<void>}
+   */
+  async setStudentMaxItemsToZeroForVoid(order) {
+    const studentId = order?.student_id || null;
+    const studentEmail = (order?.student_email || "").trim();
+    if (!studentId && !studentEmail) return;
+    try {
+      if (studentId) {
+        const { error } = await supabase
+          .from("users")
+          .update({ max_items_per_order: 0, updated_at: new Date().toISOString() })
+          .eq("id", studentId);
+        if (error) {
+          console.error("setStudentMaxItemsToZeroForVoid: update by student_id failed", error);
+        }
+        return;
+      }
+      const { data: user, error: findErr } = await supabase
+        .from("users")
+        .select("id")
+        .eq("email", studentEmail)
+        .maybeSingle();
+      if (findErr || !user) {
+        if (findErr) console.error("setStudentMaxItemsToZeroForVoid: lookup by email failed", findErr);
+        return;
+      }
+      const { error } = await supabase
+        .from("users")
+        .update({ max_items_per_order: 0, updated_at: new Date().toISOString() })
+        .eq("id", user.id);
+      if (error) {
+        console.error("setStudentMaxItemsToZeroForVoid: update by email failed", error);
+      }
+    } catch (err) {
+      console.error("setStudentMaxItemsToZeroForVoid:", err);
+    }
+  }
+
+  /**
+   * Void unclaimed orders older than the given number of days.
+   * Sets status to 'cancelled' and restores inventory (via updateOrderStatus).
+   * @param {number} [days=7] - Number of days after which to void unclaimed orders
+   * @returns {Promise<{ voidedCount: number, orderIds: string[] }>}
+   */
+  async voidUnclaimedOrdersOlderThanDays(days = 7) {
+    const claimableStatuses = ["pending", "paid", "processing", "ready", "payment_pending"];
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+    const cutoffIso = cutoff.toISOString();
+
+    const { data: orders, error } = await supabase
+      .from("orders")
+      .select("id, order_number, student_id, student_email")
+      .eq("is_active", true)
+      .in("status", claimableStatuses)
+      .lt("created_at", cutoffIso);
+
+    if (error) {
+      console.error("voidUnclaimedOrdersOlderThanDays: query error", error);
+      return { voidedCount: 0, orderIds: [] };
+    }
+
+    const orderIds = (orders || []).map((o) => o.id);
+    const note = `Auto-voided: not claimed within ${days} day(s).`;
+
+    for (const order of orders || []) {
+      try {
+        await this.updateOrderStatus(order.id, "cancelled", note);
+        await this.setStudentMaxItemsToZeroForVoid(order);
+        if (!isProduction) {
+          console.log(`Auto-voided order ${order.order_number || order.id} (older than ${days} days)`);
+        }
+      } catch (err) {
+        console.error(`voidUnclaimedOrdersOlderThanDays: failed to void order ${order.id}:`, err);
+      }
+    }
+
+    if (orderIds.length > 0) {
+      console.log(`Auto-void job: voided ${orderIds.length} order(s) older than ${days} days`);
+    }
+
+    return { voidedCount: orderIds.length, orderIds };
+  }
+
+  /**
+   * Void unclaimed orders older than the given number of minutes (for testing).
+   * Same as days but with minute cutoff. Does not check student_confirmed_at.
+   * @param {number} minutes - Number of minutes after which to void unclaimed orders
+   * @returns {Promise<{ voidedCount: number, orderIds: string[] }>}
+   */
+  async voidUnclaimedOrdersOlderThanMinutes(minutes) {
+    const claimableStatuses = ["pending", "paid", "processing", "ready", "payment_pending"];
+    const cutoff = new Date();
+    cutoff.setMinutes(cutoff.getMinutes() - minutes);
+    const cutoffIso = cutoff.toISOString();
+
+    let query = supabase
+      .from("orders")
+      .select("id, order_number, student_id, student_email")
+      .eq("is_active", true)
+      .in("status", claimableStatuses)
+      .lt("created_at", cutoffIso);
+
+    const { data: orders, error } = await query;
+    if (error) {
+      console.error("voidUnclaimedOrdersOlderThanMinutes: query error", error);
+      return { voidedCount: 0, orderIds: [] };
+    }
+
+    const orderIds = (orders || []).map((o) => o.id);
+    const note = `Auto-voided: not claimed within ${minutes} minute(s).`;
+    for (const order of orders || []) {
+      try {
+        await this.updateOrderStatus(order.id, "cancelled", note);
+        await this.setStudentMaxItemsToZeroForVoid(order);
+        if (!isProduction) {
+          console.log(`Auto-voided order ${order.order_number || order.id} (older than ${minutes} minute(s))`);
+        }
+      } catch (err) {
+        console.error(`voidUnclaimedOrdersOlderThanMinutes: failed to void order ${order.id}:`, err);
+      }
+    }
+    if (orderIds.length > 0) {
+      console.log(`Auto-void job: voided ${orderIds.length} order(s) (older than ${minutes} minute(s))`);
+    }
+    return { voidedCount: orderIds.length, orderIds };
+  }
+
+  /**
+   * Void unclaimed orders older than the given number of seconds (for testing, e.g. 10 seconds).
+   * Only voids orders that have NOT been confirmed by the student (student_confirmed_at IS NULL).
+   * @param {number} seconds - Number of seconds after which to void unconfirmed orders
+   * @returns {Promise<{ voidedCount: number, orderIds: string[] }>}
+   */
+  async voidUnclaimedOrdersOlderThanSeconds(seconds) {
+    const claimableStatuses = ["pending", "paid", "processing", "ready", "payment_pending"];
+    const cutoff = new Date();
+    cutoff.setSeconds(cutoff.getSeconds() - seconds);
+    const cutoffIso = cutoff.toISOString();
+
+    const { data: orders, error } = await supabase
+      .from("orders")
+      .select("id, order_number, student_id, student_email")
+      .eq("is_active", true)
+      .in("status", claimableStatuses)
+      .lt("created_at", cutoffIso)
+      .is("student_confirmed_at", null);
+    if (error) {
+      console.error("voidUnclaimedOrdersOlderThanSeconds: query error", error);
+      return { voidedCount: 0, orderIds: [] };
+    }
+
+    const orderIds = (orders || []).map((o) => o.id);
+    const note = `Auto-voided: not claimed within ${seconds} second(s).`;
+    for (const order of orders || []) {
+      try {
+        await this.updateOrderStatus(order.id, "cancelled", note);
+        await this.setStudentMaxItemsToZeroForVoid(order);
+        if (!isProduction) {
+          console.log(`Auto-voided order ${order.order_number || order.id} (older than ${seconds} second(s))`);
+        }
+      } catch (err) {
+        console.error(`voidUnclaimedOrdersOlderThanSeconds: failed to void order ${order.id}:`, err);
+      }
+    }
+    if (orderIds.length > 0) {
+      console.log(`Auto-void job: voided ${orderIds.length} order(s) (older than ${seconds} second(s))`);
+    }
+    return { voidedCount: orderIds.length, orderIds };
+  }
+
+  /**
+   * Student confirms/claims their order within the claim window (e.g. 10 seconds).
+   * Sets student_confirmed_at so the order will not be auto-voided.
+   * @param {string} orderId - Order ID
+   * @param {string} studentId - Student user ID
+   * @param {string} [studentEmail] - Student email (fallback)
+   * @returns {Promise<Object>}
+   */
+  async confirmOrderByStudent(orderId, studentId, studentEmail) {
+    const updates = { student_confirmed_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+    let query = supabase.from("orders").update(updates).eq("id", orderId).eq("is_active", true).eq("status", "pending");
+    if (studentId) query = query.eq("student_id", studentId);
+    else if (studentEmail) query = query.eq("student_email", studentEmail);
+    else return { success: false, message: "Student identity required" };
+    const { data, error } = await query.select().single();
+    if (error) throw error;
+    if (!data) throw new Error("Order not found or not pending");
+    return { success: true, data };
   }
 
   /**

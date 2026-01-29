@@ -45,6 +45,60 @@ io.on("connection", (socket) => {
 app.set("io", io);
 
 // ============================================================================
+// AUTO-VOID UNCLAIMED ORDERS (cron: daily / every minute / or every N seconds for testing)
+// ============================================================================
+const cron = require("node-cron");
+const OrderService = require("./src/services/property_custodian/order.service");
+const voidUnclaimedAfterSeconds = process.env.VOID_UNCLAIMED_AFTER_SECONDS != null
+  ? parseInt(process.env.VOID_UNCLAIMED_AFTER_SECONDS, 10)
+  : null;
+const voidUnclaimedAfterMinutes = process.env.VOID_UNCLAIMED_AFTER_MINUTES != null
+  ? parseInt(process.env.VOID_UNCLAIMED_AFTER_MINUTES, 10)
+  : null;
+const voidUnclaimedDays = parseInt(process.env.VOID_UNCLAIMED_AFTER_DAYS, 10) || 7;
+const voidUnclaimedCron = process.env.VOID_UNCLAIMED_CRON || (voidUnclaimedAfterMinutes != null ? "* * * * *" : "0 2 * * *");
+
+// 10-second claim window for testing: run every 10 seconds and void unconfirmed orders older than 10 sec
+if (voidUnclaimedAfterSeconds != null && voidUnclaimedAfterSeconds > 0) {
+  const runVoid = async () => {
+    try {
+      const result = await OrderService.voidUnclaimedOrdersOlderThanSeconds(voidUnclaimedAfterSeconds);
+      if (result.voidedCount > 0) {
+        console.log(`Auto-void job: voided ${result.voidedCount} order(s) (older than ${voidUnclaimedAfterSeconds} second(s))`);
+      }
+    } catch (err) {
+      console.error("Auto-void job error:", err);
+    }
+  };
+  setInterval(runVoid, voidUnclaimedAfterSeconds * 1000);
+  runVoid(); // run once on startup
+  console.log(`Auto-void job scheduled (TEST): unclaimed orders older than ${voidUnclaimedAfterSeconds} second(s) (interval: every ${voidUnclaimedAfterSeconds}s)`);
+} else if (voidUnclaimedCron) {
+  cron.schedule(voidUnclaimedCron, async () => {
+    try {
+      if (voidUnclaimedAfterMinutes != null && voidUnclaimedAfterMinutes > 0) {
+        const result = await OrderService.voidUnclaimedOrdersOlderThanMinutes(voidUnclaimedAfterMinutes);
+        if (result.voidedCount > 0) {
+          console.log(`Auto-void job: voided ${result.voidedCount} order(s) (older than ${voidUnclaimedAfterMinutes} minute(s))`);
+        }
+      } else {
+        const result = await OrderService.voidUnclaimedOrdersOlderThanDays(voidUnclaimedDays);
+        if (result.voidedCount > 0) {
+          console.log(`Auto-void job: voided ${result.voidedCount} order(s) (older than ${voidUnclaimedDays} days)`);
+        }
+      }
+    } catch (err) {
+      console.error("Auto-void job error:", err);
+    }
+  });
+  if (voidUnclaimedAfterMinutes != null) {
+    console.log(`Auto-void job scheduled (TEST): unclaimed orders older than ${voidUnclaimedAfterMinutes} minute(s) (cron: every minute)`);
+  } else {
+    console.log(`Auto-void job scheduled: unclaimed orders older than ${voidUnclaimedDays} days (cron: ${voidUnclaimedCron})`);
+  }
+}
+
+// ============================================================================
 // MIDDLEWARE CONFIGURATION
 // ============================================================================
 

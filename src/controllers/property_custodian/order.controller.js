@@ -169,7 +169,42 @@ class OrderController {
         });
       }
 
-      const result = await OrderService.updateOrderStatus(id, status);
+      // Students may only cancel their own order; property custodian / system admin may set any status
+      const userRole = (req.user && req.user.role) ? String(req.user.role).toLowerCase() : "";
+      const isStudent = userRole === "student";
+
+      if (isStudent) {
+        if (status !== "cancelled") {
+          return res.status(403).json({
+            success: false,
+            message: "Students may only cancel their order, not change to another status.",
+          });
+        }
+        const orderResult = await OrderService.getOrderById(id);
+        if (!orderResult.success || !orderResult.data) {
+          return res.status(404).json({
+            success: false,
+            message: "Order not found",
+          });
+        }
+        const orderData = orderResult.data;
+        const userId = req.user.id || req.user.sub;
+        const userEmail = (req.user.email || "").trim().toLowerCase();
+        const orderStudentId = orderData.student_id ? String(orderData.student_id) : "";
+        const orderEmail = (orderData.student_email || "").trim().toLowerCase();
+        const isOwner =
+          (userId && orderStudentId && orderStudentId === String(userId)) ||
+          (userEmail && orderEmail && orderEmail === userEmail);
+        if (!isOwner) {
+          return res.status(403).json({
+            success: false,
+            message: "You can only cancel your own order.",
+          });
+        }
+      }
+
+      const optionalNote = isStudent && status === "cancelled" ? "Cancelled by student." : req.body.notes || undefined;
+      const result = await OrderService.updateOrderStatus(id, status, optionalNote);
 
       // Emit Socket.IO event for real-time updates
       const io = req.app.get("io");
@@ -199,6 +234,30 @@ class OrderController {
       res.status(400).json({
         success: false,
         message: error.message || "Failed to update order status",
+      });
+    }
+  }
+
+  /**
+   * Student confirms order within claim window (e.g. 10 seconds)
+   * PATCH /api/orders/:id/confirm
+   */
+  async confirmOrder(req, res) {
+    try {
+      const { id } = req.params;
+      const user = req.user;
+      if (!user) {
+        return res.status(401).json({ success: false, message: "Authentication required" });
+      }
+      const studentId = user.id || user.uid || null;
+      const studentEmail = (user.email || "").trim() || null;
+      const result = await OrderService.confirmOrderByStudent(id, studentId, studentEmail);
+      res.json(result);
+    } catch (error) {
+      console.error("Confirm order error:", error);
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to confirm order",
       });
     }
   }

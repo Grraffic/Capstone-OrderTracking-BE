@@ -185,11 +185,16 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
     }
 
     const slotsUsedFromPlacedOrders = Object.keys(alreadyOrdered || {}).length;
+
+    // Voided = max_items_per_order set to 0 by auto-void (unclaimed); cleared when admin re-enters max
+    const blockedDueToVoid = data.max_items_per_order === 0;
+
     return res.json({
       maxQuantities,
       alreadyOrdered,
-      maxItemsPerOrder: effectiveMaxItemsPerOrder ?? null,
+      maxItemsPerOrder: blockedDueToVoid ? 0 : (effectiveMaxItemsPerOrder ?? null),
       slotsUsedFromPlacedOrders,
+      blockedDueToVoid,
     });
   } catch (err) {
     console.error("Max quantities endpoint error:", err);

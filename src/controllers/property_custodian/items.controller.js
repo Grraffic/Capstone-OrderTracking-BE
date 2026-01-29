@@ -315,11 +315,20 @@ class ItemsController {
   /**
    * Archive item (set is_archived = true)
    * PATCH /api/items/:id/archive
+   * Emits item:archived so students and property custodian refetch immediately.
    */
   async archiveItem(req, res) {
     try {
       const { id } = req.params;
       const result = await ItemsService.archiveItem(id);
+      const io = req.app.get("io");
+      if (io && result.success && result.data) {
+        io.emit("item:archived", {
+          itemId: result.data.id,
+          itemName: result.data.name,
+        });
+        console.log(`📡 Socket.IO: Emitted item:archived for item ${result.data.name} (${id})`);
+      }
       res.json(result);
     } catch (error) {
       console.error("Archive item error:", error);

@@ -166,8 +166,10 @@ async function getUsers({
           if (key) slotsByUserId[sid].add(key);
         }
       }
+      // Voided = max_items_per_order set to 0 by auto-void (unclaimed); cleared when admin re-enters max
       for (const u of rows) {
         u.slots_used_from_placed_orders = slotsByUserId[u.id] ? slotsByUserId[u.id].size : 0;
+        u.blocked_due_to_void = u.max_items_per_order === 0;
       }
     }
 

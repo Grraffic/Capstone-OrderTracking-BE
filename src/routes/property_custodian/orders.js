@@ -57,11 +57,16 @@ router.get("/:id", orderController.getOrderById);
 router.post("/", verifyToken, orderController.createOrder);
 
 /**
- * PATCH /api/orders/:id/status
- * Update order status
- * Note: Add auth.requireAdmin middleware when ready
+ * PATCH /api/orders/:id/confirm
+ * Student confirms order within claim window (e.g. 10 seconds) so it is not auto-voided
  */
-router.patch("/:id/status", orderController.updateOrderStatus);
+router.patch("/:id/confirm", verifyToken, orderController.confirmOrder);
+
+/**
+ * PATCH /api/orders/:id/status
+ * Update order status (requires auth; students may only cancel their own order)
+ */
+router.patch("/:id/status", verifyToken, orderController.updateOrderStatus);
 
 /**
  * PUT /api/orders/:id
