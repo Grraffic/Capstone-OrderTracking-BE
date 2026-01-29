@@ -207,19 +207,7 @@ class InventoryService {
             const variantStock = Number(variant.stock) || 0;
             const variantPrice = Number(variant.price) || item.price || 0;
 
-            // Read purchases from variant JSON field (per-variant tracking)
-            // If variant has purchases field, use it; otherwise fall back to item-level purchases
-            let variantPurchases;
-            if (variant.purchases !== undefined && variant.purchases !== null) {
-              // Variant has its own purchases field - use it
-              variantPurchases = Number(variant.purchases) || 0;
-            } else {
-              // Variant doesn't have purchases field - fall back to item-level (backward compatibility)
-              variantPurchases = item.purchases || 0;
-            }
-
-            // Read beginning_inventory from variant JSON field if available
-            // Otherwise, fall back to item-level beginning_inventory
+            // Read beginning_inventory from variant JSON field if available (needed before deriving purchases)
             let variantBeginningInventory;
             if (
               variant.beginning_inventory !== undefined &&
@@ -228,8 +216,24 @@ class InventoryService {
               variantBeginningInventory =
                 Number(variant.beginning_inventory) || 0;
             } else {
-              // Fallback: use item-level beginning_inventory (for items without per-variant tracking)
               variantBeginningInventory = item.beginning_inventory || 0;
+            }
+
+            // Per-size purchases only: use variant's value or derive from this size's stock - beginning_inventory.
+            // Never use item-level purchases for a specific size (so Medium stays 0 when only Small got +10).
+            let variantPurchases;
+            if (variant.purchases !== undefined && variant.purchases !== null) {
+              variantPurchases = Number(variant.purchases) || 0;
+            } else if (
+              variant.stock !== undefined &&
+              variant.stock !== null
+            ) {
+              variantPurchases = Math.max(
+                0,
+                variantStock - variantBeginningInventory
+              );
+            } else {
+              variantPurchases = 0;
             }
 
             // Read reorder_point from variant JSON field if available
@@ -285,7 +289,7 @@ class InventoryService {
                 variantBeginningInventory * variantPrice +
                 variantPurchases * variantPrice,
               status: variantStatus,
-              reorder_point: variantReorderPoint, // Now reads from variant JSON or item-level
+              reorder_point: variantReorderPoint,
               beginning_inventory_date: item.beginning_inventory_date,
               fiscal_year_start: item.fiscal_year_start,
               created_at: item.created_at,
@@ -519,20 +523,35 @@ class InventoryService {
             parsedNote._type === "sizeVariations" &&
             Array.isArray(parsedNote.sizeVariations)
           ) {
-            // Find matching variant
+            // Normalize for comparison: lowercase, trim, collapse spaces, strip parentheses content
+            const normalizeForMatch = (s) =>
+              (s || "")
+                .toLowerCase()
+                .trim()
+                .replace(/\s+/g, " ")
+                .replace(/\([^)]*\)/g, "")
+                .trim();
+            const targetNormalized = normalizeForMatch(size);
+
+            // Find matching variant (exact or without parentheses)
             variantIndex = parsedNote.sizeVariations.findIndex((v) => {
               const vSize = (v.size || "").toLowerCase().trim();
               const targetSize = size.toLowerCase().trim();
-              // Match exact only - don't use includes() as it causes false matches
-              // (e.g., "Small" would incorrectly match "XSmall")
-              // Match with or without parentheses (e.g., "Small (S)" matches "Small")
               const vSizeNoParens = vSize.replace(/\([^)]*\)/g, "").trim();
               const targetSizeNoParens = targetSize.replace(/\([^)]*\)/g, "").trim();
               return (
                 vSize === targetSize ||
-                vSizeNoParens === targetSizeNoParens
+                vSizeNoParens === targetSizeNoParens ||
+                normalizeForMatch(v.size) === targetNormalized
               );
             });
+
+            // Fallback: match by core size name only (e.g. "Small (S)" and "Small" both -> "small")
+            if (variantIndex === -1 && parsedNote.sizeVariations.length > 0) {
+              variantIndex = parsedNote.sizeVariations.findIndex((v) => {
+                return normalizeForMatch(v.size) === targetNormalized;
+              });
+            }
 
             if (variantIndex !== -1) {
               isJsonVariant = true;
@@ -541,6 +560,24 @@ class InventoryService {
         } catch (e) {
           // Not JSON or parse error, treat as regular item
         }
+      }
+
+      // If item has sizeVariations and size was provided but no variant matched,
+      // do NOT update row stock (that would leave note out of sync and modal would show old stock).
+      if (
+        parsedNote &&
+        parsedNote._type === "sizeVariations" &&
+        Array.isArray(parsedNote.sizeVariations) &&
+        parsedNote.sizeVariations.length > 0 &&
+        size &&
+        variantIndex === -1
+      ) {
+        const availableSizes = parsedNote.sizeVariations
+          .map((v) => v.size)
+          .join(", ");
+        throw new Error(
+          `Size "${size}" not found in this item's size variations. Available: ${availableSizes}. Add stock only to one of these sizes.`
+        );
       }
 
       // Handle JSON variant stock update

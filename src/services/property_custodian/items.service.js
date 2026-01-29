@@ -1028,12 +1028,14 @@ class ItemsService {
       }
 
       // When reorder_point is sent and item has sizeVariations, update the matching variant (or the only variant) in note
+      // Use incoming updates.note if it has sizeVariations so we don't overwrite new variants (e.g. XSmall) with old DB note
       const sizeOrVariant = updates.size ?? updates.variant;
       const reorderValue = Number(updates.reorder_point);
       const isValidReorder = updates.reorder_point !== undefined && !Number.isNaN(reorderValue) && reorderValue >= 0;
-      if (isValidReorder && currentItem.note) {
+      const noteSource = updates.note || currentItem.note;
+      if (isValidReorder && noteSource) {
         try {
-          const parsed = JSON.parse(currentItem.note);
+          const parsed = JSON.parse(noteSource);
           if (
             parsed &&
             parsed._type === "sizeVariations" &&
@@ -1086,9 +1088,45 @@ class ItemsService {
       // Check if beginning inventory expired and reset if needed
       await InventoryService.checkAndResetBeginningInventory(id);
 
-      // IMPORTANT: If stock is being increased, add difference to purchases
-      // beginning_inventory NEVER changes after first creation
-      if (updates.stock !== undefined && updates.stock > currentItem.stock) {
+      // When the payload includes note with sizeVariations, use per-variant purchases
+      // so we don't add the total stock delta to item-level purchases (which would
+      // make every size show the same purchases in the UI).
+      let noteHasSizeVariations = false;
+      if (updates.note) {
+        try {
+          const parsedNote = JSON.parse(updates.note);
+          if (
+            parsedNote &&
+            parsedNote._type === "sizeVariations" &&
+            Array.isArray(parsedNote.sizeVariations) &&
+            parsedNote.sizeVariations.length > 0
+          ) {
+            noteHasSizeVariations = true;
+            // Compute per-variant purchases if missing (stock - beginning_inventory)
+            let totalPurchases = 0;
+            for (const v of parsedNote.sizeVariations) {
+              const stock = Number(v.stock) || 0;
+              const beg = Number(v.beginning_inventory) ?? 0;
+              if (v.purchases === undefined || v.purchases === null) {
+                v.purchases = Math.max(0, stock - beg);
+              }
+              totalPurchases += Number(v.purchases) || 0;
+            }
+            updates.purchases = totalPurchases;
+            updates.note = JSON.stringify(parsedNote);
+          }
+        } catch (e) {
+          // Not JSON or parse error, ignore
+        }
+      }
+
+      // Only apply "stock increase -> add to purchases" when NOT updating via sizeVariations note
+      // (otherwise we'd add the delta to item-level and every size would show it)
+      if (
+        !noteHasSizeVariations &&
+        updates.stock !== undefined &&
+        updates.stock > currentItem.stock
+      ) {
         const stockDifference = updates.stock - currentItem.stock;
         const currentPurchases = currentItem.purchases || 0;
         updates.purchases = currentPurchases + stockDifference;
