@@ -78,10 +78,19 @@ async function sendContactNotificationToCustodians(contactPayload) {
 
   if (!host || !user || !pass) {
     console.warn(
-      "Contact service: EMAIL_HOST, EMAIL_USER, or EMAIL_PASS not set; skipping contact notification email."
+      "Contact service: EMAIL_HOST, EMAIL_USER, or EMAIL_PASS not set; skipping contact notification email. Set these in Render Environment (or .env) for contact form emails."
     );
     return;
   }
+
+  const portNum = port ? parseInt(port, 10) : 587;
+  console.log(
+    "Contact service: sending notification email via",
+    host + ":" + portNum,
+    "to",
+    recipients.length,
+    "recipient(s)"
+  );
 
   const fromAddress = process.env.CONTACT_FROM_EMAIL || user;
   const subject = "New contact form message – La Verdad OrderFlow";
@@ -155,10 +164,12 @@ async function sendContactNotificationToCustodians(contactPayload) {
   `.trim();
 
   try {
+    // Gmail: use port 587 with STARTTLS (requireTLS) or port 465 with SSL (secure)
     const transporter = nodemailer.createTransport({
       host,
-      port: port ? parseInt(port, 10) : 587,
-      secure: false,
+      port: portNum,
+      secure: portNum === 465,
+      requireTLS: portNum === 587,
       auth: { user, pass },
     });
 
@@ -170,8 +181,12 @@ async function sendContactNotificationToCustodians(contactPayload) {
       text: bodyText,
       html: bodyHtml,
     });
+    console.log("Contact service: notification email sent successfully.");
   } catch (err) {
-    console.error("Contact service: failed to send notification email:", err);
+    // Log full error so Render logs show Gmail errors (e.g. "Invalid login" = need App Password)
+    const msg = err.response || err.message || String(err);
+    console.error("Contact service: failed to send notification email:", msg);
+    if (err.response) console.error("SMTP response:", err.response);
   }
 }
 

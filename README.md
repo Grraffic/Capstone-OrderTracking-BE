@@ -71,6 +71,27 @@ NODE_ENV=development
 2. Set `SPECIAL_ADMIN_EMAILS=ramosraf278@gmail.com` (add more custodians comma-separated if needed). Users with role property_custodian in the database also receive the BCC automatically.
 3. Restart the backend. When someone submits the contact form, one email is sent BCC to all property custodians (config + DB).
 
+#### Contact form on Render (Gmail)
+
+If the contact form works locally but not on Render, set these **exact** environment variable **Key** names in Render → Your Web Service → Environment:
+
+| Key           | Value                 | Required |
+|---------------|-----------------------|----------|
+| `EMAIL_HOST`  | `smtp.gmail.com`      | Yes      |
+| `EMAIL_PORT`  | `587`                 | Yes      |
+| `EMAIL_USER`  | Your Gmail address    | Yes      |
+| `EMAIL_PASS`  | Gmail App Password    | Yes      |
+| `SPECIAL_ADMIN_EMAILS` | Gmail(s) that receive contact form emails (comma-separated) | Yes (for recipients) |
+
+**Gmail App Password (required):** Gmail does not accept your normal password for SMTP. You must use an App Password:
+
+1. Enable [2-Step Verification](https://myaccount.google.com/signinoptions/two-step-verification) on your Google account.
+2. Go to [App Passwords](https://myaccount.google.com/apppasswords) (or Google Account → Security → 2-Step Verification → App passwords).
+3. Select app: **Mail**, device: **Other** (e.g. "La Verdad OrderFlow"), then **Generate**.
+4. Copy the 16-character password (no spaces) and set it as `EMAIL_PASS` in Render. Do **not** use your regular Gmail password.
+
+After saving env vars, redeploy the backend. Check Render **Logs** when someone submits the form: you should see either "Contact service: notification email sent successfully." or an error (e.g. "Invalid login" means `EMAIL_PASS` is wrong or not an App Password).
+
 ### Running the Server
 
 ```bash
