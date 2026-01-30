@@ -489,6 +489,38 @@ class ItemsController {
   }
 
   /**
+   * Record a return (student returned item). Increases stock only; logs "RETURN RECORDED" for Returns table.
+   * POST /api/items/:id/record-return
+   * Body: { quantity, size?, unitPrice? }
+   */
+  async recordReturn(req, res) {
+    try {
+      const { id } = req.params;
+      const { quantity, size, unitPrice } = req.body;
+      const io = req.app.get("io");
+      const userId = req.user?.id || null;
+      const userEmail = req.user?.email || null;
+
+      if (!quantity || quantity <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Quantity is required and must be greater than 0",
+        });
+      }
+
+      const InventoryService = require("../../services/property_custodian/inventory.service");
+      const result = await InventoryService.recordReturn(id, quantity, size, unitPrice, io, userId, userEmail);
+      res.json(result);
+    } catch (error) {
+      console.error("Record return error:", error);
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to record return",
+      });
+    }
+  }
+
+  /**
    * Reset beginning inventory manually
    * POST /api/items/:id/reset-beginning-inventory
    */

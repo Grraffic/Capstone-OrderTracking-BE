@@ -30,7 +30,7 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
     let error = null;
     let result = await supabase
       .from("users")
-      .select("id, role, education_level, gender, student_type, max_items_per_order, max_items_per_order_set_at")
+      .select("id, role, education_level, gender, student_type, total_item_limit, total_item_limit_set_at")
       .eq("email", tokenUser.email)
       .maybeSingle();
     data = result.data;
@@ -39,7 +39,7 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
     if (error && (String(error.message || "").toLowerCase().includes("does not exist") || String(error.message || "").toLowerCase().includes("column"))) {
       result = await supabase
         .from("users")
-        .select("id, role, education_level, max_items_per_order, max_items_per_order_set_at")
+        .select("id, role, education_level, total_item_limit, total_item_limit_set_at")
         .eq("email", tokenUser.email)
         .maybeSingle();
       data = result.data;
@@ -80,16 +80,16 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
     const studentType = (data.student_type || "new").toLowerCase();
     const gender = data.gender || null;
 
-    // Derived Max Items Per Order defaults based on student type.
-    // System admins can override via max_items_per_order on users; if not set, we fall back to these values.
-    const baseMaxItemsPerOrder =
+    // Derived Total Item Limit defaults based on student type.
+    // System admins can override via total_item_limit on users; if not set, we fall back to these values.
+    const baseTotalItemLimit =
       studentType === "new" ? 8 :
       studentType === "old" ? 2 :
       null;
-    const effectiveMaxItemsPerOrder =
-      data.max_items_per_order != null && Number(data.max_items_per_order) > 0
-        ? Number(data.max_items_per_order)
-        : baseMaxItemsPerOrder;
+    const effectiveTotalItemLimit =
+      data.total_item_limit != null && Number(data.total_item_limit) > 0
+        ? Number(data.total_item_limit)
+        : baseTotalItemLimit;
 
     if (!gender && educationLevel) {
       // Still compute alreadyOrdered so the UI can disable items the user has already ordered
@@ -128,7 +128,7 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
         alreadyOrdered,
         profileIncomplete: true,
         message: "Complete your profile (gender) to see order limits.",
-        maxItemsPerOrder: effectiveMaxItemsPerOrder ?? null,
+        totalItemLimit: effectiveTotalItemLimit ?? null,
         slotsUsedFromPlacedOrders,
       });
     }
@@ -186,15 +186,15 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
 
     const slotsUsedFromPlacedOrders = Object.keys(alreadyOrdered || {}).length;
 
-    // Voided = max_items_per_order set to 0 by auto-void (unclaimed). Only block if they also have placed orders
+    // Voided = total_item_limit set to 0 by auto-void (unclaimed). Only block if they also have placed orders
     // (so we don't block a student who has no orders/claimed items—voided orders are cancelled and don't show there).
     const blockedDueToVoid =
-      data.max_items_per_order === 0 && slotsUsedFromPlacedOrders > 0;
+      data.total_item_limit === 0 && slotsUsedFromPlacedOrders > 0;
 
     return res.json({
       maxQuantities,
       alreadyOrdered,
-      maxItemsPerOrder: blockedDueToVoid ? 0 : (effectiveMaxItemsPerOrder ?? null),
+      totalItemLimit: blockedDueToVoid ? 0 : (effectiveTotalItemLimit ?? null),
       slotsUsedFromPlacedOrders,
       blockedDueToVoid,
     });

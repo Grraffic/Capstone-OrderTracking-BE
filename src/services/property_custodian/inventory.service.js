@@ -268,11 +268,13 @@ class InventoryService {
             const released = 0; // Calculated in frontend from orders
             const returns = 0;
 
-            // Determine status based on variant stock
+            // Determine status based on variant stock vs reorder_point (matches At Reorder Point table)
             let variantStatus = "Above Threshold";
-            if (variantStock === 0) variantStatus = "Out of Stock";
-            else if (variantStock < 20) variantStatus = "Critical";
-            else if (variantStock < 50) variantStatus = "At Reorder Point";
+            if (variantStock === 0) {
+              variantStatus = "Out of Stock";
+            } else if (variantReorderPoint > 0 && variantStock <= variantReorderPoint) {
+              variantStatus = "At Reorder Point";
+            }
 
             // FIFO total: (beginning_inventory * beginning unit price) + (purchases * purchase unit price)
             const totalAmount =
@@ -354,11 +356,14 @@ class InventoryService {
               const released = 0; // Calculated in frontend from orders
               const returns = 0;
 
-              // Determine status based on size stock
+              // Determine status based on size stock vs reorder_point (matches At Reorder Point table)
+              const sizeReorderPoint = Number(item.reorder_point) || 0;
               let sizeStatus = "Above Threshold";
-              if (sizeStock === 0) sizeStatus = "Out of Stock";
-              else if (sizeStock < 20) sizeStatus = "Critical";
-              else if (sizeStock < 50) sizeStatus = "At Reorder Point";
+              if (sizeStock === 0) {
+                sizeStatus = "Out of Stock";
+              } else if (sizeReorderPoint > 0 && sizeStock <= sizeReorderPoint) {
+                sizeStatus = "At Reorder Point";
+              }
 
               // FIFO: beginning uses beginning_inventory_unit_price, purchases use price
               const begUnitPrice = Number(item.beginning_inventory_unit_price) ?? Number(item.price) ?? 0;
@@ -424,6 +429,16 @@ class InventoryService {
               (item.beginning_inventory || 0) * begUnitPrice +
               (item.purchases || 0) * purchUnitPrice;
 
+            // Determine status based on stock vs reorder_point (matches At Reorder Point table)
+            const singleReorderPoint = Number(item.reorder_point) || 0;
+            const singleStock = Number(item.stock) || 0;
+            let singleStatus = "Above Threshold";
+            if (singleStock === 0) {
+              singleStatus = "Out of Stock";
+            } else if (singleReorderPoint > 0 && singleStock <= singleReorderPoint) {
+              singleStatus = "At Reorder Point";
+            }
+
             reportData.push({
               id: `${item.id}-${item.created_at || Date.now()}`, // Ensure uniqueness even for duplicates
               item_id: item.id, // Keep original item ID
@@ -443,7 +458,7 @@ class InventoryService {
               unit_price: purchUnitPrice,
               unit_price_beginning: begUnitPrice,
               total_amount: totalAmount,
-              status: item.status,
+              status: singleStatus,
               reorder_point: item.reorder_point || 0, // Include reorder_point from item
               beginning_inventory_date: item.beginning_inventory_date,
               fiscal_year_start: item.fiscal_year_start,
@@ -452,6 +467,44 @@ class InventoryService {
             });
           }
         }
+      }
+
+      // Fetch return quantities from transactions (RETURN RECORDED) and merge into report
+      const normalizeSizeForKey = (s) =>
+        (s || "N/A")
+          .toString()
+          .toLowerCase()
+          .trim()
+          .replace(/\s*\([^)]*\)/g, "")
+          .trim() || "N/A";
+      const returnSumsByItemSize = new Map();
+      try {
+        const { data: returnTxList, error: txError } = await supabase
+          .from("transactions")
+          .select("metadata")
+          .eq("type", "Inventory")
+          .eq("action", "RETURN RECORDED");
+
+        if (!txError && returnTxList && returnTxList.length > 0) {
+          for (const tx of returnTxList) {
+            const meta = tx.metadata || {};
+            const itemId = meta.item_id || null;
+            const size = meta.size != null ? meta.size : "N/A";
+            const qty = Number(meta.quantity) || 0;
+            if (!itemId || qty <= 0) continue;
+            const key = `${itemId}|${normalizeSizeForKey(size)}`;
+            returnSumsByItemSize.set(key, (returnSumsByItemSize.get(key) || 0) + qty);
+          }
+        }
+      } catch (e) {
+        if (!isProduction) {
+          console.warn("[getInventoryReport] Could not load return transactions:", e);
+        }
+      }
+
+      for (const row of reportData) {
+        const key = `${row.item_id}|${normalizeSizeForKey(row.size)}`;
+        row.returns = returnSumsByItemSize.get(key) || 0;
       }
 
       // Comprehensive logging to track purchases values through report generation (dev only)
@@ -907,6 +960,201 @@ class InventoryService {
       console.error(`[addStock] ❌ Add stock error:`, error);
       console.error(`[addStock] Error stack:`, error.stack);
       throw new Error(`Failed to add stock: ${error.message}`);
+    }
+  }
+
+  /**
+   * Record a return (student returned item). Increases stock only (not purchases) and logs "RETURN RECORDED" so it appears in the Returns table.
+   */
+  async recordReturn(itemId, quantity, size = null, unitPrice = null, io = null, userId = null, userEmail = null) {
+    try {
+      if (!isProduction) {
+        console.log(
+          `[recordReturn] 🚀 Starting recordReturn: itemId=${itemId}, quantity=${quantity}, size="${size}"`
+        );
+      }
+
+      const { data: item, error: fetchError } = await supabase
+        .from("items")
+        .select("*")
+        .eq("id", itemId)
+        .single();
+
+      if (fetchError || !item) {
+        console.error(`[recordReturn] ❌ Item not found: itemId=${itemId}`);
+        throw new Error("Item not found");
+      }
+
+      let isJsonVariant = false;
+      let variantIndex = -1;
+      let parsedNote = null;
+
+      if (item.note && size) {
+        try {
+          parsedNote = JSON.parse(item.note);
+          if (
+            parsedNote &&
+            parsedNote._type === "sizeVariations" &&
+            Array.isArray(parsedNote.sizeVariations)
+          ) {
+            const normalizeForMatch = (s) =>
+              (s || "")
+                .toLowerCase()
+                .trim()
+                .replace(/\s+/g, " ")
+                .replace(/\([^)]*\)/g, "")
+                .trim();
+            const targetNormalized = normalizeForMatch(size);
+            variantIndex = parsedNote.sizeVariations.findIndex((v) => {
+              const vSize = (v.size || "").toLowerCase().trim();
+              const targetSize = size.toLowerCase().trim();
+              const vSizeNoParens = vSize.replace(/\([^)]*\)/g, "").trim();
+              const targetSizeNoParens = targetSize.replace(/\([^)]*\)/g, "").trim();
+              return (
+                vSize === targetSize ||
+                vSizeNoParens === targetSizeNoParens ||
+                normalizeForMatch(v.size) === targetNormalized
+              );
+            });
+            if (variantIndex === -1 && parsedNote.sizeVariations.length > 0) {
+              variantIndex = parsedNote.sizeVariations.findIndex((v) =>
+                normalizeForMatch(v.size) === targetNormalized
+              );
+            }
+            if (variantIndex !== -1) isJsonVariant = true;
+          }
+        } catch (e) {
+          // not JSON
+        }
+      }
+
+      if (
+        parsedNote &&
+        parsedNote._type === "sizeVariations" &&
+        Array.isArray(parsedNote.sizeVariations) &&
+        parsedNote.sizeVariations.length > 0 &&
+        size &&
+        variantIndex === -1
+      ) {
+        const availableSizes = parsedNote.sizeVariations.map((v) => v.size).join(", ");
+        throw new Error(`Size "${size}" not found. Available: ${availableSizes}`);
+      }
+
+      if (isJsonVariant && parsedNote && variantIndex !== -1) {
+        const variant = parsedNote.sizeVariations[variantIndex];
+        const currentVariantStock = Number(variant.stock) || 0;
+        const newVariantStock = currentVariantStock + quantity;
+        parsedNote.sizeVariations[variantIndex].stock = newVariantStock;
+        const newTotalStock = parsedNote.sizeVariations.reduce(
+          (sum, v) => sum + (Number(v.stock) || 0),
+          0
+        );
+        const updateData = {
+          stock: newTotalStock,
+          note: JSON.stringify(parsedNote),
+        };
+        if (unitPrice != null) {
+          parsedNote.sizeVariations[variantIndex].price = unitPrice;
+          updateData.note = JSON.stringify(parsedNote);
+        }
+
+        const { data, error } = await supabase
+          .from("items")
+          .update(updateData)
+          .eq("id", itemId)
+          .select()
+          .single();
+
+        if (error) throw error;
+
+        try {
+          const TransactionService = require("../../services/transaction.service");
+          const itemName = data.name;
+          const variantSize = variant.size || "N/A";
+          const details = `Return recorded: ${quantity} unit(s) of ${itemName} (Size: ${variantSize})${unitPrice ? ` at ₱${unitPrice} per unit` : ""}`;
+          await TransactionService.logTransaction(
+            "Inventory",
+            "RETURN RECORDED",
+            userId,
+            details,
+            {
+              item_id: data.id,
+              item_name: itemName,
+              size: variantSize,
+              quantity: quantity,
+              unit_price: unitPrice,
+              previous_stock: currentVariantStock,
+              new_stock: newVariantStock,
+            },
+            userEmail
+          );
+        } catch (txError) {
+          console.error("Failed to log return transaction:", txError);
+        }
+
+        if (io) {
+          io.emit("item:updated", { itemId: data.id, ...data });
+        }
+
+        return {
+          success: true,
+          data,
+          message: `Return recorded: ${quantity} unit(s) added to ${size}. New ${size} stock: ${newVariantStock}.`,
+        };
+      }
+
+      // Regular item (no size or single size)
+      const currentStock = item.stock || 0;
+      const newStock = currentStock + quantity;
+      const updateData = { stock: newStock };
+      if (unitPrice != null) updateData.price = unitPrice;
+
+      const { data, error } = await supabase
+        .from("items")
+        .update(updateData)
+        .eq("id", itemId)
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      try {
+        const TransactionService = require("../../services/transaction.service");
+        const itemName = data.name;
+        const itemSize = size || data.size || "N/A";
+        const details = `Return recorded: ${quantity} unit(s) of ${itemName}${itemSize !== "N/A" ? ` (Size: ${itemSize})` : ""}${unitPrice ? ` at ₱${unitPrice} per unit` : ""}`;
+        await TransactionService.logTransaction(
+          "Inventory",
+          "RETURN RECORDED",
+          userId,
+          details,
+          {
+            item_id: data.id,
+            item_name: itemName,
+            size: itemSize,
+            quantity: quantity,
+            unit_price: unitPrice,
+            previous_stock: currentStock,
+            new_stock: newStock,
+          },
+          userEmail
+        );
+      } catch (txError) {
+        console.error("Failed to log return transaction:", txError);
+      }
+
+      if (io) {
+        io.emit("item:updated", { itemId: data.id, ...data });
+      }
+
+      return {
+        success: true,
+        data,
+        message: `Return recorded: ${quantity} unit(s). New total stock: ${newStock}.`,
+      };
+    } catch (error) {
+      console.error(`[recordReturn] ❌ Error:`, error);
+      throw new Error(`Failed to record return: ${error.message}`);
     }
   }
 

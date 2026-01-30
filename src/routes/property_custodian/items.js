@@ -115,6 +115,12 @@ router.patch("/:id/adjust", itemsController.adjustStock);
 router.post("/:id/add-stock", itemsController.addStock);
 
 /**
+ * POST /api/items/:id/record-return
+ * Record a return (student returned item); appears in Returns table
+ */
+router.post("/:id/record-return", itemsController.recordReturn);
+
+/**
  * POST /api/items/:id/reset-beginning-inventory
  * Manually reset beginning inventory
  * Note: Add auth.requireAdmin middleware when ready

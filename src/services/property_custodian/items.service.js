@@ -1516,7 +1516,7 @@ class ItemsService {
       // This ensures we find items regardless of case differences
       const { data, error } = await supabase
         .from("items")
-        .select("size, stock, status, id, note, price")
+        .select("size, stock, status, id, note, price, reorder_point")
         .ilike("name", name) // Case-insensitive match
         .ilike("education_level", educationLevel) // Case-insensitive match
         .eq("is_active", true)
@@ -1560,27 +1560,32 @@ class ItemsService {
                   }
                 }
                 const variantStock = Number(variant.stock) || 0;
+                const variantReorderPoint = (variant.reorder_point != null && variant.reorder_point !== "")
+                  ? Number(variant.reorder_point) || 0
+                  : 0;
 
-                // Determine status based on variant stock
+                // Determine status based on variant stock vs reorder_point (matches At Reorder Point table)
                 let variantStatus = "Above Threshold";
                 if (variantStock === 0) variantStatus = "Out of Stock";
+                else if (variantReorderPoint > 0 && variantStock <= variantReorderPoint) variantStatus = "At Reorder Point";
                 else if (variantStock <= 10) variantStatus = "Critical";
-                else if (variantStock <= 20) variantStatus = "At Reorder Point";
 
                 if (sizeMap.has(variantSize)) {
                   const existing = sizeMap.get(variantSize);
                   existing.stock += variantStock;
-                  // Update status based on new combined stock
+                  // Update status based on new combined stock (use reorder_point when available)
+                  const rp = existing.reorderPoint != null ? existing.reorderPoint : variantReorderPoint;
                   if (existing.stock === 0) existing.status = "Out of Stock";
+                  else if (rp > 0 && existing.stock <= rp) existing.status = "At Reorder Point";
                   else if (existing.stock <= 10) existing.status = "Critical";
-                  else if (existing.stock <= 20)
-                    existing.status = "At Reorder Point";
                   else existing.status = "Above Threshold";
+                  if (variantReorderPoint > 0) existing.reorderPoint = variantReorderPoint;
                 } else {
                   sizeMap.set(variantSize, {
                     size: variantSize,
                     stock: variantStock,
                     status: variantStatus,
+                    reorderPoint: variantReorderPoint,
                     id: item.id, // Use parent item ID
                     price: Number(variant.price) || Number(item.price) || 0,
                     isJsonVariant: true, // Flag to indicate this is from JSON
@@ -1610,20 +1615,29 @@ class ItemsService {
             }
           }
 
+          const itemReorderPoint = Number(item.reorder_point) || 0;
           if (existingSizeKey) {
             // Combine with existing size entry
             const existing = sizeMap.get(existingSizeKey);
             existing.stock += item.stock;
+            const rp = existing.reorderPoint != null ? existing.reorderPoint : itemReorderPoint;
             if (existing.stock === 0) existing.status = "Out of Stock";
+            else if (rp > 0 && existing.stock <= rp) existing.status = "At Reorder Point";
             else if (existing.stock <= 10) existing.status = "Critical";
-            else if (existing.stock <= 20) existing.status = "At Reorder Point";
             else existing.status = "Above Threshold";
+            if (itemReorderPoint > 0) existing.reorderPoint = itemReorderPoint;
           } else {
+            // Determine status based on stock vs reorder_point (matches At Reorder Point table)
+            let status = "Above Threshold";
+            if (item.stock === 0) status = "Out of Stock";
+            else if (itemReorderPoint > 0 && item.stock <= itemReorderPoint) status = "At Reorder Point";
+            else if (item.stock <= 10) status = "Critical";
             // Add new size entry (use original size value for display)
             sizeMap.set(normalizedSize, {
               size: normalizedSize, // Keep original size format
               stock: item.stock,
-              status: item.status,
+              status,
+              reorderPoint: itemReorderPoint,
               id: item.id,
               price: item.price,
             });

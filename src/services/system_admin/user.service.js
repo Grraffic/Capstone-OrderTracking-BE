@@ -140,6 +140,10 @@ async function getUsers({
     }
 
     const rows = data || [];
+    // Ensure every row has total_item_limit for frontend (DB may have old column name)
+    for (const u of rows) {
+      u.total_item_limit = u.total_item_limit ?? u.max_items_per_order;
+    }
     if (rows.length > 0) {
       const userIds = rows.map((u) => u.id).filter(Boolean);
       const placedStatuses = ["pending", "paid", "claimed", "processing", "ready", "payment_pending", "completed"];
@@ -166,10 +170,12 @@ async function getUsers({
           if (key) slotsByUserId[sid].add(key);
         }
       }
-      // Voided = max_items_per_order set to 0 by auto-void (unclaimed); cleared when admin re-enters max
+      // Voided = limit set to 0 by auto-void; support both column names (before/after migration)
       for (const u of rows) {
         u.slots_used_from_placed_orders = slotsByUserId[u.id] ? slotsByUserId[u.id].size : 0;
-        u.blocked_due_to_void = u.max_items_per_order === 0;
+        const limit = u.total_item_limit ?? u.max_items_per_order;
+        u.total_item_limit = limit; // frontend expects total_item_limit
+        u.blocked_due_to_void = limit === 0;
       }
     }
 
@@ -205,6 +211,10 @@ async function getUserById(userId) {
       throw error;
     }
 
+    // Support both column names (before/after migration); frontend expects total_item_limit
+    if (data && (data.max_items_per_order !== undefined || data.total_item_limit !== undefined)) {
+      data.total_item_limit = data.total_item_limit ?? data.max_items_per_order;
+    }
     return data;
   } catch (error) {
     console.error("Error fetching user:", error);
@@ -434,19 +444,39 @@ async function updateUser(userId, updates, updatedByUserId = null) {
       ...updates,
       updated_at: new Date().toISOString(),
     };
-    // When admin sets/updates max_items_per_order, reset "used" and void strikes so student gets fresh slate
-    if (updates.max_items_per_order !== undefined) {
-      updateData.max_items_per_order_set_at = new Date().toISOString();
+    // When admin sets/updates total_item_limit, reset "used" and void strikes (support both column names for migration)
+    const limitValue = updates.total_item_limit !== undefined ? updates.total_item_limit : updates.max_items_per_order;
+    if (limitValue !== undefined) {
+      const ts = new Date().toISOString();
+      updateData.total_item_limit = limitValue;
+      updateData.total_item_limit_set_at = ts;
       updateData.unclaimed_void_count = 0;
     }
 
-    const { data, error } = await supabase
+    let result = await supabase
       .from("users")
       .update(updateData)
       .eq("id", userId)
       .select()
       .single();
 
+    // If first update failed and we were setting the limit, retry with old column names (migration not run)
+    if (result.error && limitValue !== undefined) {
+      const fallbackData = { ...updates, updated_at: new Date().toISOString() };
+      delete fallbackData.total_item_limit;
+      delete fallbackData.total_item_limit_set_at;
+      fallbackData.max_items_per_order = limitValue;
+      fallbackData.max_items_per_order_set_at = new Date().toISOString();
+      fallbackData.unclaimed_void_count = 0;
+      result = await supabase
+        .from("users")
+        .update(fallbackData)
+        .eq("id", userId)
+        .select()
+        .single();
+    }
+
+    const { data, error } = result;
     if (error) {
       throw error;
     }
@@ -527,6 +557,10 @@ async function updateUser(userId, updates, updatedByUserId = null) {
       }
     }
 
+    // Ensure frontend always gets total_item_limit (DB may have old column name)
+    if (data && (data.max_items_per_order !== undefined || data.total_item_limit !== undefined)) {
+      data.total_item_limit = data.total_item_limit ?? data.max_items_per_order;
+    }
     return data;
   } catch (error) {
     console.error("Error updating user:", error);
@@ -562,7 +596,7 @@ async function deleteUser(userId) {
 /**
  * Bulk update users
  * @param {Array<string>} userIds - Array of user IDs to update
- * @param {Object} updateData - Data to update (max_items_per_order, order_lockout_period)
+ * @param {Object} updateData - Data to update (total_item_limit, order_lockout_period)
  * @returns {Promise<Object>} Update result with count of updated users
  */
 async function bulkUpdateUsers(userIds, updateData) {
@@ -575,23 +609,39 @@ async function bulkUpdateUsers(userIds, updateData) {
       throw new Error("Update data is required");
     }
 
-    // Prepare update object
+    const limitValue = updateData.total_item_limit !== undefined ? updateData.total_item_limit : updateData.max_items_per_order;
     const updateObject = {
       ...updateData,
       updated_at: new Date().toISOString(),
     };
-    if (updateData.max_items_per_order !== undefined) {
-      updateObject.max_items_per_order_set_at = new Date().toISOString();
+    if (limitValue !== undefined) {
+      updateObject.total_item_limit = limitValue;
+      updateObject.total_item_limit_set_at = new Date().toISOString();
       updateObject.unclaimed_void_count = 0;
     }
 
-    // Update all users in the array
-    const { data, error } = await supabase
+    let result = await supabase
       .from("users")
       .update(updateObject)
       .in("id", userIds)
       .select();
 
+    // If first update failed and we were setting the limit, retry with old column names (migration not run)
+    if (result.error && limitValue !== undefined) {
+      const fallback = { ...updateData, updated_at: new Date().toISOString() };
+      delete fallback.total_item_limit;
+      delete fallback.total_item_limit_set_at;
+      fallback.max_items_per_order = limitValue;
+      fallback.max_items_per_order_set_at = new Date().toISOString();
+      fallback.unclaimed_void_count = 0;
+      result = await supabase
+        .from("users")
+        .update(fallback)
+        .in("id", userIds)
+        .select();
+    }
+
+    const { data, error } = result;
     if (error) {
       throw error;
     }

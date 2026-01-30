@@ -327,18 +327,18 @@ class OrderService {
         throw new Error("Order must contain at least one item");
       }
 
-      // Enforce system-admin limits: max_items_per_order and order_lockout_period
+      // Enforce system-admin limits: total_item_limit and order_lockout_period
       const studentId = orderData.student_id || null;
       const studentEmail = (orderData.student_email || "").trim();
       if (studentId || studentEmail) {
         const userFields =
-          "max_items_per_order, max_items_per_order_set_at, order_lockout_period, order_lockout_unit, education_level, student_type, gender";
+          "total_item_limit, total_item_limit_set_at, order_lockout_period, order_lockout_unit, education_level, student_type, gender";
         const userQuery = studentId
           ? supabase.from("users").select(userFields).eq("id", studentId).maybeSingle()
           : supabase.from("users").select("id, " + userFields).eq("email", studentEmail).maybeSingle();
         const { data: userRow, error: userErr } = await userQuery;
         if (!userErr && userRow) {
-          const rawMaxItems = userRow.max_items_per_order;
+          const rawMaxItems = userRow.total_item_limit;
           const studentType = (userRow.student_type || "new").toLowerCase();
           const baseMaxItems =
             studentType === "new" ? 8 :
@@ -354,11 +354,11 @@ class OrderService {
 
           if (maxItems == null || Number(maxItems) <= 0) {
             throw new Error(
-              "Your order limit has not been set by the administration. Please contact your school administrator to set your Max Items Per Order before placing an order."
+              "Your order limit has not been set by the administration. Please contact your school administrator to set your Total Item Limit before placing an order."
             );
           }
 
-          // max_items_per_order = number of distinct item types (slots). Only placed orders count; cart does not.
+          // total_item_limit = number of distinct item types (slots). Only placed orders count; cart does not.
           // Slots are reduced when the student places an order, not when items are in the cart.
           if (maxItems != null && Number(maxItems) > 0) {
             const slotKeys = new Set();
@@ -418,7 +418,7 @@ class OrderService {
                 .maybeSingle();
 
               if (lastOrder && lastOrder.created_at) {
-                // Lockout applies only when the last order used the full Max Items Per Order (slots).
+                // Lockout applies only when the last order used the full Total Item Limit (slots).
                 // If the last order had fewer than maxItems item types, the student can place another order.
                 const lastOrderSlotKeys = new Set();
                 for (const item of Array.isArray(lastOrder.items) ? lastOrder.items : []) {
@@ -1050,7 +1050,7 @@ class OrderService {
         updated_at: new Date().toISOString(),
       };
       if (newCount >= strikesBeforeBlock) {
-        updatePayload.max_items_per_order = 0;
+        updatePayload.total_item_limit = 0;
       }
       const { error } = await supabase
         .from("users")
