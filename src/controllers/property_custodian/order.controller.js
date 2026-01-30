@@ -272,6 +272,10 @@ class OrderController {
     try {
       const { id } = req.params;
       const result = await OrderService.updateOrder(id, req.body);
+      const io = req.app.get("io");
+      if (io && result?.data) {
+        io.emit("order:updated", { orderId: id, order: result.data });
+      }
       res.json(result);
     } catch (error) {
       console.error("Update order error:", error);

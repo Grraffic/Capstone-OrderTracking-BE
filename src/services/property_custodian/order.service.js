@@ -1219,16 +1219,51 @@ class OrderService {
   }
 
   /**
-   * Update order
+   * Update order (e.g. finance changes item size at student request).
+   * When items change: regenerates qr_code_data so the student's QR reflects the new size;
+   * unreleased/available inventory is derived from order items, so changing size automatically
+   * "returns" the old size and "reserves" the new size for display.
    * @param {string} id - Order ID
-   * @param {Object} updates - Fields to update
+   * @param {Object} updates - Fields to update (items, total_amount, etc.)
    * @returns {Promise<Object>} - Updated order
    */
   async updateOrder(id, updates) {
     try {
       // Remove fields that shouldn't be updated directly
-      const { id: _, created_at, ...allowedUpdates } = updates;
+      const { id: _id, created_at, ...allowedUpdates } = updates;
       allowedUpdates.updated_at = new Date().toISOString();
+
+      const newItems = allowedUpdates.items;
+      if (newItems != null && (Array.isArray(newItems) || typeof newItems === "string")) {
+        const itemsArray = Array.isArray(newItems) ? newItems : (() => {
+          try { return JSON.parse(newItems); } catch (e) { return []; }
+        })();
+        if (itemsArray.length > 0) {
+          const { data: currentOrder, error: fetchErr } = await supabase
+            .from("orders")
+            .select("order_number, student_id, student_name, student_email, education_level, status, created_at")
+            .eq("id", id)
+            .eq("is_active", true)
+            .single();
+          if (fetchErr || !currentOrder) throw fetchErr || new Error("Order not found");
+          const totalAmount = allowedUpdates.total_amount != null
+            ? Number(allowedUpdates.total_amount)
+            : itemsArray.reduce((sum, it) => sum + (Number(it.price) || 0) * (Number(it.quantity) || 1), 0);
+          allowedUpdates.total_amount = totalAmount;
+          const qrCodeData = generateOrderReceiptQRData({
+            orderNumber: currentOrder.order_number,
+            studentId: currentOrder.student_id,
+            studentName: currentOrder.student_name,
+            studentEmail: currentOrder.student_email || "",
+            items: itemsArray,
+            educationLevel: currentOrder.education_level,
+            totalAmount,
+            orderDate: currentOrder.created_at,
+            status: currentOrder.status || "pending",
+          });
+          allowedUpdates.qr_code_data = qrCodeData;
+        }
+      }
 
       const { data, error } = await supabase
         .from("orders")

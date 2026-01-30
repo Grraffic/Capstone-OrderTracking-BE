@@ -418,18 +418,23 @@ class ItemsService {
    */
   async createItem(itemData, io = null, userId = null, userEmail = null) {
     try {
-      const requiredFields = [
-        "name",
-        "education_level",
-        "category",
-        "item_type",
-        "stock",
-        "price",
-      ];
+      // Normalize gender (accept snake_case or camelCase from client)
+      itemData.for_gender = itemData.for_gender || itemData.forGender || "Unisex";
+      // Add item only requires: education level, item name, item type, gender; variants optional (in note/size)
+      const requiredFields = ["name", "education_level", "item_type", "for_gender"];
       for (const field of requiredFields) {
-        if (!itemData[field] && itemData[field] !== 0)
+        const val = itemData[field];
+        if (val === undefined || val === null || (typeof val === "string" && val.trim() === ""))
           throw new Error(`Missing required field: ${field}`);
       }
+      // Category is always derived from education level / name (no Grade Level Category in UI)
+      itemData.category =
+        itemData.education_level === "All Education Levels"
+          ? "All Levels"
+          : (itemData.name || "All Levels").trim() || "All Levels";
+      // Default stock and price if not provided
+      if (itemData.stock === undefined || itemData.stock === null) itemData.stock = 0;
+      if (itemData.price === undefined || itemData.price === null) itemData.price = 0;
 
       if (
         itemData.image &&
@@ -1745,23 +1750,22 @@ class ItemsService {
     try {
       console.log(`🔔 Checking for pre-orders to notify for: ${item.name}`);
 
-      // Normalize size for matching
+      // Normalize size for matching (so notification finds pre-orders regardless of "XSmall" vs "XS" vs "X Small")
       let sizeToMatch = item.size;
       if (item.size) {
-        const lower = item.size.toLowerCase();
-        // Extract content from parens if any: "XSmall (XS)" -> "XS"
+        const withoutParens = item.size.replace(/\([^)]*\)/g, "").trim();
+        const lower = withoutParens.toLowerCase().replace(/[\s-]+/g, "");
         const parenMatch = item.size.match(/\(([^)]+)\)/);
         if (parenMatch) {
           sizeToMatch = parenMatch[1].trim();
         } else {
-          // Basic mapping
-          if (lower === "xsmall" || lower === "extra small") sizeToMatch = "XS";
-          else if (lower === "small") sizeToMatch = "S";
-          else if (lower === "medium") sizeToMatch = "M";
-          else if (lower === "large") sizeToMatch = "L";
-          else if (lower === "xlarge" || lower === "extra large")
-            sizeToMatch = "XL";
-          else if (lower === "2xlarge" || lower === "xxl") sizeToMatch = "XXL";
+          if (lower === "xsmall" || lower === "extrasmall" || lower === "xs") sizeToMatch = "XS";
+          else if (lower === "small" || lower === "s") sizeToMatch = "S";
+          else if (lower === "medium" || lower === "m") sizeToMatch = "M";
+          else if (lower === "large" || lower === "l") sizeToMatch = "L";
+          else if (lower === "xlarge" || lower === "extralarge" || lower === "xl") sizeToMatch = "XL";
+          else if (lower === "2xlarge" || lower === "2xl" || lower === "xxl" || lower === "doubleextralarge") sizeToMatch = "XXL";
+          else if (lower === "3xlarge" || lower === "3xl" || lower === "tripleextralarge") sizeToMatch = "3XL";
         }
       }
 

@@ -218,8 +218,11 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
 // Profile endpoint - returns user info from token
 router.get("/profile", verifyToken, async (req, res) => {
   try {
-    const supabase = require("../config/supabase");
     const tokenUser = req.user; // from JWT payload
+    if (!tokenUser?.email) {
+      return res.status(401).json({ message: "Invalid token: missing email", error: "invalid_token" });
+    }
+    const supabase = require("../config/supabase");
     // Try full select first (includes gender, student_type if columns exist)
     let data = null;
     let error = null;
@@ -313,8 +316,12 @@ router.get("/profile", verifyToken, async (req, res) => {
 
     return res.json(profile);
   } catch (err) {
-    console.error("Profile endpoint error:", err);
-    return res.status(500).json({ message: "Internal server error" });
+    console.error("Profile GET endpoint error:", err?.message || err);
+    if (err?.stack) console.error(err.stack);
+    return res.status(500).json({
+      message: "Internal server error",
+      ...(process.env.NODE_ENV === "development" && { details: err?.message }),
+    });
   }
 });
 
@@ -398,8 +405,11 @@ function normalizeGender(value) {
 // Update profile endpoint - updates user profile information
 router.put("/profile", verifyToken, async (req, res) => {
   try {
-    const supabase = require("../config/supabase");
     const tokenUser = req.user; // from JWT payload
+    if (!tokenUser?.email) {
+      return res.status(401).json({ message: "Invalid token: missing email", error: "invalid_token" });
+    }
+    const supabase = require("../config/supabase");
     const { name, photoURL, courseYearLevel, studentNumber, educationLevel, gender, studentType } =
       req.body;
 
@@ -503,11 +513,13 @@ router.put("/profile", verifyToken, async (req, res) => {
     let data = null;
     let error = null;
 
+    const isColumnError = (e) =>
+      e && (String(e.message || "").toLowerCase().includes("does not exist") || String(e.message || "").toLowerCase().includes("column"));
+
     if (!isAdmin && (genderValue !== undefined || studentType !== undefined)) {
       const updateWithOptional = { ...updateData };
       if (genderValue !== undefined) updateWithOptional.gender = genderValue;
       if (studentType !== undefined) updateWithOptional.student_type = studentType === null || studentType === "" ? null : studentType;
-      // Only select columns we're updating (student_type column may not exist in DB yet)
       const selectOptional = [selectCore];
       if (genderValue !== undefined) selectOptional.push("gender");
       if (studentType !== undefined) selectOptional.push("student_type");
@@ -516,13 +528,12 @@ router.put("/profile", verifyToken, async (req, res) => {
         .update(updateWithOptional)
         .eq("email", tokenUser.email)
         .select(selectOptional.join(", "))
-        .single();
+        .maybeSingle();
       data = result.data;
       error = result.error;
     }
 
-    // If failed with "column does not exist", retry with updateData and gender only (gender column exists; student_type may not)
-    if (error && (String(error.message || "").toLowerCase().includes("does not exist") || String(error.message || "").toLowerCase().includes("column"))) {
+    if (error && isColumnError(error)) {
       const fallbackUpdate = { ...updateData };
       if (genderValue !== undefined) fallbackUpdate.gender = genderValue;
       const fallbackSelect = Object.keys(fallbackUpdate).includes("gender") ? `${selectCore}, gender` : selectCore;
@@ -531,16 +542,63 @@ router.put("/profile", verifyToken, async (req, res) => {
         .update(fallbackUpdate)
         .eq("email", tokenUser.email)
         .select(fallbackSelect)
-        .single();
+        .maybeSingle();
       data = fallback.data;
       error = fallback.error;
-    } else if (!data && !error) {
+    }
+
+    if (error && isColumnError(error)) {
+      const minimalUpdate = {
+        updated_at: new Date().toISOString(),
+      };
+      if (name && typeof name === "string" && name.trim().length > 0) minimalUpdate.name = name.trim();
+      if (photoURL) {
+        minimalUpdate.photo_url = photoURL;
+        minimalUpdate.avatar_url = photoURL;
+      }
+      if (!isAdmin) {
+        if (courseYearLevel !== undefined) minimalUpdate.course_year_level = courseYearLevel;
+        if (studentNumber !== undefined) minimalUpdate.student_number = studentNumber;
+        if (educationLevel !== undefined) minimalUpdate.education_level = educationLevel;
+      }
+      const minimalSelect = "email, name, role, avatar_url, photo_url, course_year_level, student_number, education_level";
+      const minimal = await supabase
+        .from("users")
+        .update(minimalUpdate)
+        .eq("email", tokenUser.email)
+        .select(minimalSelect)
+        .maybeSingle();
+      data = minimal.data;
+      error = minimal.error;
+    }
+
+    if (error && isColumnError(error)) {
+      const coreUpdate = {
+        updated_at: new Date().toISOString(),
+      };
+      if (name && typeof name === "string" && name.trim().length > 0) coreUpdate.name = name.trim();
+      if (photoURL) {
+        coreUpdate.photo_url = photoURL;
+        coreUpdate.avatar_url = photoURL;
+      }
+      const coreSelect = "email, name, role, avatar_url, photo_url";
+      const core = await supabase
+        .from("users")
+        .update(coreUpdate)
+        .eq("email", tokenUser.email)
+        .select(coreSelect)
+        .maybeSingle();
+      data = core.data;
+      error = core.error;
+    }
+
+    if (!data && !error) {
       const result = await supabase
         .from("users")
         .update(updateData)
         .eq("email", tokenUser.email)
         .select(selectCore)
-        .single();
+        .maybeSingle();
       data = result.data;
       error = result.error;
     }
@@ -576,8 +634,12 @@ router.put("/profile", verifyToken, async (req, res) => {
 
     return res.json(profile);
   } catch (err) {
-    console.error("Profile update endpoint error:", err);
-    return res.status(500).json({ message: "Internal server error" });
+    console.error("Profile PUT endpoint error:", err?.message || err);
+    if (err?.stack) console.error(err.stack);
+    return res.status(500).json({
+      message: "Internal server error",
+      ...(process.env.NODE_ENV === "development" && { details: err?.message }),
+    });
   }
 });
 

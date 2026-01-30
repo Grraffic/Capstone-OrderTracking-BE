@@ -20,6 +20,15 @@ class NotificationService {
     try {
       console.log(`🔍 Finding students with pre-orders for: ${itemName} (${educationLevel}${size ? `, Size: ${size}` : ''})`);
 
+      // Normalize size for alias lookup: strip parentheses, lowercase, collapse spaces/dashes
+      // so "X Small" -> "xsmall", "XSmall (XS)" -> "xsmall", "XS" -> "xs"
+      const normalizeForAlias = (str) =>
+        (str || "")
+          .replace(/\([^)]*\)/g, "")
+          .trim()
+          .toLowerCase()
+          .replace(/[\s-]+/g, "");
+
       // Query orders table for pre-orders with matching items
       const { data: preOrders, error } = await supabase
         .from("orders")
@@ -44,30 +53,30 @@ class NotificationService {
           // Enhanced size matching logic
           let sizeMatch = true;
           if (size) {
-            // Normalize sizes for comparison
             const orderItemSize = (item.size || "").toLowerCase().trim();
             const restockSize = (size || "").toLowerCase().trim();
-            
-            // Common size aliases map
+            const orderNorm = normalizeForAlias(item.size);
+            const restockNorm = normalizeForAlias(size);
+
+            // Common size aliases (normalized: no spaces/dashes)
             const aliases = {
-              'xs': ['xsmall', 'extra small', 'xs'],
-              's': ['small', 's'],
-              'm': ['medium', 'm'],
-              'l': ['large', 'l'],
-              'xl': ['xlarge', 'extra large', 'xl'],
-              'xxl': ['2xlarge', '2xl', 'xxl', 'double extra large'],
-              '3xl': ['3xlarge', '3xl', 'triple extra large']
+              xs: ["xsmall", "extrasmall", "xs"],
+              s: ["small", "s"],
+              m: ["medium", "m"],
+              l: ["large", "l"],
+              xl: ["xlarge", "extralarge", "xl"],
+              xxl: ["2xlarge", "2xl", "xxl", "doubleextralarge"],
+              "3xl": ["3xlarge", "3xl", "tripleextralarge"],
             };
 
-            // Check direct match
-            const directMatch = orderItemSize === restockSize;
+            const directMatch = orderItemSize === restockSize || orderNorm === restockNorm;
 
-            // Check alias match
             let aliasMatch = false;
-            for (const [key, values] of Object.entries(aliases)) {
-              // Ensure strict matching within aliases
-              // Check if BOTH the order size and restock size belong to the SAME alias group
-              if (values.includes(orderItemSize) && values.includes(restockSize)) {
+            for (const [, values] of Object.entries(aliases)) {
+              const normValues = values.map((v) => (v || "").replace(/[\s-]+/g, ""));
+              const orderInGroup = values.includes(orderItemSize) || normValues.includes(orderNorm);
+              const restockInGroup = values.includes(restockSize) || normValues.includes(restockNorm);
+              if (orderInGroup && restockInGroup) {
                 aliasMatch = true;
                 break;
               }
@@ -75,7 +84,7 @@ class NotificationService {
 
             sizeMatch = directMatch || aliasMatch;
           }
-          
+
           return nameMatch && levelMatch && sizeMatch;
         });
       });
@@ -88,27 +97,30 @@ class NotificationService {
         const matchedItem = order.items.find((item) => {
           const nameMatch = item.name === itemName;
           const levelMatch = item.education_level === educationLevel;
-          // Enhanced size matching logic
           let sizeMatch = true;
           if (size) {
             const orderItemSize = (item.size || "").toLowerCase().trim();
             const restockSize = (size || "").toLowerCase().trim();
-            
+            const orderNorm = normalizeForAlias(item.size);
+            const restockNorm = normalizeForAlias(size);
+
             const aliases = {
-              'xs': ['xsmall', 'extra small', 'xs'],
-              's': ['small', 's'],
-              'm': ['medium', 'm'],
-              'l': ['large', 'l'],
-              'xl': ['xlarge', 'extra large', 'xl'],
-              'xxl': ['2xlarge', '2xl', 'xxl', 'double extra large'],
-              '3xl': ['3xlarge', '3xl', 'triple extra large']
+              xs: ["xsmall", "extrasmall", "xs"],
+              s: ["small", "s"],
+              m: ["medium", "m"],
+              l: ["large", "l"],
+              xl: ["xlarge", "extralarge", "xl"],
+              xxl: ["2xlarge", "2xl", "xxl", "doubleextralarge"],
+              "3xl": ["3xlarge", "3xl", "tripleextralarge"],
             };
 
-            const directMatch = orderItemSize === restockSize;
-
+            const directMatch = orderItemSize === restockSize || orderNorm === restockNorm;
             let aliasMatch = false;
-            for (const [key, values] of Object.entries(aliases)) {
-              if (values.includes(orderItemSize) && values.includes(restockSize)) {
+            for (const [, values] of Object.entries(aliases)) {
+              const normValues = values.map((v) => (v || "").replace(/[\s-]+/g, ""));
+              const orderInGroup = values.includes(orderItemSize) || normValues.includes(orderNorm);
+              const restockInGroup = values.includes(restockSize) || normValues.includes(restockNorm);
+              if (orderInGroup && restockInGroup) {
                 aliasMatch = true;
                 break;
               }
