@@ -170,13 +170,20 @@ class ItemsService {
           .select("item_id")
           .eq("education_level", eligibilityLevel);
         
+        // Also get items with "All Education Levels" (e.g. Logo Patch, ID Lace) so every student can order
+        const { data: allEducationLevelsItems } = await supabase
+          .from("item_eligibility")
+          .select("item_id")
+          .eq("education_level", "All Education Levels");
+        const allEducationLevelsIds = (allEducationLevelsItems || []).map((e) => e.item_id);
+        
         if (eligibilityError) {
           // If table doesn't exist, log warning and show all items (backward compatibility)
           console.warn("Eligibility filtering error (table may not exist):", eligibilityError.message);
-        } else if (eligibleItems && eligibleItems.length > 0) {
-          // Filter to only show eligible items
-          let eligibleItemIds = eligibleItems.map(e => e.item_id);
-          // Include items applicable to ALL education levels (e.g. Logo Patch, New Logo Patch)
+        } else if ((eligibleItems && eligibleItems.length > 0) || allEducationLevelsIds.length > 0) {
+          // Filter to only show eligible items (user's level + All Education Levels)
+          let eligibleItemIds = [...(eligibleItems || []).map((e) => e.item_id), ...allEducationLevelsIds];
+          // Include items applicable to ALL education levels by name (e.g. Logo Patch, New Logo Patch)
           const { data: allLevelItems } = await supabase
             .from("items")
             .select("id")
@@ -212,7 +219,12 @@ class ItemsService {
               if (itemsWithoutEligibility.length > 0) {
                 query = query.in("id", itemsWithoutEligibility);
               } else {
-                // All items have eligibility records but none match - still show all-level items (e.g. Logo Patch)
+                // All items have eligibility but none match - show items with "All Education Levels" or name pattern
+                const { data: allEduLevelRows } = await supabase
+                  .from("item_eligibility")
+                  .select("item_id")
+                  .eq("education_level", "All Education Levels");
+                const allEduLevelIds = (allEduLevelRows || []).map((e) => e.item_id);
                 const { data: allLevelItems } = await supabase
                   .from("items")
                   .select("id")
@@ -220,7 +232,7 @@ class ItemsService {
                   .eq("is_approved", true)
                   .or("is_archived.eq.false,is_archived.is.null")
                   .ilike("name", ALL_LEVEL_ITEM_NAME_PATTERN);
-                const allLevelIds = (allLevelItems || []).map((i) => i.id);
+                const allLevelIds = [...new Set([...allEduLevelIds, ...(allLevelItems || []).map((i) => i.id)])];
                 if (allLevelIds.length > 0) {
                   query = query.in("id", allLevelIds);
                 } else {
@@ -307,8 +319,14 @@ class ItemsService {
             .select("item_id")
             .eq("education_level", eligibilityLevel);
           
-          if (!eligibilityError && eligibleItems && eligibleItems.length > 0) {
-            let eligibleItemIds = eligibleItems.map(e => e.item_id);
+          const { data: allEducationLevelsItems } = await supabase
+            .from("item_eligibility")
+            .select("item_id")
+            .eq("education_level", "All Education Levels");
+          const allEducationLevelsIds = (allEducationLevelsItems || []).map((e) => e.item_id);
+          
+          if (!eligibilityError && ((eligibleItems && eligibleItems.length > 0) || allEducationLevelsIds.length > 0)) {
+            let eligibleItemIds = [...(eligibleItems || []).map((e) => e.item_id), ...allEducationLevelsIds];
           const { data: allLevelItems } = await supabase
             .from("items")
             .select("id")

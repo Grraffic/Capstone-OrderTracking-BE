@@ -551,11 +551,11 @@ class OrderService {
 
       if (!isPreOrder) {
         // Only reduce inventory for regular orders
-        // Single query: fetch all items for this education level, then build lookup by name
+        // Fetch items that match student's education level OR "All Education Levels" (e.g. Logo Patch, ID Lace)
         const { data: allItems, error: itemsError } = await supabase
           .from("items")
           .select("*")
-          .eq("education_level", orderData.education_level)
+          .or(`education_level.eq."${orderData.education_level}",education_level.eq."All Education Levels"`)
           .eq("is_active", true);
 
         if (itemsError) throw itemsError;
@@ -790,10 +790,11 @@ class OrderService {
     const items = order.items || [];
     if (items.length === 0) return;
 
+    // Include items for student's level OR "All Education Levels" (e.g. Logo Patch)
     const { data: allItems, error: itemsError } = await supabase
       .from("items")
       .select("*")
-      .eq("education_level", order.education_level)
+      .or(`education_level.eq."${order.education_level}",education_level.eq."All Education Levels"`)
       .eq("is_active", true);
 
     if (itemsError) {
@@ -1403,13 +1404,12 @@ class OrderService {
       const inventoryUpdates = [];
       for (const item of items) {
         try {
-          // Find inventory item by name, education level, and size if specified
-          // Find inventory item by name and education level
+          // Find inventory item by name; allow student's level OR "All Education Levels" (e.g. Logo Patch)
           const { data: inventoryItems, error: searchError } = await supabase
             .from("items")
             .select("*")
             .ilike("name", item.name)
-            .eq("education_level", order.education_level)
+            .or(`education_level.eq."${order.education_level}",education_level.eq."All Education Levels"`)
             .eq("is_active", true)
             .limit(1);
 
@@ -1467,12 +1467,12 @@ class OrderService {
              // We relax the size match here because we pulled by name/edu level. 
              // If the row relies on 'size' column for differentiation:
              if (inventoryItem.size !== 'N/A' && inventoryItem.size !== item.size && item.size !== 'N/A') {
-                 // Try to find exact match row if we picked pending one
+                 // Try to find exact match row; allow student's level OR "All Education Levels"
                  const { data: exactMatch } = await supabase
                     .from('items')
                     .select('*')
                     .ilike('name', item.name)
-                    .eq('education_level', order.education_level)
+                    .or(`education_level.eq."${order.education_level}",education_level.eq."All Education Levels"`)
                     .eq('size', item.size)
                     .eq('is_active', true)
                     .single();

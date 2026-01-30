@@ -8,9 +8,28 @@
 
 const DEFAULT_MAX = 1;
 
+/** Canonical education level keys in SEGMENT_RULES (case-sensitive) */
+const CANONICAL_EDUCATION_LEVELS = {
+  kindergarten: "Kindergarten",
+  elementary: "Elementary",
+  "junior high school": "Junior High School",
+  "senior high school": "Senior High School",
+  college: "College",
+  vocational: "Vocational",
+  preschool: "Kindergarten",
+  prekindergarten: "Kindergarten",
+};
+
+function normalizeEducationLevel(level) {
+  if (!level || typeof level !== "string") return level || "";
+  const trimmed = level.trim();
+  const lower = trimmed.toLowerCase();
+  return CANONICAL_EDUCATION_LEVELS[lower] || trimmed;
+}
+
 /** Segment key: educationLevel_studentType_gender */
 function segmentKey(educationLevel, studentType, gender) {
-  const level = (educationLevel || "").trim();
+  const level = normalizeEducationLevel(educationLevel || "");
   const type = (studentType || "new").toLowerCase();
   const g = (gender || "").trim();
   return `${level}_${type}_${g}`;
@@ -266,7 +285,7 @@ SEGMENT_RULES.Vocational_old_Male = SEGMENT_RULES.College_old_Male;
  * @returns {number} Max quantity (default DEFAULT_MAX if no rule)
  */
 function getMaxQuantityForItem(itemName, educationLevel, studentType, gender) {
-  const level = (educationLevel || "").trim();
+  const level = normalizeEducationLevel(educationLevel || "");
   const effectiveLevel = level === "Vocational" ? "College" : level;
   const key = segmentKey(effectiveLevel, studentType, gender);
   const rules = SEGMENT_RULES[key];
@@ -299,7 +318,7 @@ function getMaxQuantityForItem(itemName, educationLevel, studentType, gender) {
  * Used by GET /auth/max-quantities to return { maxQuantities: { "kinder dress": 1, ... } }.
  */
 function getMaxQuantitiesForStudent(educationLevel, studentType, gender) {
-  const level = (educationLevel || "").trim();
+  const level = normalizeEducationLevel(educationLevel || "");
   const type = (studentType || "new").toLowerCase();
   const g = (gender || "").trim();
   const effectiveLevel = level === "Vocational" ? "College" : level;

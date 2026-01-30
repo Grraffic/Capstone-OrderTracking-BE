@@ -92,6 +92,17 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
         : baseTotalItemLimit;
 
     if (!gender && educationLevel) {
+      // Still compute maxQuantities by merging both genders (so e.g. Logo Patch max 3 works)
+      const female = getMaxQuantitiesForStudent(educationLevel, studentType, "Female");
+      const male = getMaxQuantitiesForStudent(educationLevel, studentType, "Male");
+      const maxQuantitiesNoGender = {};
+      const allKeys = new Set([...Object.keys(female), ...Object.keys(male)]);
+      for (const key of allKeys) {
+        maxQuantitiesNoGender[key] = Math.max(
+          Number(female[key]) || 0,
+          Number(male[key]) || 0
+        );
+      }
       // Still compute alreadyOrdered so the UI can disable items the user has already ordered
       const email = (tokenUser.email || "").trim();
       const orParts = [];
@@ -124,7 +135,7 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
       }
       const slotsUsedFromPlacedOrders = Object.keys(alreadyOrdered).length;
       return res.status(200).json({
-        maxQuantities: {},
+        maxQuantities: maxQuantitiesNoGender,
         alreadyOrdered,
         profileIncomplete: true,
         message: "Complete your profile (gender) to see order limits.",
