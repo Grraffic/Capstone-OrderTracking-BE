@@ -74,8 +74,9 @@ class InventoryService {
       if (!item) throw new Error("Item not found");
 
       if (!item.beginning_inventory_date) {
-        // No beginning inventory date set, initialize it
+        // No beginning inventory date set, initialize it (FIFO: beginning unit price = current price)
         const endingInventory = await this.calculateEndingInventory(itemId);
+        const beginningUnitPrice = Number(item.beginning_inventory_unit_price) ?? Number(item.price) ?? 0;
         const { data, error } = await supabase
           .from("items")
           .update({
@@ -83,6 +84,7 @@ class InventoryService {
             purchases: 0,
             beginning_inventory_date: new Date().toISOString(),
             fiscal_year_start: new Date().toISOString().split("T")[0],
+            beginning_inventory_unit_price: beginningUnitPrice,
           })
           .eq("id", itemId)
           .select()
@@ -99,8 +101,9 @@ class InventoryService {
       );
 
       if (daysSinceStart > 365) {
-        // Reset beginning inventory
+        // Reset beginning inventory (FIFO: new beginning uses current price as its unit price)
         const endingInventory = await this.calculateEndingInventory(itemId);
+        const purchaseUnitPrice = Number(item.price) ?? 0;
         const { data, error } = await supabase
           .from("items")
           .update({
@@ -108,6 +111,7 @@ class InventoryService {
             purchases: 0,
             beginning_inventory_date: new Date().toISOString(),
             fiscal_year_start: new Date().toISOString().split("T")[0],
+            beginning_inventory_unit_price: purchaseUnitPrice,
           })
           .eq("id", itemId)
           .select()
@@ -205,7 +209,9 @@ class InventoryService {
           sizeVariations.forEach((variant) => {
             const variantSize = variant.size || "N/A";
             const variantStock = Number(variant.stock) || 0;
-            const variantPrice = Number(variant.price) || item.price || 0;
+            const variantPurchasePrice = Number(variant.price) || item.price || 0;
+            // FIFO: first units use beginning-inventory unit price; next units use purchase (variant) price
+            const variantBeginningUnitPrice = Number(variant.beginning_inventory_unit_price) ?? variantPurchasePrice;
 
             // Read beginning_inventory from variant JSON field if available (needed before deriving purchases)
             let variantBeginningInventory;
@@ -268,6 +274,11 @@ class InventoryService {
             else if (variantStock < 20) variantStatus = "Critical";
             else if (variantStock < 50) variantStatus = "At Reorder Point";
 
+            // FIFO total: (beginning_inventory * beginning unit price) + (purchases * purchase unit price)
+            const totalAmount =
+              variantBeginningInventory * variantBeginningUnitPrice +
+              variantPurchases * variantPurchasePrice;
+
             reportData.push({
               id: `${item.id}-${variantSize}-${item.created_at || Date.now()}`, // Ensure uniqueness even for duplicates
               item_id: item.id, // Keep original item ID
@@ -284,10 +295,9 @@ class InventoryService {
               unreleased,
               available,
               ending_inventory: endingInventory,
-              unit_price: variantPrice,
-              total_amount:
-                variantBeginningInventory * variantPrice +
-                variantPurchases * variantPrice,
+              unit_price: variantPurchasePrice,
+              unit_price_beginning: variantBeginningUnitPrice,
+              total_amount: totalAmount,
               status: variantStatus,
               reorder_point: variantReorderPoint,
               beginning_inventory_date: item.beginning_inventory_date,
@@ -350,6 +360,11 @@ class InventoryService {
               else if (sizeStock < 20) sizeStatus = "Critical";
               else if (sizeStock < 50) sizeStatus = "At Reorder Point";
 
+              // FIFO: beginning uses beginning_inventory_unit_price, purchases use price
+              const begUnitPrice = Number(item.beginning_inventory_unit_price) ?? Number(item.price) ?? 0;
+              const purchUnitPrice = Number(item.price) ?? 0;
+              const totalAmount = sizeBeginningInventory * begUnitPrice + sizePurchases * purchUnitPrice;
+
               reportData.push({
                 id: `${item.id}-${size}-${item.created_at || Date.now()}`, // Ensure uniqueness even for duplicates
                 item_id: item.id, // Keep original item ID
@@ -366,10 +381,9 @@ class InventoryService {
                 unreleased,
                 available,
                 ending_inventory: endingInventory,
-                unit_price: item.price,
-                total_amount:
-                  sizeBeginningInventory * item.price +
-                  sizePurchases * item.price,
+                unit_price: purchUnitPrice,
+                unit_price_beginning: begUnitPrice,
+                total_amount: totalAmount,
                 status: sizeStatus,
                 reorder_point: item.reorder_point || 0, // Include reorder_point from item
                 beginning_inventory_date: item.beginning_inventory_date,
@@ -403,6 +417,13 @@ class InventoryService {
               );
             }
 
+            // FIFO: first units = beginning_inventory * beginning_inventory_unit_price; next = purchases * price
+            const begUnitPrice = Number(item.beginning_inventory_unit_price) ?? Number(item.price) ?? 0;
+            const purchUnitPrice = Number(item.price) ?? 0;
+            const totalAmount =
+              (item.beginning_inventory || 0) * begUnitPrice +
+              (item.purchases || 0) * purchUnitPrice;
+
             reportData.push({
               id: `${item.id}-${item.created_at || Date.now()}`, // Ensure uniqueness even for duplicates
               item_id: item.id, // Keep original item ID
@@ -419,10 +440,9 @@ class InventoryService {
               unreleased,
               available,
               ending_inventory: endingInventory,
-              unit_price: item.price,
-              total_amount:
-                (item.beginning_inventory || 0) * item.price +
-                (item.purchases || 0) * item.price,
+              unit_price: purchUnitPrice,
+              unit_price_beginning: begUnitPrice,
+              total_amount: totalAmount,
               status: item.status,
               reorder_point: item.reorder_point || 0, // Include reorder_point from item
               beginning_inventory_date: item.beginning_inventory_date,

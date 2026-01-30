@@ -332,7 +332,7 @@ class OrderService {
       const studentEmail = (orderData.student_email || "").trim();
       if (studentId || studentEmail) {
         const userFields =
-          "max_items_per_order, order_lockout_period, order_lockout_unit, education_level, student_type, gender";
+          "max_items_per_order, max_items_per_order_set_at, order_lockout_period, order_lockout_unit, education_level, student_type, gender";
         const userQuery = studentId
           ? supabase.from("users").select(userFields).eq("id", studentId).maybeSingle()
           : supabase.from("users").select("id, " + userFields).eq("email", studentEmail).maybeSingle();
@@ -1004,45 +1004,63 @@ class OrderService {
     }
   }
 
+  /** Number of unclaimed (auto-voided) strikes before blocking the student. */
+  static UNCLAIMED_VOID_STRIKES_BEFORE_BLOCK = 3;
+
   /**
-   * Set student's max_items_per_order to 0 when their order is auto-voided (unclaimed).
+   * Increment student's unclaimed void count (strike). After 3 strikes, set max_items_per_order to 0 (block).
    * Only called from void-unclaimed code paths. Does not run on manual/admin cancel.
    * @param {Object} order - Order with student_id and/or student_email
    * @returns {Promise<void>}
    */
-  async setStudentMaxItemsToZeroForVoid(order) {
+  async incrementVoidStrikeAndBlockIfNeeded(order) {
     const studentId = order?.student_id || null;
     const studentEmail = (order?.student_email || "").trim();
     if (!studentId && !studentEmail) return;
+    const strikesBeforeBlock = OrderService.UNCLAIMED_VOID_STRIKES_BEFORE_BLOCK;
     try {
-      if (studentId) {
-        const { error } = await supabase
+      let userId = studentId;
+      if (!userId && studentEmail) {
+        const { data: user, error: findErr } = await supabase
           .from("users")
-          .update({ max_items_per_order: 0, updated_at: new Date().toISOString() })
-          .eq("id", studentId);
-        if (error) {
-          console.error("setStudentMaxItemsToZeroForVoid: update by student_id failed", error);
+          .select("id")
+          .eq("email", studentEmail)
+          .maybeSingle();
+        if (findErr || !user) {
+          if (findErr) console.error("incrementVoidStrikeAndBlockIfNeeded: lookup by email failed", findErr);
+          return;
         }
+        userId = user.id;
+      }
+      if (!userId) return;
+
+      const { data: row, error: fetchErr } = await supabase
+        .from("users")
+        .select("unclaimed_void_count")
+        .eq("id", userId)
+        .single();
+      if (fetchErr) {
+        console.error("incrementVoidStrikeAndBlockIfNeeded: fetch unclaimed_void_count failed", fetchErr);
         return;
       }
-      const { data: user, error: findErr } = await supabase
-        .from("users")
-        .select("id")
-        .eq("email", studentEmail)
-        .maybeSingle();
-      if (findErr || !user) {
-        if (findErr) console.error("setStudentMaxItemsToZeroForVoid: lookup by email failed", findErr);
-        return;
+      const current = Number(row?.unclaimed_void_count) || 0;
+      const newCount = current + 1;
+      const updatePayload = {
+        unclaimed_void_count: newCount,
+        updated_at: new Date().toISOString(),
+      };
+      if (newCount >= strikesBeforeBlock) {
+        updatePayload.max_items_per_order = 0;
       }
       const { error } = await supabase
         .from("users")
-        .update({ max_items_per_order: 0, updated_at: new Date().toISOString() })
-        .eq("id", user.id);
+        .update(updatePayload)
+        .eq("id", userId);
       if (error) {
-        console.error("setStudentMaxItemsToZeroForVoid: update by email failed", error);
+        console.error("incrementVoidStrikeAndBlockIfNeeded: update failed", error);
       }
     } catch (err) {
-      console.error("setStudentMaxItemsToZeroForVoid:", err);
+      console.error("incrementVoidStrikeAndBlockIfNeeded:", err);
     }
   }
 
@@ -1076,7 +1094,7 @@ class OrderService {
     for (const order of orders || []) {
       try {
         await this.updateOrderStatus(order.id, "cancelled", note);
-        await this.setStudentMaxItemsToZeroForVoid(order);
+        await this.incrementVoidStrikeAndBlockIfNeeded(order);
         if (!isProduction) {
           console.log(`Auto-voided order ${order.order_number || order.id} (older than ${days} days)`);
         }
@@ -1122,7 +1140,7 @@ class OrderService {
     for (const order of orders || []) {
       try {
         await this.updateOrderStatus(order.id, "cancelled", note);
-        await this.setStudentMaxItemsToZeroForVoid(order);
+        await this.incrementVoidStrikeAndBlockIfNeeded(order);
         if (!isProduction) {
           console.log(`Auto-voided order ${order.order_number || order.id} (older than ${minutes} minute(s))`);
         }
@@ -1165,7 +1183,7 @@ class OrderService {
     for (const order of orders || []) {
       try {
         await this.updateOrderStatus(order.id, "cancelled", note);
-        await this.setStudentMaxItemsToZeroForVoid(order);
+        await this.incrementVoidStrikeAndBlockIfNeeded(order);
         if (!isProduction) {
           console.log(`Auto-voided order ${order.order_number || order.id} (older than ${seconds} second(s))`);
         }

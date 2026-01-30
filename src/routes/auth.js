@@ -30,7 +30,7 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
     let error = null;
     let result = await supabase
       .from("users")
-      .select("id, role, education_level, gender, student_type, max_items_per_order")
+      .select("id, role, education_level, gender, student_type, max_items_per_order, max_items_per_order_set_at")
       .eq("email", tokenUser.email)
       .maybeSingle();
     data = result.data;
@@ -39,7 +39,7 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
     if (error && (String(error.message || "").toLowerCase().includes("does not exist") || String(error.message || "").toLowerCase().includes("column"))) {
       result = await supabase
         .from("users")
-        .select("id, role, education_level, max_items_per_order")
+        .select("id, role, education_level, max_items_per_order, max_items_per_order_set_at")
         .eq("email", tokenUser.email)
         .maybeSingle();
       data = result.data;
@@ -186,8 +186,10 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
 
     const slotsUsedFromPlacedOrders = Object.keys(alreadyOrdered || {}).length;
 
-    // Voided = max_items_per_order set to 0 by auto-void (unclaimed); cleared when admin re-enters max
-    const blockedDueToVoid = data.max_items_per_order === 0;
+    // Voided = max_items_per_order set to 0 by auto-void (unclaimed). Only block if they also have placed orders
+    // (so we don't block a student who has no orders/claimed items—voided orders are cancelled and don't show there).
+    const blockedDueToVoid =
+      data.max_items_per_order === 0 && slotsUsedFromPlacedOrders > 0;
 
     return res.json({
       maxQuantities,

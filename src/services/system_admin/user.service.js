@@ -434,6 +434,11 @@ async function updateUser(userId, updates, updatedByUserId = null) {
       ...updates,
       updated_at: new Date().toISOString(),
     };
+    // When admin sets/updates max_items_per_order, reset "used" and void strikes so student gets fresh slate
+    if (updates.max_items_per_order !== undefined) {
+      updateData.max_items_per_order_set_at = new Date().toISOString();
+      updateData.unclaimed_void_count = 0;
+    }
 
     const { data, error } = await supabase
       .from("users")
@@ -575,6 +580,10 @@ async function bulkUpdateUsers(userIds, updateData) {
       ...updateData,
       updated_at: new Date().toISOString(),
     };
+    if (updateData.max_items_per_order !== undefined) {
+      updateObject.max_items_per_order_set_at = new Date().toISOString();
+      updateObject.unclaimed_void_count = 0;
+    }
 
     // Update all users in the array
     const { data, error } = await supabase

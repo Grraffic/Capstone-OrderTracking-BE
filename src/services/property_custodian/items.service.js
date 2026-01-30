@@ -182,6 +182,7 @@ class ItemsService {
             .select("id")
             .eq("is_active", true)
             .eq("is_approved", true)
+            .or("is_archived.eq.false,is_archived.is.null")
             .ilike("name", ALL_LEVEL_ITEM_NAME_PATTERN);
           const allLevelIds = (allLevelItems || []).map((i) => i.id);
           eligibleItemIds = [...new Set([...eligibleItemIds, ...allLevelIds])];
@@ -196,11 +197,12 @@ class ItemsService {
           if (!allEligibilityError && allEligibilityRecords) {
             const itemsWithEligibilityIds = new Set(allEligibilityRecords.map(e => e.item_id));
             
-            // Get all active item IDs
+            // Get all active, non-archived item IDs
             const { data: allItems, error: allItemsError } = await supabase
               .from("items")
               .select("id")
-              .eq("is_active", true);
+              .eq("is_active", true)
+              .or("is_archived.eq.false,is_archived.is.null");
             
             if (!allItemsError && allItems) {
               const allItemIds = allItems.map(i => i.id);
@@ -216,6 +218,7 @@ class ItemsService {
                   .select("id")
                   .eq("is_active", true)
                   .eq("is_approved", true)
+                  .or("is_archived.eq.false,is_archived.is.null")
                   .ilike("name", ALL_LEVEL_ITEM_NAME_PATTERN);
                 const allLevelIds = (allLevelItems || []).map((i) => i.id);
                 if (allLevelIds.length > 0) {
@@ -282,7 +285,8 @@ class ItemsService {
         let fallbackQuery = supabase
           .from("items")
           .select("*", { count: "exact" })
-          .eq("is_active", true);
+          .eq("is_active", true)
+          .or("is_archived.eq.false,is_archived.is.null");
         
         // Reapply all filters except approval
         if (filters.userEducationLevel) {
@@ -305,11 +309,12 @@ class ItemsService {
           
           if (!eligibilityError && eligibleItems && eligibleItems.length > 0) {
             let eligibleItemIds = eligibleItems.map(e => e.item_id);
-            const { data: allLevelItems } = await supabase
-              .from("items")
-              .select("id")
-              .eq("is_active", true)
-              .ilike("name", ALL_LEVEL_ITEM_NAME_PATTERN);
+          const { data: allLevelItems } = await supabase
+            .from("items")
+            .select("id")
+            .eq("is_active", true)
+            .or("is_archived.eq.false,is_archived.is.null")
+            .ilike("name", ALL_LEVEL_ITEM_NAME_PATTERN);
             const allLevelIds = (allLevelItems || []).map((i) => i.id);
             eligibleItemIds = [...new Set([...eligibleItemIds, ...allLevelIds])];
             fallbackQuery = fallbackQuery.in("id", eligibleItemIds);
@@ -831,14 +836,34 @@ class ItemsService {
 
       // Only for truly NEW item+size combinations: Set beginning inventory
       // Beginning inventory is set ONLY on first creation and never changes
+      // FIFO: unit price of beginning inventory = price at creation; purchases use price when added later
       // New items are NOT approved by default - require system admin approval
+      const beginningUnitPrice = itemData.beginning_inventory_unit_price != null
+        ? Number(itemData.beginning_inventory_unit_price)
+        : (Number(itemData.price) || 0);
       const itemToInsert = {
         ...itemData,
         beginning_inventory: itemData.stock || 0,
         purchases: 0, // New items start with 0 purchases
         beginning_inventory_date: new Date().toISOString(),
         fiscal_year_start: new Date().toISOString().split("T")[0], // Current date
+        beginning_inventory_unit_price: beginningUnitPrice,
       };
+
+      // FIFO: when creating with sizeVariations, set each variant's beginning_inventory_unit_price from variant.price
+      if (itemToInsert.note && typeof itemToInsert.note === "string") {
+        try {
+          const parsedNote = JSON.parse(itemToInsert.note);
+          if (parsedNote?._type === "sizeVariations" && Array.isArray(parsedNote.sizeVariations)) {
+            for (const v of parsedNote.sizeVariations) {
+              if (v.beginning_inventory_unit_price == null && (v.price != null || v.stock > 0)) {
+                v.beginning_inventory_unit_price = Number(v.price) ?? beginningUnitPrice;
+              }
+            }
+            itemToInsert.note = JSON.stringify(parsedNote);
+          }
+        } catch (_) { /* not JSON, leave note as is */ }
+      }
 
       // Only include for_gender if column exists (check first)
       // Default to Unisex if not provided, but don't include if column doesn't exist
@@ -872,15 +897,16 @@ class ItemsService {
         error.message?.includes("approved_by") ||
         error.message?.includes("is_approved") ||
         error.message?.includes("for_gender") ||
+        error.message?.includes("beginning_inventory_unit_price") ||
         error.message?.includes("Could not find") ||
         error.code === '42703' || // PostgreSQL undefined_column
         error.code === 'PGRST204' // PostgREST column not found
       )) {
         console.log("[createItem] Some columns don't exist, retrying without optional fields");
-        // Retry without approval fields and for_gender
+        const { beginning_inventory_unit_price: _biup, ...itemWithoutBiup } = itemToInsert;
         const result2 = await supabase
           .from("items")
-          .insert([itemToInsert])
+          .insert([itemWithoutBiup])
           .select()
           .single();
         
@@ -1494,6 +1520,7 @@ class ItemsService {
         .ilike("name", name) // Case-insensitive match
         .ilike("education_level", educationLevel) // Case-insensitive match
         .eq("is_active", true)
+        .or("is_archived.eq.false,is_archived.is.null")
         .order("size", { ascending: true });
       
       console.log(`🔍 getAvailableSizes: Found ${data?.length || 0} items for "${name}" (${educationLevel})`);
