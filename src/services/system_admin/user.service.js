@@ -91,16 +91,39 @@ async function getUsers({
     if (rows.length > 0 && !listStaff) {
       const studentIds = rows.map((u) => u.id).filter(Boolean);
       const placedStatuses = ["pending", "paid", "claimed", "processing", "ready", "payment_pending", "completed"];
+      
+      // Create a map of student_id -> total_item_limit_set_at for filtering
+      const limitSetAtByStudentId = {};
+      for (const u of rows) {
+        if (u.total_item_limit_set_at) {
+          limitSetAtByStudentId[u.id] = u.total_item_limit_set_at;
+        }
+      }
+      
       const { data: placedOrders } = await supabase
         .from("orders")
-        .select("student_id, items")
+        .select("student_id, items, created_at")
         .eq("is_active", true)
         .in("status", placedStatuses)
         .in("student_id", studentIds);
+      
       const slotsByStudentId = {};
       for (const row of placedOrders || []) {
         const sid = row.student_id;
         if (!sid) continue;
+        
+        // Only count orders created AFTER total_item_limit_set_at (if it exists)
+        // This gives students a fresh slate when admin updates their limit
+        const limitSetAt = limitSetAtByStudentId[sid];
+        if (limitSetAt && row.created_at) {
+          const orderDate = new Date(row.created_at);
+          const limitDate = new Date(limitSetAt);
+          if (orderDate < limitDate) {
+            // Skip this order - it was created before the limit was set
+            continue;
+          }
+        }
+        
         if (!slotsByStudentId[sid]) slotsByStudentId[sid] = new Set();
         const items = Array.isArray(row.items) ? row.items : [];
         for (const it of items) {
@@ -352,34 +375,96 @@ async function createUser(userData, createdByUserId = null) {
  */
 async function updateUser(userId, updates, updatedByUserId = null) {
   try {
-    // Get current user data to check if role is changing
-    const { data: currentUser, error: fetchError } = await supabase
-      .from("users")
-      .select("email, role, is_active")
-      .eq("id", userId)
-      .single();
+    // Determine which table the user is in (students, staff, or users for backward compatibility)
+    let currentUser = null;
+    let userTable = null;
+    let userRole = null;
+    let actualUserId = userId; // Use this for the actual database update (might be different from input userId)
 
-    if (fetchError) {
-      throw fetchError;
+    // Check students table first - try both id and user_id fields
+    let studentRow = null;
+    const { data: studentById } = await supabase
+      .from("students")
+      .select("id, user_id, email")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (studentById) {
+      studentRow = studentById;
+    } else {
+      // Try user_id field as well (in case frontend is passing user_id instead of id)
+      const { data: studentByUserId } = await supabase
+        .from("students")
+        .select("id, user_id, email")
+        .eq("user_id", userId)
+        .maybeSingle();
+      
+      if (studentByUserId) {
+        studentRow = studentByUserId;
+      }
+    }
+
+    if (studentRow) {
+      currentUser = { ...studentRow, role: "student", is_active: true };
+      userTable = "students";
+      userRole = "student";
+      // Use the actual id from the table for updates
+      actualUserId = studentRow.id;
+    } else {
+      // Check staff table - try both id and user_id fields
+      let staffRow = null;
+      const { data: staffById } = await supabase
+        .from("staff")
+        .select("id, user_id, email, role, status")
+        .eq("id", userId)
+        .maybeSingle();
+
+      if (staffById) {
+        staffRow = staffById;
+      } else {
+        // Try user_id field as well (in case frontend is passing user_id instead of id)
+        const { data: staffByUserId } = await supabase
+          .from("staff")
+          .select("id, user_id, email, role, status")
+          .eq("user_id", userId)
+          .maybeSingle();
+        
+        if (staffByUserId) {
+          staffRow = staffByUserId;
+        }
+      }
+
+      if (staffRow) {
+        currentUser = { ...staffRow, role: staffRow.role, is_active: staffRow.status === "active" };
+        userTable = "staff";
+        userRole = staffRow.role;
+        // Use the actual id from the table for updates
+        actualUserId = staffRow.id;
+      }
+    }
+
+    // If user not found in students or staff tables, they don't exist
+    if (!currentUser || !userTable) {
+      throw new Error(`User with ID ${userId} not found in students or staff tables`);
     }
 
     // Check if trying to change role from system_admin to something else
     if (
       updates.role &&
-      currentUser.role === "system_admin" &&
+      userRole === "system_admin" &&
       updates.role !== "system_admin"
     ) {
-      // Count how many active system admins exist
-      const { count, error: countError } = await supabase
-        .from("users")
+      // Count how many active system admins exist (only in staff table now)
+      const { count: staffCount, error: countError } = await supabase
+        .from("staff")
         .select("*", { count: "exact", head: true })
         .eq("role", "system_admin")
-        .eq("is_active", true);
+        .eq("status", "active");
 
       if (countError) {
         console.error("Error counting system admins:", countError);
         // Don't block the update if we can't count, but log the error
-      } else if (count === 1) {
+      } else if (staffCount === 1) {
         // This is the last system admin, prevent role change
         throw new Error(
           "Cannot change role: This is the last remaining system admin. At least one system admin must exist."
@@ -387,51 +472,186 @@ async function updateUser(userId, updates, updatedByUserId = null) {
       }
     }
 
+    // Filter out undefined and null values from updates to prevent database issues
+    // But keep empty strings and 0 values as they might be intentional
+    const cleanUpdates = Object.fromEntries(
+      Object.entries(updates).filter(([key, value]) => {
+        // Keep the value if it's not undefined or null
+        // Also keep 0, false, and empty strings as they might be intentional updates
+        return value !== undefined && value !== null;
+      })
+    );
+
+    // Log what we received for debugging
+    console.log(`updateUser called with:`, {
+      userId,
+      updates: JSON.stringify(updates, null, 2),
+      cleanUpdates: JSON.stringify(cleanUpdates, null, 2),
+      userTable,
+    });
+
     const updateData = {
-      ...updates,
+      ...cleanUpdates,
       updated_at: new Date().toISOString(),
     };
+    
+    // Remove fields that don't exist in students/staff tables
+    if (userTable === "students" || userTable === "staff") {
+      // Remove is_active (students/staff don't have this - staff uses status)
+      delete updateData.is_active;
+      // Remove old column name if present
+      delete updateData.max_items_per_order;
+      // Remove role (it's stored differently in students/staff)
+      if (cleanUpdates.role && userTable === "students") {
+        // Students always have role = "student", don't update it
+        delete updateData.role;
+      }
+    }
+    
     // When admin sets/updates total_item_limit, reset "used" and void strikes (support both column names for migration)
-    const limitValue = updates.total_item_limit !== undefined ? updates.total_item_limit : updates.max_items_per_order;
-    if (limitValue !== undefined) {
+    // Only set these fields when limitValue is actually provided (not undefined/null/empty string)
+    const limitValue = cleanUpdates.total_item_limit !== undefined ? cleanUpdates.total_item_limit : cleanUpdates.max_items_per_order;
+    
+    // Check if limitValue is a valid number (not undefined, null, empty string, or NaN)
+    // Must be >= 1 (0 means blocked, but we require explicit setting)
+    const isValidLimit = limitValue !== undefined && 
+                         limitValue !== null && 
+                         limitValue !== '' && 
+                         !isNaN(limitValue) && 
+                         Number(limitValue) >= 1;
+    
+    console.log(`Limit value check:`, {
+      limitValue,
+      isValidLimit,
+      type: typeof limitValue,
+      cleanUpdates_total_item_limit: cleanUpdates.total_item_limit,
+      cleanUpdates_max_items_per_order: cleanUpdates.max_items_per_order,
+    });
+    
+    if (isValidLimit) {
       const ts = new Date().toISOString();
-      updateData.total_item_limit = limitValue;
+      updateData.total_item_limit = Number(limitValue);
       updateData.total_item_limit_set_at = ts;
       updateData.unclaimed_void_count = 0;
+    } else if (cleanUpdates.total_item_limit !== undefined || cleanUpdates.max_items_per_order !== undefined) {
+      // If limit was explicitly provided but is invalid, throw an error
+      console.error(`Invalid total_item_limit value provided:`, {
+        limitValue,
+        type: typeof limitValue,
+        cleanUpdates,
+      });
+      throw new Error(`Invalid total_item_limit value: ${limitValue}. Must be a number >= 1.`);
+    } else {
+      // Explicitly remove these fields if they were sent as null/undefined/empty
+      delete updateData.total_item_limit;
+      delete updateData.total_item_limit_set_at;
+      delete updateData.unclaimed_void_count;
     }
 
+    // Handle empty update data gracefully (only updated_at)
+    const fieldsToUpdate = Object.keys(updateData).filter(key => key !== 'updated_at');
+    if (fieldsToUpdate.length === 0) {
+      // No meaningful fields to update, just return current user data
+      console.log(`No fields to update for user ${actualUserId} in ${userTable} table`);
+      const { data: currentData, error: fetchError } = await supabase
+        .from(userTable)
+        .select("*")
+        .eq("id", actualUserId)
+        .single();
+      
+      if (fetchError) {
+        console.error(`Error fetching current user data:`, fetchError);
+        throw new Error(`Failed to fetch user data: ${fetchError.message}`);
+      }
+      
+      if (currentData && (currentData.max_items_per_order !== undefined || currentData.total_item_limit !== undefined)) {
+        currentData.total_item_limit = currentData.total_item_limit ?? currentData.max_items_per_order;
+      }
+      return currentData;
+    }
+
+    // Log update data for debugging
+    console.log(`Updating user ${actualUserId} in ${userTable} table with:`, JSON.stringify(updateData, null, 2));
+    console.log(`Fields to update: ${fieldsToUpdate.join(', ')}`);
+
+    // Validate that we have something meaningful to update
+    if (Object.keys(updateData).length === 0 || (Object.keys(updateData).length === 1 && updateData.updated_at)) {
+      throw new Error("No valid fields to update");
+    }
+
+    // Update the correct table
+    console.log(`Attempting to update ${userTable} table for user ${actualUserId}`);
     let result = await supabase
-      .from("users")
+      .from(userTable)
       .update(updateData)
-      .eq("id", userId)
+      .eq("id", actualUserId)
       .select()
       .single();
 
+    console.log(`Update result:`, {
+      hasError: !!result.error,
+      error: result.error,
+      hasData: !!result.data,
+    });
+
     // If first update failed and we were setting the limit, retry with old column names (migration not run)
-    if (result.error && limitValue !== undefined) {
-      const fallbackData = { ...updates, updated_at: new Date().toISOString() };
+    // Only for students table (users table fallback handled above)
+    if (result.error && isValidLimit && userTable === "students") {
+      console.log(`Retrying with old column names (max_items_per_order)`);
+      const fallbackData = { ...cleanUpdates, updated_at: new Date().toISOString() };
+      // Remove new column names
       delete fallbackData.total_item_limit;
       delete fallbackData.total_item_limit_set_at;
+      // Use old column names
       fallbackData.max_items_per_order = limitValue;
       fallbackData.max_items_per_order_set_at = new Date().toISOString();
       fallbackData.unclaimed_void_count = 0;
+      // Remove fields that don't exist
+      delete fallbackData.is_active;
+      delete fallbackData.role;
       result = await supabase
-        .from("users")
+        .from(userTable)
         .update(fallbackData)
-        .eq("id", userId)
+        .eq("id", actualUserId)
         .select()
         .single();
     }
 
     const { data, error } = result;
     if (error) {
-      throw error;
+      // Log detailed error information for debugging
+      console.error(`Error updating ${userTable} table:`, {
+        error: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+        updateData,
+        actualUserId,
+        userTable,
+        originalUserId: userId,
+      });
+
+      // Provide more informative error messages
+      if (error.code === '23514' || error.message?.includes('check constraint')) {
+        // Constraint violation - likely education_level
+        if (error.message?.includes('education_level')) {
+          throw new Error(
+            `Invalid education level. Allowed values: Kindergarten, Elementary, Junior High School, Senior High School, College, Vocational. ` +
+            `If you're updating to "Junior High School", please run the migration: update_education_level_constraint_students.sql`
+          );
+        }
+        throw new Error(`Database constraint violation: ${error.message}`);
+      }
+      if (error.code === '42703' || error.message?.includes('does not exist')) {
+        throw new Error(`Column does not exist in ${userTable} table: ${error.message}`);
+      }
+      throw new Error(`Failed to update user in ${userTable} table: ${error.message || 'Unknown error'}`);
     }
 
     // Update user_roles if role changed
     if (updates.role) {
-      // Delete old roles
-      await supabase.from("user_roles").delete().eq("user_id", userId);
+      // Delete old roles - use actualUserId for the database operation
+      await supabase.from("user_roles").delete().eq("user_id", actualUserId);
 
       // Insert new role
       await supabase.from("user_roles").insert({
@@ -511,6 +731,21 @@ async function updateUser(userId, updates, updatedByUserId = null) {
     return data;
   } catch (error) {
     console.error("Error updating user:", error);
+    console.error("Error stack:", error.stack);
+    console.error("Error details:", {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+    });
+    
+    // Re-throw with more context if it's a generic error
+    // Note: userTable might not be defined if error occurred before table detection
+    const errorMessage = error.message || 'Unknown error';
+    if (errorMessage && !errorMessage.includes(userId)) {
+      throw new Error(`Failed to update user ${userId}: ${errorMessage}`);
+    }
     throw error;
   }
 }

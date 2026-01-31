@@ -85,12 +85,19 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
       let alreadyOrdered = {};
       if (orParts.length > 0) {
         const placedStatusesIncomplete = ["pending", "paid", "claimed", "processing", "ready", "payment_pending", "completed"];
-        const { data: placedOrders } = await supabase
+        let ordersQuery = supabase
           .from("orders")
-          .select("items")
+          .select("items, created_at")
           .eq("is_active", true)
           .in("status", placedStatusesIncomplete)
           .or(orParts.join(","));
+        
+        // Only count orders created AFTER total_item_limit_set_at (if it exists)
+        if (data.total_item_limit_set_at) {
+          ordersQuery = ordersQuery.gte("created_at", data.total_item_limit_set_at);
+        }
+        
+        const { data: placedOrders } = await ordersQuery;
         for (const row of placedOrders || []) {
           const orderItems = Array.isArray(row.items) ? row.items : [];
           for (const it of orderItems) {
@@ -125,6 +132,7 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
 
     // Sum quantities per item from this student's placed orders.
     // Include all statuses that appear in the student's "Orders" and "Claimed" tabs so "already ordered" matches what they see.
+    // IMPORTANT: Only count orders created AFTER total_item_limit_set_at to give students a fresh slate when limit is updated.
     const placedStatuses = ["pending", "paid", "claimed", "processing", "ready", "payment_pending", "completed"];
     const email = (tokenUser.email || "").trim();
     const orParts = [];
@@ -134,12 +142,21 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
     let alreadyOrdered = {};
     if (orParts.length > 0) {
       const orFilter = orParts.join(",");
-      const { data: placedOrders, error: ordersErr } = await supabase
+      let ordersQuery = supabase
         .from("orders")
-        .select("items")
+        .select("items, created_at")
         .eq("is_active", true)
         .in("status", placedStatuses)
         .or(orFilter);
+      
+      // Only count orders created AFTER total_item_limit_set_at (if it exists)
+      // This gives students a fresh slate when admin updates their limit
+      if (data.total_item_limit_set_at) {
+        ordersQuery = ordersQuery.gte("created_at", data.total_item_limit_set_at);
+        console.log(`Max quantities: Filtering orders to only count those created after ${data.total_item_limit_set_at}`);
+      }
+      
+      const { data: placedOrders, error: ordersErr } = await ordersQuery;
       if (ordersErr) {
         console.error("Max quantities: placed orders query error", ordersErr);
       }

@@ -27,6 +27,12 @@ class OrderService {
       // Apply filters (but not search - we'll handle search separately)
       if (filters.status) {
         query = query.eq("status", filters.status);
+      } else {
+        // If no specific status filter, only show active order statuses for "Orders" tab
+        // Orders tab should only show: pending, processing, ready, payment_pending
+        // Exclude: cancelled (voided/unclaimed), claimed, completed
+        // These excluded statuses should only appear in their respective tabs
+        query = query.in("status", ["pending", "processing", "ready", "payment_pending"]);
       }
 
       if (filters.order_type) {
@@ -64,6 +70,16 @@ class OrderService {
         // Filter by ALL fields including item names (client-side for JSONB)
         const searchTermLower = searchTerm.toLowerCase();
         const allMatchingOrders = (allData || []).filter(order => {
+          // Safety check: Exclude cancelled, claimed, and completed orders when no status filter
+          // Orders tab should only show: pending, processing, ready, payment_pending
+          if (!filters.status) {
+            const status = order.status?.toLowerCase();
+            const activeStatuses = ["pending", "processing", "ready", "payment_pending"];
+            if (!activeStatuses.includes(status)) {
+              return false;
+            }
+          }
+          
           // Basic fields already filtered by DB, but double-check
           const matchesBasic = 
             (order.order_number && order.order_number.toLowerCase().includes(searchTermLower)) ||

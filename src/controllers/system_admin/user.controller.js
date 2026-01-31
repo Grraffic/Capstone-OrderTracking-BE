@@ -187,6 +187,9 @@ exports.updateUser = async (req, res) => {
     const updates = req.body;
     const updatedByUserId = req.user?.id; // Get authenticated user ID for email_role_assignments
 
+    // Log incoming request for debugging
+    console.log(`Update user request: userId=${id}, updates=`, JSON.stringify(updates, null, 2));
+
     // Don't allow updating email (it's the unique identifier)
     delete updates.email;
 
@@ -206,10 +209,22 @@ exports.updateUser = async (req, res) => {
     });
   } catch (error) {
     console.error("Error in updateUser controller:", error);
+    console.error("Error stack:", error.stack);
+    console.error("Error details:", {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+    });
     return res.status(500).json({
       success: false,
       message: "Failed to update user",
       error: error.message,
+      ...(process.env.NODE_ENV === 'development' && { 
+        details: error.details,
+        hint: error.hint,
+        stack: error.stack 
+      }),
     });
   }
 };
