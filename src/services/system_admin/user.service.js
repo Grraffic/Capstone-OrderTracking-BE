@@ -1,6 +1,7 @@
 const supabase = require("../../config/supabase");
 const emailRoleAssignmentService = require("./emailRoleAssignment.service");
 const { resolveItemKey } = require("../../config/itemMaxOrder");
+const crypto = require("crypto");
 
 /**
  * User Service
@@ -206,12 +207,31 @@ async function createUser(userData, createdByUserId = null) {
       throw new Error("Email is required");
     }
 
-    // Check if user already exists in database
-    const { data: existingUser } = await supabase
-      .from("users")
-      .select("id, email")
-      .eq("email", normalizedEmail)
-      .single();
+    if (!userData.role) {
+      throw new Error("Role is required");
+    }
+
+    // Determine if this is a student or staff based on email domain
+    const isStudentEmail = normalizedEmail.endsWith("@student.laverdad.edu.ph");
+    const isStudentRole = userData.role === "student";
+
+    // Check if user already exists in students or staff tables
+    let existingUser = null;
+    if (isStudentEmail || isStudentRole) {
+      const { data: studentUser } = await supabase
+        .from("students")
+        .select("id, email")
+        .eq("email", normalizedEmail)
+        .maybeSingle();
+      existingUser = studentUser;
+    } else {
+      const { data: staffUser } = await supabase
+        .from("staff")
+        .select("id, email")
+        .eq("email", normalizedEmail)
+        .maybeSingle();
+      existingUser = staffUser;
+    }
 
     if (existingUser) {
       throw new Error(`User with email ${normalizedEmail} already exists`);
@@ -280,50 +300,98 @@ async function createUser(userData, createdByUserId = null) {
       // Continue - the passport strategy will create the Auth user when they log in
     }
 
-    // Step 2: Create user record in users table
-    // If we have an Auth user ID, use it; otherwise generate a UUID (will be updated on first OAuth login)
-    const userRecord = {
-      ...(authUserId && { id: authUserId }), // Use Auth user ID if available
-      email: normalizedEmail,
-      name: userData.name || "",
-      role: userData.role || "student",
-      provider: "google", // They'll use Google OAuth to log in
-      ...(authUserId && { provider_id: authUserId }), // Set provider_id if we have Auth user
-      is_active: userData.is_active !== undefined ? userData.is_active : true,
-      // Add student-specific fields if provided
-      course_year_level: userData.course_year_level || null,
-      education_level: userData.education_level || null,
-      student_number: userData.student_number || null,
-    };
+    // Generate user_id if we don't have an authUserId
+    if (!authUserId) {
+      // Generate a UUID for user_id (will be updated on first OAuth login)
+      authUserId = crypto.randomUUID();
+    }
 
-    const { data: dbUser, error: dbError } = await supabase
-      .from("users")
-      .upsert(userRecord, {
-        onConflict: authUserId ? "id" : "email", // Use id if we have Auth user, otherwise email
-      })
-      .select()
-      .single();
+    // Step 2: Create user record in the appropriate table (students or staff)
+    let dbUser = null;
+    
+    if (isStudentEmail || isStudentRole) {
+      // Insert into students table
+      const studentRecord = {
+        user_id: authUserId,
+        email: normalizedEmail,
+        name: userData.name || "",
+        student_number: userData.student_number || null,
+        course_year_level: userData.course_year_level || null,
+        education_level: userData.education_level || null,
+        enrollment_status: userData.enrollment_status || "currently_enrolled",
+        total_item_limit: userData.total_item_limit || null,
+        order_lockout_period: userData.order_lockout_period || null,
+        order_lockout_unit: userData.order_lockout_unit || null,
+        gender: userData.gender || null,
+        student_type: userData.student_type || null,
+        onboarding_completed: userData.onboarding_completed || false,
+        avatar_url: userData.avatar_url || null,
+        photo_url: userData.photo_url || null,
+      };
 
-    if (dbError) {
-      // If we created an Auth user but database insert failed, try to clean up
-      if (authUserId) {
-        try {
-          await supabase.auth.admin.deleteUser(authUserId);
-        } catch (cleanupErr) {
-          console.error(
-            "Failed to cleanup Auth user after database error:",
-            cleanupErr
-          );
+      const { data: studentData, error: studentError } = await supabase
+        .from("students")
+        .insert(studentRecord)
+        .select()
+        .single();
+
+      if (studentError) {
+        // If we created an Auth user but database insert failed, try to clean up
+        if (authUserId) {
+          try {
+            await supabase.auth.admin.deleteUser(authUserId);
+          } catch (cleanupErr) {
+            console.error(
+              "Failed to cleanup Auth user after database error:",
+              cleanupErr
+            );
+          }
         }
+        throw studentError;
       }
-      throw dbError;
+
+      dbUser = { ...studentData, role: "student" };
+    } else {
+      // Insert into staff table
+      const staffRecord = {
+        user_id: authUserId,
+        email: normalizedEmail,
+        name: userData.name || "",
+        role: userData.role,
+        status: userData.is_active === false ? "inactive" : "active",
+        avatar_url: userData.avatar_url || null,
+        photo_url: userData.photo_url || null,
+      };
+
+      const { data: staffData, error: staffError } = await supabase
+        .from("staff")
+        .insert(staffRecord)
+        .select()
+        .single();
+
+      if (staffError) {
+        // If we created an Auth user but database insert failed, try to clean up
+        if (authUserId) {
+          try {
+            await supabase.auth.admin.deleteUser(authUserId);
+          } catch (cleanupErr) {
+            console.error(
+              "Failed to cleanup Auth user after database error:",
+              cleanupErr
+            );
+          }
+        }
+        throw staffError;
+      }
+
+      dbUser = { ...staffData, is_active: staffData.status === "active" };
     }
 
     // Create user_roles entry
     if (userData.role) {
       const { error: roleError } = await supabase.from("user_roles").upsert(
         {
-          user_id: dbUser.id,
+          user_id: authUserId, // Use authUserId for user_roles
           role: userData.role,
         },
         {
@@ -341,14 +409,26 @@ async function createUser(userData, createdByUserId = null) {
     // This ensures the role persists even if they log in via OAuth
     if (
       (userData.role === "property_custodian" ||
-        userData.role === "system_admin") &&
+        userData.role === "system_admin" ||
+        userData.role === "finance_staff" ||
+        userData.role === "accounting_staff" ||
+        userData.role === "department_head") &&
       createdByUserId
     ) {
       try {
+        // Get the staff ID of the creator for email_role_assignments
+        const { data: creatorStaff } = await supabase
+          .from("staff")
+          .select("id")
+          .eq("user_id", createdByUserId)
+          .maybeSingle();
+        
+        const assignedByStaffId = creatorStaff?.id || createdByUserId;
+        
         await emailRoleAssignmentService.assignEmailRole(
           normalizedEmail,
           userData.role,
-          createdByUserId
+          assignedByStaffId
         );
       } catch (assignmentError) {
         // Log but don't fail - email_role_assignments is for preventing role reversion

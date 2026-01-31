@@ -168,22 +168,22 @@ class OrderService {
         // Batch fetch students by ID and email (after migration orders.student_id = students.id)
         const [studentsByIdResult, studentsByEmailResult] = await Promise.all([
           studentIds.length > 0
-            ? supabase.from("students").select("id, name, email").in("id", studentIds)
+            ? supabase.from("students").select("id, name, email, course_year_level, photo_url, avatar_url").in("id", studentIds)
             : Promise.resolve({ data: [], error: null }),
           studentEmails.length > 0
-            ? supabase.from("students").select("id, email, name").in("email", studentEmails)
+            ? supabase.from("students").select("id, email, name, course_year_level, photo_url, avatar_url").in("email", studentEmails)
             : Promise.resolve({ data: [], error: null }),
         ]);
         const userMapById = {};
         const userMapByEmail = {};
         if (studentsByIdResult.data) {
           studentsByIdResult.data.forEach((u) => {
-            userMapById[u.id] = { ...u, photo_url: null, avatar_url: null };
+            userMapById[u.id] = u;
           });
         }
         if (studentsByEmailResult.data) {
           studentsByEmailResult.data.forEach((u) => {
-            userMapByEmail[u.email] = { ...u, photo_url: null, avatar_url: null };
+            userMapByEmail[u.email] = u;
           });
         }
         // Fallback: legacy orders may have user id in student_id before full migration
