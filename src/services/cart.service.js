@@ -161,11 +161,12 @@ class CartService {
         result = data;
       } else {
         // Insert new cart item
+        // Use student_id instead of user_id (migration changed cart_items to use student_id)
         const { data, error } = await supabase
           .from("cart_items")
           .insert([
             {
-              user_id: userId,
+              student_id: studentId,
               inventory_id: inventoryId,
               size,
               quantity,
@@ -208,11 +209,13 @@ class CartService {
         throw new Error("Quantity must be at least 1");
       }
 
+      const studentId = await this._resolveStudentId(userId);
+
       const { data, error } = await supabase
         .from("cart_items")
         .update({ quantity })
         .eq("id", cartItemId)
-        .eq("user_id", userId)
+        .eq("student_id", studentId)
         .select()
         .single();
 
@@ -247,11 +250,13 @@ class CartService {
         throw new Error("Missing required fields");
       }
 
+      const studentId = await this._resolveStudentId(userId);
+
       const { data, error } = await supabase
         .from("cart_items")
         .delete()
         .eq("id", cartItemId)
-        .eq("user_id", userId)
+        .eq("student_id", studentId)
         .select()
         .single();
 
