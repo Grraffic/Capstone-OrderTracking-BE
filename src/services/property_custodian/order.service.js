@@ -36,82 +36,16 @@ class OrderService {
         // IMPORTANT: Some orders may have student_id=null (legacy data), so we need to also match by student_email
         // if provided, or handle null student_id cases
         query = query.neq("status", "cancelled");
-        console.log(`📦 OrderService: Fetching all orders for student ${filters.student_id} (excluding cancelled)`);
-        console.log(`📦 OrderService: This should include all claimed orders visible in finance/accounting`);
         
         // If student_email is provided, also match orders with null student_id by email
         // This handles legacy orders that don't have student_id set
         if (filters.student_email) {
-          console.log(`📦 OrderService: Also matching orders with null student_id by email: ${filters.student_email}`);
           // Use .or() to match either by student_id OR (null student_id AND matching email)
           query = query.or(`student_id.eq.${filters.student_id},and(student_id.is.null,student_email.eq.${filters.student_email})`);
         } else {
           // Only match by student_id, but also include orders with null student_id if we can't match by email
           // For now, just match by student_id - we'll handle null cases separately if needed
           query = query.eq("student_id", filters.student_id);
-        }
-        
-        // Diagnostic: First check ALL claimed orders in database (like Finance/Accounting sees)
-        const { data: allClaimedOrders, error: claimedError } = await supabase
-          .from("orders")
-          .select("id, order_number, status, student_id, student_name, created_at, claimed_date, is_active")
-          .eq("is_active", true)
-          .in("status", ["claimed", "completed"]);
-        
-        console.log(`📊 OrderService: Finance/Accounting view - Total claimed/completed orders in database: ${allClaimedOrders?.length || 0}`);
-        if (allClaimedOrders && allClaimedOrders.length > 0) {
-          console.log(`📊 OrderService: Claimed orders student_id breakdown:`, 
-            allClaimedOrders.reduce((acc, o) => {
-              const sid = o.student_id || 'NULL';
-              acc[sid] = (acc[sid] || 0) + 1;
-              return acc;
-            }, {})
-          );
-          console.log(`📊 OrderService: Sample claimed orders:`, allClaimedOrders.slice(0, 6).map(o => ({
-            order_number: o.order_number,
-            student_id: o.student_id,
-            student_name: o.student_name,
-            status: o.status
-          })));
-        }
-        
-        // Diagnostic: Check ALL orders (not just claimed) for this specific student
-        const { data: allOrdersCheck, error: allOrdersError } = await supabase
-          .from("orders")
-          .select("id, order_number, status, student_id, created_at, claimed_date, is_active")
-          .eq("student_id", filters.student_id);
-        
-        console.log(`📊 OrderService: Database diagnostic - Total orders for student ${filters.student_id}: ${allOrdersCheck?.length || 0}`);
-        if (allOrdersCheck && allOrdersCheck.length > 0) {
-          const activeOrders = allOrdersCheck.filter(o => o.is_active === true);
-          const inactiveOrders = allOrdersCheck.filter(o => o.is_active !== true);
-          console.log(`📊 OrderService: Active orders: ${activeOrders.length}, Inactive orders: ${inactiveOrders.length}`);
-          
-          const statusBreakdown = activeOrders.reduce((acc, o) => {
-            acc[o.status] = (acc[o.status] || 0) + 1;
-            return acc;
-          }, {});
-          console.log(`📊 OrderService: Active order status breakdown:`, statusBreakdown);
-          
-          const claimedOrders = activeOrders.filter(o => o.status === "claimed" || o.status === "completed");
-          if (claimedOrders.length > 0) {
-            console.log(`📊 OrderService: Found ${claimedOrders.length} claimed/completed orders:`);
-            claimedOrders.forEach(order => {
-              console.log(`  - Order #${order.order_number}: status=${order.status}, claimed_date=${order.claimed_date || 'N/A'}, is_active=${order.is_active}`);
-            });
-          }
-          
-          // Show sample orders
-          console.log(`📊 OrderService: Sample orders (first 5):`, activeOrders.slice(0, 5).map(o => ({
-            order_number: o.order_number,
-            status: o.status,
-            is_active: o.is_active,
-            student_id: o.student_id
-          })));
-        } else if (allOrdersError) {
-          console.error(`❌ OrderService: Error checking all orders:`, allOrdersError);
-        } else {
-          console.log(`⚠️ OrderService: No orders found in database for student ${filters.student_id}`);
         }
       } else {
         // For admin/property custodian, only show active order statuses by default
@@ -135,7 +69,6 @@ class OrderService {
         // Apply student_id filter - ensure it's a string match
         const studentIdStr = String(filters.student_id).trim();
         query = query.eq("student_id", studentIdStr);
-        console.log(`📦 OrderService: Applied student_id filter: "${studentIdStr}" (type: ${typeof filters.student_id})`);
       }
       
       // student_email filter is handled in the student_id section above with .or() query
@@ -220,47 +153,6 @@ class OrderService {
         data = result.data;
         error = result.error;
         count = result.count;
-        
-        // Diagnostic logging for student orders
-        if (filters.student_id) {
-          console.log(`📊 OrderService: Query result for student ${filters.student_id}:`);
-          console.log(`  - Total count from database: ${count}`);
-          console.log(`  - Orders returned in this page: ${data?.length || 0}`);
-          console.log(`  - Page: ${page}, Limit: ${limit}`);
-          
-          if (data && data.length > 0) {
-            const statusBreakdown = data.reduce((acc, o) => {
-              acc[o.status] = (acc[o.status] || 0) + 1;
-              return acc;
-            }, {});
-            console.log(`  - Status breakdown:`, statusBreakdown);
-            
-            const claimedInResults = data.filter(o => o.status === "claimed" || o.status === "completed");
-            if (claimedInResults.length > 0) {
-              console.log(`✅ OrderService: Found ${claimedInResults.length} claimed/completed orders in results:`, claimedInResults.map(o => ({
-                order_number: o.order_number,
-                status: o.status,
-                claimed_date: o.claimed_date,
-                student_id: o.student_id
-              })));
-            } else {
-              console.log(`⚠️ OrderService: No claimed orders in this page's results`);
-            }
-          } else {
-            console.log(`⚠️ OrderService: Query returned 0 orders for student ${filters.student_id}`);
-            console.log(`⚠️ OrderService: This might indicate:`);
-            console.log(`  1. No orders exist for this student_id`);
-            console.log(`  2. All orders are marked as is_active=false`);
-            console.log(`  3. All orders have status='cancelled' (which is excluded)`);
-            console.log(`  4. student_id mismatch between orders and user`);
-          }
-          
-          // Check if there are more pages
-          if (count > (data?.length || 0)) {
-            console.log(`⚠️ OrderService: There are ${count} total orders but only ${data?.length || 0} returned (pagination limit)`);
-            console.log(`⚠️ OrderService: Consider increasing limit or fetching additional pages`);
-          }
-        }
       }
 
       if (error) throw error;
