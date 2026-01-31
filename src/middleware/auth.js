@@ -184,6 +184,11 @@ function requireRole(requiredRoles) {
   };
 }
 
+// Middleware that allows both system_admin and property_custodian
+function requireAdminOrPropertyCustodian(req, res, next) {
+  return requireRole(["system_admin", "property_custodian"])(req, res, next);
+}
+
 module.exports = {
   verifyToken,
   requireRole,
@@ -191,4 +196,5 @@ module.exports = {
   requirePropertyCustodian: requireRole("property_custodian"),
   requireSystemAdmin: requireRole("system_admin"),
   requireStudent: requireRole("student"),
+  requireAdminOrPropertyCustodian,
 };

@@ -1,12 +1,12 @@
 const express = require("express");
 const router = express.Router();
 const transactionController = require("../controllers/transaction.controller");
-const { verifyToken, requirePropertyCustodian } = require("../middleware/auth");
+const { verifyToken, requirePropertyCustodian, requireAdminOrPropertyCustodian } = require("../middleware/auth");
 
 /**
  * Transaction Routes
  * 
- * All routes require property custodian role
+ * All routes require property custodian or system admin role
  */
 
 /**
@@ -17,7 +17,7 @@ const { verifyToken, requirePropertyCustodian } = require("../middleware/auth");
 router.get(
   "/",
   verifyToken,
-  requirePropertyCustodian,
+  requireAdminOrPropertyCustodian,
   transactionController.getTransactions
 );
 
@@ -29,7 +29,7 @@ router.get(
 router.get(
   "/recent",
   verifyToken,
-  requirePropertyCustodian,
+  requireAdminOrPropertyCustodian,
   transactionController.getRecentTransactions
 );
 
@@ -41,20 +41,20 @@ router.get(
 router.get(
   "/type/:type",
   verifyToken,
-  requirePropertyCustodian,
+  requireAdminOrPropertyCustodian,
   transactionController.getTransactionsByType
 );
 
 /**
  * POST /api/transactions/sample
  * Create sample transactions for testing
- * Property custodian only
+ * Property custodian or system admin only
  * NOTE: This route must come before /:id to avoid route conflicts
  */
 router.post(
   "/sample",
   verifyToken,
-  requirePropertyCustodian,
+  requireAdminOrPropertyCustodian,
   transactionController.createSampleTransactions
 );
 
@@ -65,7 +65,7 @@ router.post(
 router.get(
   "/:id",
   verifyToken,
-  requirePropertyCustodian,
+  requireAdminOrPropertyCustodian,
   transactionController.getTransactionById
 );
 

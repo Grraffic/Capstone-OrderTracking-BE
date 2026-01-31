@@ -8,6 +8,7 @@ class CartController {
   /**
    * Get all cart items for a user
    * GET /api/cart/:userId
+   * Note: Only students have carts. System admins and staff should get empty cart.
    */
   async getCartItems(req, res) {
     try {
@@ -20,10 +21,38 @@ class CartController {
         });
       }
 
+      // Check if user is a student - only students have carts
+      const userRole = req.user?.role;
+      if (userRole && userRole !== "student") {
+        // Non-students (system_admin, property_custodian, etc.) don't have carts
+        // Return empty cart instead of error
+        return res.status(200).json({
+          success: true,
+          data: [],
+          message: "Cart is empty (not a student account)",
+        });
+      }
+
       const result = await CartService.getCartItems(userId);
       res.status(200).json(result);
     } catch (error) {
       console.error("Get cart items error:", error);
+      
+      // If error is about student not found, return empty cart for non-students
+      if (error.message && (
+        error.message.includes("Student account not found") ||
+        error.message.includes("not a student")
+      )) {
+        const userRole = req.user?.role;
+        if (userRole && userRole !== "student") {
+          return res.status(200).json({
+            success: true,
+            data: [],
+            message: "Cart is empty (not a student account)",
+          });
+        }
+      }
+      
       res.status(500).json({
         success: false,
         message: error.message || "Failed to fetch cart items",
