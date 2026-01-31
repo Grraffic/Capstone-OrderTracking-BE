@@ -243,7 +243,36 @@ class OrderController {
           const orderData = result.data;
           const studentId = orderData.student_id;
           
-          // Create notification for the student
+          // Get Supabase Auth UID from student record (needed for notifications)
+          let supabaseAuthUid = null;
+          if (studentId) {
+            try {
+              const { getStudentRowById } = require("../services/profileResolver.service");
+              const studentRow = await getStudentRowById(studentId);
+              if (studentRow && studentRow.user_id) {
+                supabaseAuthUid = studentRow.user_id;
+                console.log(`✅ Found Supabase Auth UID for student ${studentId}: ${supabaseAuthUid}`);
+              } else {
+                console.warn(`⚠️ Student ${studentId} not found or missing user_id. Student row:`, studentRow ? Object.keys(studentRow) : 'null');
+                // Fallback logic (same as restock)
+                if (studentId && typeof studentId === 'string' && studentId.length > 20) {
+                  console.log(`⚠️ Attempting to use studentId as Supabase Auth UID: ${studentId}`);
+                  supabaseAuthUid = studentId;
+                }
+              }
+            } catch (studentError) {
+              console.error(`❌ Error fetching Supabase Auth UID for student ${studentId}:`, studentError);
+              // Fallback logic
+              if (studentId && typeof studentId === 'string' && studentId.length > 20) {
+                console.log(`⚠️ Fallback: Using studentId as Supabase Auth UID: ${studentId}`);
+                supabaseAuthUid = studentId;
+              }
+            }
+          } else {
+            console.warn(`⚠️ No studentId found in order data`);
+          }
+          
+          // Create notification for the student (use Supabase Auth UID if available, fallback to student_id)
           try {
             const itemNames = (orderData.items || [])
               .map(item => item.name)
@@ -251,8 +280,11 @@ class OrderController {
               .join(", ");
             const itemCount = (orderData.items || []).length;
             
-            await NotificationService.createOrderClaimedNotification({
-              studentId: studentId,
+            // Use Supabase Auth UID for notification (required for notifications table)
+            const notificationUserId = supabaseAuthUid || studentId;
+            
+            const notificationResult = await NotificationService.createOrderClaimedNotification({
+              studentId: notificationUserId,
               orderNumber: orderData.order_number,
               orderId: orderData.id,
               items: orderData.items || [],
@@ -260,19 +292,38 @@ class OrderController {
               itemCount: itemCount,
             });
             console.log(`✅ Notification created for claimed order ${orderData.order_number}`);
+            
+            // Emit Socket.IO event with Supabase Auth UID for frontend matching (same as restock)
+            if (io && notificationResult?.data) {
+              // Use Supabase Auth UID if available, otherwise use notificationUserId as fallback
+              const emitUserId = supabaseAuthUid || notificationUserId;
+              if (emitUserId) {
+                io.emit("notification:created", {
+                  userId: emitUserId, // Use Supabase Auth UID for frontend matching, fallback to notificationUserId
+                  notification: notificationResult.data,
+                });
+                console.log(`📡 Socket.IO: Emitted notification:created for order ${orderData.order_number} to user ${emitUserId} (supabaseAuthUid: ${supabaseAuthUid ? 'found' : 'not found, using fallback'})`);
+              } else {
+                console.warn(`⚠️ Cannot emit notification:created - No user ID available for student ${studentId}`);
+              }
+            }
           } catch (notifError) {
             console.error("Failed to create notification for claimed order:", notifError);
             // Don't fail the order update if notification creation fails
           }
 
           // Emit order:claimed event for activity tracking
-          io.emit("order:claimed", {
-            orderId: orderData.id,
-            orderNumber: orderData.order_number,
-            userId: studentId, // Use student_id from database
-            items: orderData.items,
-          });
-          console.log(`📡 Socket.IO: Emitted order:claimed for order ${orderData.order_number} to student ${studentId}`);
+          // Use Supabase Auth UID when available (same pattern as restock)
+          if (io) {
+            const activityUserId = supabaseAuthUid || studentId;
+            io.emit("order:claimed", {
+              orderId: orderData.id,
+              orderNumber: orderData.order_number,
+              userId: activityUserId,
+              items: orderData.items,
+            });
+            console.log(`📡 Socket.IO: Emitted order:claimed for order ${orderData.order_number} to user ${activityUserId}`);
+          }
         }
       }
 

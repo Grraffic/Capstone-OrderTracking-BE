@@ -1821,12 +1821,44 @@ class ItemsService {
       console.log(`📧 Notifying ${studentsWithPreOrders.length} students...`);
       const notificationResults = [];
 
+      // Import getStudentRowById for converting database UUID to Supabase Auth UID
+      const { getStudentRowById } = require("../../services/profileResolver.service");
+
       for (const student of studentsWithPreOrders) {
         try {
+          // Convert database UUID (student.studentId) to Supabase Auth UID (user_id)
+          // This is needed because notifications table uses user_id (Supabase Auth UID)
+          // and frontend expects Supabase Auth UID for matching
+          let supabaseAuthUid = null;
+          try {
+            const studentRow = await getStudentRowById(student.studentId);
+            if (studentRow && studentRow.user_id) {
+              supabaseAuthUid = studentRow.user_id;
+              console.log(`✅ Found Supabase Auth UID for student ${student.studentId}: ${supabaseAuthUid}`);
+            } else {
+              console.warn(`⚠️ Student ${student.studentId} not found or missing user_id. Student row:`, studentRow ? Object.keys(studentRow) : 'null');
+              // Fallback: try using studentId as Supabase Auth UID if it looks like one
+              if (student.studentId && typeof student.studentId === 'string' && student.studentId.length > 20) {
+                console.log(`⚠️ Attempting to use studentId as Supabase Auth UID: ${student.studentId}`);
+                supabaseAuthUid = student.studentId;
+              }
+            }
+          } catch (uidError) {
+            console.error(`❌ Error fetching Supabase Auth UID for student ${student.studentId}:`, uidError);
+            // Fallback: try using studentId as Supabase Auth UID if it looks like one
+            if (student.studentId && typeof student.studentId === 'string' && student.studentId.length > 20) {
+              console.log(`⚠️ Fallback: Using studentId as Supabase Auth UID: ${student.studentId}`);
+              supabaseAuthUid = student.studentId;
+            }
+          }
+
+          // Use Supabase Auth UID for notification (required for notifications table)
+          const notificationUserId = supabaseAuthUid || student.studentId;
+
           // Create notification (manual conversion - student must click "Order" button)
           const notification =
             await NotificationService.createRestockNotification({
-              studentId: student.studentId,
+              studentId: notificationUserId, // Use Supabase Auth UID instead of database UUID
               itemName: item.name,
               educationLevel: item.education_level,
               size: student.item.size || item.size || null,
@@ -1836,25 +1868,31 @@ class ItemsService {
             });
 
           if (io) {
-            io.emit("items:restocked", {
-              userId: student.studentId,
-              notification: notification.data,
-              item: {
-                id: item.id,
-                name: item.name,
-                educationLevel: item.education_level,
-                size: student.item.size || item.size || null,
-                stock: item.stock,
-              },
-              order: {
-                id: student.orderId,
-                orderNumber: student.orderNumber,
-                converted: false, // Manual conversion required
-              },
-            });
-            console.log(
-              `📡 Socket.IO: Emitted items:restocked to student ${student.studentId}`
-            );
+            // Emit Socket.IO event with Supabase Auth UID for frontend matching
+            if (supabaseAuthUid) {
+              io.emit("items:restocked", {
+                userId: supabaseAuthUid, // Use Supabase Auth UID for frontend matching
+                notification: notification.data,
+                item: {
+                  id: item.id,
+                  name: item.name,
+                  educationLevel: item.education_level,
+                  size: student.item.size || item.size || null,
+                  stock: item.stock,
+                },
+                order: {
+                  id: student.orderId,
+                  orderNumber: student.orderNumber,
+                  converted: false, // Manual conversion required
+                },
+              });
+              console.log(
+                `📡 Socket.IO: Emitted items:restocked to student ${supabaseAuthUid} (database UUID: ${student.studentId})`
+              );
+            } else {
+              console.warn(`⚠️ Cannot emit items:restocked - Supabase Auth UID not found for student ${student.studentId}`);
+              console.warn(`⚠️ Notification was still created in database with userId: ${notificationUserId}`);
+            }
           }
 
           notificationResults.push({

@@ -366,13 +366,13 @@ class NotificationService {
       } = notificationData;
 
       const message = itemCount > 1
-        ? `Your order #${orderNumber} with ${itemCount} items (${itemNames}) has been successfully claimed!`
-        : `Your order #${orderNumber} (${itemNames}) has been successfully claimed!`;
+        ? `Your order #${orderNumber} with ${itemCount} items (${itemNames}) has been released!`
+        : `Your order #${orderNumber} (${itemNames}) has been released!`;
 
       const notification = {
         user_id: studentId,
         type: "order",
-        title: "Order Claimed Successfully",
+        title: "Order Released",
         message: message,
         data: {
           orderId: orderId,
