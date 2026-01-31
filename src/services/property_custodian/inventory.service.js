@@ -140,10 +140,12 @@ class InventoryService {
       }
 
       // Force fresh data by not using any caching
+      // Exclude archived items from inventory report
       let query = supabase
         .from("items")
         .select("*", { count: "exact" })
-        .eq("is_active", true);
+        .eq("is_active", true)
+        .or("is_archived.eq.false,is_archived.is.null");
 
       if (filters.educationLevel) {
         query = query.eq("education_level", filters.educationLevel);
@@ -243,16 +245,18 @@ class InventoryService {
             }
 
             // Read reorder_point from variant JSON field if available
-            // For size-variation items, each variant has its own reorder_point; missing means 0 (not item-level)
+            // For size-variation items, each variant can have its own reorder_point
+            // If not set on variant, fall back to item-level reorder_point
             let variantReorderPoint;
             if (
               variant.reorder_point !== undefined &&
-              variant.reorder_point !== null
+              variant.reorder_point !== null &&
+              variant.reorder_point !== ""
             ) {
               variantReorderPoint = Number(variant.reorder_point) || 0;
             } else {
-              // Per-variant mode: no reorder_point on this variant => 0 (do not use item-level)
-              variantReorderPoint = 0;
+              // Fall back to item-level reorder_point if variant doesn't have one
+              variantReorderPoint = Number(item.reorder_point) || 0;
             }
 
             // Calculate ending inventory: Beginning Inventory + Purchases - Released + Returns

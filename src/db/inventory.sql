@@ -41,7 +41,8 @@ SELECT
   i.created_at,
   i.updated_at
 FROM items i
-WHERE i.is_active = true;
+WHERE i.is_active = true
+  AND (i.is_archived = false OR i.is_archived IS NULL);
 
 -- ============================================================================
 -- INVENTORY SUMMARY FUNCTION
@@ -79,6 +80,7 @@ BEGIN
     COUNT(*) FILTER (WHERE i.status = 'Out of Stock') as items_out_of_stock
   FROM items i
   WHERE i.is_active = true
+    AND (i.is_archived = false OR i.is_archived IS NULL)
     AND (p_education_level IS NULL OR i.education_level = p_education_level)
     AND (
       p_start_date IS NULL OR 
@@ -155,7 +157,8 @@ SELECT
   i.beginning_inventory_date,
   i.fiscal_year_start
 FROM items i
-WHERE i.is_active = true;
+WHERE i.is_active = true
+  AND (i.is_archived = false OR i.is_archived IS NULL);
 
 -- ============================================================================
 -- FUNCTION: Get Inventory Report for Frontend
@@ -212,6 +215,7 @@ BEGIN
     i.fiscal_year_start
   FROM items i
   WHERE i.is_active = true
+    AND (i.is_archived = false OR i.is_archived IS NULL)
     AND (p_education_level IS NULL OR i.education_level = p_education_level)
     AND (
       p_search_term IS NULL OR
