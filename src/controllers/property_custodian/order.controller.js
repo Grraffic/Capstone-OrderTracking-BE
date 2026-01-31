@@ -213,12 +213,30 @@ class OrderController {
       // Emit Socket.IO event for real-time updates
       const io = req.app.get("io");
       if (io) {
+        // Verify result.data contains all required fields
+        const orderData = result.data;
+        if (!orderData) {
+          console.error(`❌ OrderController: result.data is null/undefined for order ${id}`);
+        } else {
+          console.log(`📡 OrderController: Order ${id} updated to status "${status}"`);
+          console.log(`📡 OrderController: Order data includes:`, {
+            id: orderData.id,
+            order_number: orderData.order_number,
+            status: orderData.status,
+            student_id: orderData.student_id,
+            student_name: orderData.student_name,
+            order_type: orderData.order_type,
+            items_count: orderData.items?.length || 0,
+            claimed_date: orderData.claimed_date
+          });
+        }
+        
         io.emit("order:updated", {
           orderId: id,
           status: status,
           order: result.data,
         });
-        console.log(`📡 Socket.IO: Emitted order:updated for order ${id}`);
+        console.log(`📡 Socket.IO: Emitted order:updated for order ${id} with status "${status}"`);
 
         // If status is "claimed", emit a specific event for activity tracking and create notification
         if (status === "claimed" && result.data) {
