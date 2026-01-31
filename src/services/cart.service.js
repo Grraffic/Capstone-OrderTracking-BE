@@ -1,5 +1,5 @@
 const supabase = require("../config/supabase");
-const { getStudentIdForUser } = require("./profileResolver.service");
+const { getStudentIdForUser, getProfileByEmail } = require("./profileResolver.service");
 
 /**
  * Cart Service
@@ -7,9 +7,73 @@ const { getStudentIdForUser } = require("./profileResolver.service");
  * Uses student_id (students.id) after migration; resolves userId (JWT) to student_id.
  */
 class CartService {
-  async _resolveStudentId(userId) {
-    const studentId = await getStudentIdForUser(userId);
-    return studentId || userId;
+  /**
+   * Resolve user ID to student ID, ensuring it exists in students table
+   * @param {string} userId - JWT user ID
+   * @param {string} userEmail - Optional user email for fallback lookup
+   * @returns {Promise<string>} Student ID (students.id)
+   * @throws {Error} If student cannot be resolved
+   */
+  async _resolveStudentId(userId, userEmail = null) {
+    if (!userId) {
+      throw new Error("User ID is required");
+    }
+
+    // Try to get student ID by user_id
+    let studentId = await getStudentIdForUser(userId);
+    
+    // If not found and email is provided, try email lookup
+    if (!studentId && userEmail) {
+      const profile = await getProfileByEmail(userEmail);
+      if (profile && profile.type === "student") {
+        studentId = profile.id;
+      }
+    }
+    
+    // If still not found, check directly in students table
+    if (!studentId) {
+      const { data: student, error } = await supabase
+        .from("students")
+        .select("id, user_id, email")
+        .eq("user_id", userId)
+        .maybeSingle();
+      
+      if (error) {
+        console.error("Error checking student by user_id:", error);
+        throw new Error("Failed to verify student account");
+      }
+      
+      if (student) {
+        studentId = student.id;
+      }
+    }
+    
+    // Final validation: ensure the student_id exists in students table
+    if (studentId) {
+      const { data: student, error } = await supabase
+        .from("students")
+        .select("id")
+        .eq("id", studentId)
+        .maybeSingle();
+      
+      if (error) {
+        console.error("Error verifying student ID:", error);
+        throw new Error("Failed to verify student account");
+      }
+      
+      if (!student) {
+        console.error("Student ID resolved but not found in database:", studentId);
+        throw new Error("Student account not found. Please contact support.");
+      }
+      
+      return studentId;
+    }
+    
+    // If we still don't have a student ID, throw a helpful error
+    throw new Error(
+      "Student account not found. Please ensure your account is properly set up in the system. " +
+      "If this issue persists, please contact support."
+    );
   }
 
   /**
@@ -124,13 +188,26 @@ class CartService {
    */
   async addToCart(cartData) {
     try {
-      const { userId, inventoryId, size, quantity } = cartData;
+      const { userId, inventoryId, size, quantity, userEmail } = cartData;
 
       if (!userId || !inventoryId || !size || !quantity) {
         throw new Error("Missing required fields");
       }
 
-      const studentId = await this._resolveStudentId(userId);
+      let studentId;
+      try {
+        studentId = await this._resolveStudentId(userId, userEmail);
+      } catch (resolveError) {
+        console.error("Failed to resolve student ID:", {
+          userId,
+          userEmail,
+          error: resolveError.message,
+        });
+        throw new Error(
+          resolveError.message || 
+          "Unable to find student account. Please ensure your account is properly set up."
+        );
+      }
 
       const { data: existingItem, error: checkError } = await supabase
         .from("cart_items")

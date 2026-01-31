@@ -46,6 +46,8 @@ class CartController {
   async addToCart(req, res) {
     try {
       const { userId, inventoryId, size, quantity } = req.body;
+      // Get user email from JWT token if available (for fallback student lookup)
+      const userEmail = req.user?.email || null;
 
       if (!userId || !inventoryId || !size || !quantity) {
         return res.status(400).json({
@@ -66,6 +68,7 @@ class CartController {
         inventoryId,
         size,
         quantity,
+        userEmail, // Pass email for fallback lookup
       });
 
       res.status(201).json(result);
