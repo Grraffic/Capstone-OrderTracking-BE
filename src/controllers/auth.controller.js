@@ -40,7 +40,8 @@ exports.oauthCallback = async (req, res) => {
       const { data: studentRow } = await supabase
         .from("students")
         .select("id, user_id, email, role")
-        .eq("email", normalizedEmail)
+        .ilike("email", normalizedEmail)
+        .limit(1)
         .maybeSingle();
       if (studentRow) {
         existingUser = { id: studentRow.user_id, email: studentRow.email, role: "student" };
@@ -51,7 +52,8 @@ exports.oauthCallback = async (req, res) => {
         const { data: staffRow } = await supabase
           .from("staff")
           .select("id, user_id, email, role, status")
-          .eq("email", normalizedEmail)
+          .ilike("email", normalizedEmail)
+          .limit(1)
           .maybeSingle();
         if (staffRow) {
           existingUser = { id: staffRow.user_id, email: staffRow.email, role: staffRow.role };

@@ -1058,17 +1058,7 @@ class OrderService {
         const { data: studentRow } = await supabase.from("students").select("id").eq("email", studentEmail).maybeSingle();
         if (studentRow) {
           targetId = studentRow.id;
-          table = "students";
-        } else {
-          const { data: user } = await supabase.from("users").select("id").eq("email", studentEmail).maybeSingle();
-          if (user) {
-            targetId = user.id;
-            table = "users";
-          }
         }
-      } else if (targetId) {
-        const studentRow = await getStudentRowById(targetId);
-        if (!studentRow) table = "users";
       }
       if (!targetId) return;
 

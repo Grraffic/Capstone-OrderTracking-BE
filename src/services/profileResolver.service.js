@@ -54,10 +54,13 @@ async function getProfileByUserId(userId) {
 async function getProfileByEmail(email) {
   if (!email) return null;
 
+  const normalized = String(email).toLowerCase().trim();
+
   const { data: student } = await supabase
     .from("students")
     .select("*")
-    .eq("email", String(email).toLowerCase().trim())
+    .ilike("email", normalized)
+    .limit(1)
     .maybeSingle();
 
   if (student) return { type: "student", row: student, id: student.id };
@@ -65,7 +68,8 @@ async function getProfileByEmail(email) {
   const { data: staffRow } = await supabase
     .from("staff")
     .select("*")
-    .eq("email", String(email).toLowerCase().trim())
+    .ilike("email", normalized)
+    .limit(1)
     .maybeSingle();
 
   if (staffRow) return { type: "staff", row: staffRow, id: staffRow.id };

@@ -57,14 +57,15 @@ passport.use(
         // Debug logging
         console.log("🔍 Role determination for email:", normalizedEmail);
 
-        // STEP 1: Check if user already exists in students or staff (by email)
+        // STEP 1: Check if user already exists in students or staff (by email, case-insensitive to avoid duplicates)
         let existingProfile = null;
         let role = null;
         try {
           const { data: studentRow } = await supabase
             .from("students")
             .select("id, user_id, email, name, role")
-            .eq("email", normalizedEmail)
+            .ilike("email", normalizedEmail)
+            .limit(1)
             .maybeSingle();
           if (studentRow) {
             existingProfile = { type: "student", ...studentRow, role: "student" };
@@ -75,7 +76,8 @@ passport.use(
             const { data: staffRow } = await supabase
               .from("staff")
               .select("id, user_id, email, name, role, status")
-              .eq("email", normalizedEmail)
+              .ilike("email", normalizedEmail)
+              .limit(1)
               .maybeSingle();
             if (staffRow) {
               existingProfile = { type: "staff", ...staffRow };
@@ -171,36 +173,123 @@ passport.use(
         console.log("Extracted/Generated profile picture URL:", photoUrl);
 
         // Use existing user_id from students/staff, or generate new for first-time login
+        // IMPORTANT: Always reuse existing user_id if found to prevent duplicates
         const user_id = existingProfile?.user_id || crypto.randomUUID();
 
         if (role === "student") {
+          // If we found an existing student, always use their user_id to prevent duplicates
+          // Check again by email to ensure we have the latest data
+          let finalUserId = user_id;
+          if (existingProfile && existingProfile.type === "student") {
+            finalUserId = existingProfile.user_id;
+            console.log("✅ Reusing existing student user_id:", finalUserId);
+          }
+
           const studentRow = {
-            user_id,
+            user_id: finalUserId,
             name,
             email: normalizedEmail,
             photo_url: photoUrl,
             avatar_url: photoUrl,
             updated_at: new Date().toISOString(),
           };
+          
+          // Use email as conflict key to prevent duplicates
+          // This ensures that if a student with the same email exists, we update it
+          // instead of creating a new record
           console.log("Upserting student:", { ...studentRow, role });
-          const { data: upsertData, error: upsertError } = await supabase
+          
+          // First, try to find existing student by email (case-insensitive)
+          const { data: existingStudent, error: findError } = await supabase
             .from("students")
-            .upsert(studentRow, { onConflict: "user_id", ignoreDuplicates: false })
-            .select()
-            .single();
+            .select("id, user_id, email")
+            .ilike("email", normalizedEmail)
+            .limit(1)
+            .maybeSingle();
+          
+          if (findError && findError.code !== 'PGRST116') { // PGRST116 = not found, which is OK
+            console.error("Error finding existing student:", findError);
+            return done(findError);
+          }
+
+          let upsertData;
+          let upsertError;
+
+          if (existingStudent) {
+            // Student exists - update using their existing user_id
+            console.log("Found existing student, updating record:", existingStudent.user_id);
+            const updateRow = {
+              ...studentRow,
+              user_id: existingStudent.user_id, // Always use existing user_id
+            };
+            const result = await supabase
+              .from("students")
+              .update(updateRow)
+              .eq("user_id", existingStudent.user_id)
+              .select()
+              .single();
+            upsertData = result.data;
+            upsertError = result.error;
+            finalUserId = existingStudent.user_id;
+          } else {
+            // New student - insert with new user_id
+            console.log("Creating new student record");
+            const result = await supabase
+              .from("students")
+              .insert(studentRow)
+              .select()
+              .single();
+            upsertData = result.data;
+            upsertError = result.error;
+          }
+
           if (upsertError) {
             console.error("Supabase students upsert error:", upsertError);
-            return done(upsertError);
+            // If it's a unique constraint violation on email, try to find and update existing
+            if (upsertError.code === '23505' || upsertError.message?.includes('unique') || upsertError.message?.includes('duplicate')) {
+              console.log("Duplicate email detected, attempting to find and update existing record");
+              const { data: duplicateStudent } = await supabase
+                .from("students")
+                .select("id, user_id, email")
+                .ilike("email", normalizedEmail)
+                .limit(1)
+                .maybeSingle();
+              
+              if (duplicateStudent) {
+                const updateResult = await supabase
+                  .from("students")
+                  .update({
+                    name,
+                    photo_url: photoUrl,
+                    avatar_url: photoUrl,
+                    updated_at: new Date().toISOString(),
+                  })
+                  .eq("user_id", duplicateStudent.user_id)
+                  .select()
+                  .single();
+                upsertData = updateResult.data;
+                upsertError = updateResult.error;
+                finalUserId = duplicateStudent.user_id;
+              }
+            }
+            
+            if (upsertError) {
+              return done(upsertError);
+            }
           }
+
+          // Use the user_id from the database result if available, otherwise use finalUserId
+          const resultUserId = upsertData?.user_id || finalUserId;
+          
           const finalData = {
-            id: user_id,
+            id: resultUserId,
             email: normalizedEmail,
-            name,
+            name: upsertData?.name || name,
             role: "student",
-            photo_url: photoUrl,
-            avatar_url: photoUrl,
+            photo_url: upsertData?.photo_url || upsertData?.avatar_url || photoUrl,
+            avatar_url: upsertData?.avatar_url || upsertData?.photo_url || photoUrl,
           };
-          console.log("✅ Student login success:", finalData.email);
+          console.log("✅ Student login success:", finalData.email, "user_id:", resultUserId);
           return done(null, finalData);
         }
 
