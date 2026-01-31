@@ -81,9 +81,10 @@ CREATE POLICY "System admins can read maintenance mode"
   TO authenticated
   USING (
     EXISTS (
-      SELECT 1 FROM users
-      WHERE users.id = auth.uid()
-      AND users.role = 'system_admin'
+      SELECT 1 FROM staff
+      WHERE staff.user_id = auth.uid()
+      AND staff.role = 'system_admin'
+      AND staff.status = 'active'
     )
   );
 
@@ -94,9 +95,10 @@ CREATE POLICY "System admins can insert maintenance mode"
   TO authenticated
   WITH CHECK (
     EXISTS (
-      SELECT 1 FROM users
-      WHERE users.id = auth.uid()
-      AND users.role = 'system_admin'
+      SELECT 1 FROM staff
+      WHERE staff.user_id = auth.uid()
+      AND staff.role = 'system_admin'
+      AND staff.status = 'active'
     )
   );
 
@@ -107,16 +109,18 @@ CREATE POLICY "System admins can update maintenance mode"
   TO authenticated
   USING (
     EXISTS (
-      SELECT 1 FROM users
-      WHERE users.id = auth.uid()
-      AND users.role = 'system_admin'
+      SELECT 1 FROM staff
+      WHERE staff.user_id = auth.uid()
+      AND staff.role = 'system_admin'
+      AND staff.status = 'active'
     )
   )
   WITH CHECK (
     EXISTS (
-      SELECT 1 FROM users
-      WHERE users.id = auth.uid()
-      AND users.role = 'system_admin'
+      SELECT 1 FROM staff
+      WHERE staff.user_id = auth.uid()
+      AND staff.role = 'system_admin'
+      AND staff.status = 'active'
     )
   );
 
@@ -127,9 +131,10 @@ CREATE POLICY "System admins can delete maintenance mode"
   TO authenticated
   USING (
     EXISTS (
-      SELECT 1 FROM users
-      WHERE users.id = auth.uid()
-      AND users.role = 'system_admin'
+      SELECT 1 FROM staff
+      WHERE staff.user_id = auth.uid()
+      AND staff.role = 'system_admin'
+      AND staff.status = 'active'
     )
   );
 

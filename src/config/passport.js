@@ -1,4 +1,5 @@
 const passport = require("passport");
+const crypto = require("crypto");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 const supabase = require("./supabase");
 const { getProfilePictureUrl } = require("../utils/avatarGenerator");
@@ -56,41 +57,41 @@ passport.use(
         // Debug logging
         console.log("🔍 Role determination for email:", normalizedEmail);
 
-        // STEP 1: Check if user already exists in users table (manually created by admin)
-        // This allows users with any email domain to log in if they were manually added
-        let existingUser = null;
+        // STEP 1: Check if user already exists in students or staff (by email)
+        let existingProfile = null;
         let role = null;
         try {
-          const { data: userData, error: userError } = await supabase
-            .from("users")
-            .select("id, email, role, is_active")
+          const { data: studentRow } = await supabase
+            .from("students")
+            .select("id, user_id, email, name, role")
             .eq("email", normalizedEmail)
-            .single();
-
-          if (!userError && userData) {
-            existingUser = userData;
-            // If user exists and is active, use their existing role
-            // Note: Inactive user check is handled in auth.controller.js oauthCallback
-            // to allow proper redirect to frontend with error parameter
-            if (userData.is_active !== false) {
-              role = userData.role;
-              console.log(
-                `✅ Found existing user in database with role: ${role}`
-              );
-            } else {
-              console.warn(
-                `⚠️ User ${normalizedEmail} exists but is inactive - will be handled in controller`
-              );
-              // Don't throw error here - let controller handle redirect to frontend
-              // Pass user data so controller can check is_active and redirect properly
+            .maybeSingle();
+          if (studentRow) {
+            existingProfile = { type: "student", ...studentRow, role: "student" };
+            role = "student";
+            console.log("✅ Found existing student in database");
+          }
+          if (!existingProfile) {
+            const { data: staffRow } = await supabase
+              .from("staff")
+              .select("id, user_id, email, name, role, status")
+              .eq("email", normalizedEmail)
+              .maybeSingle();
+            if (staffRow) {
+              existingProfile = { type: "staff", ...staffRow };
+              role = staffRow.role;
+              if (staffRow.status === "inactive") {
+                console.warn("⚠️ Staff exists but is inactive - will be handled in controller");
+              } else {
+                console.log(`✅ Found existing staff in database with role: ${role}`);
+              }
             }
           }
         } catch (error) {
           console.warn(
-            "⚠️ Error checking existing user in database:",
+            "⚠️ Error checking existing profile in database:",
             error.message
           );
-          // Continue to other checks
         }
 
         // STEP 2: If no existing user found, check email_role_assignments table (system admin assigned roles)
@@ -144,7 +145,7 @@ passport.use(
             } else {
               // No assignment found and not a student email - reject login
               console.error("❌ Invalid email domain:", email);
-              console.error("  - Not found in users table");
+              console.error("  - Not found in students/staff");
               console.error("  - Not found in email_role_assignments table");
               console.error(
                 "  - Not a student email (@student.laverdad.edu.ph)"
@@ -169,143 +170,74 @@ passport.use(
         const photoUrl = getProfilePictureUrl(profile, name);
         console.log("Extracted/Generated profile picture URL:", photoUrl);
 
-        const userRow = {
-          email,
-          name,
-          role,
-          provider: "google",
-          provider_id: profile.id,
-          photo_url: photoUrl,
-          avatar_url: photoUrl, // Keep both fields in sync for compatibility
-          updated_at: new Date().toISOString(), // Ensure updated_at is set
-          // Ensure student fields are NULL for admins (both property_custodian and system_admin)
-          course_year_level: role !== "student" ? null : undefined,
-          student_number: role !== "student" ? null : undefined,
-          education_level: role !== "student" ? null : undefined,
-        };
+        // Use existing user_id from students/staff, or generate new for first-time login
+        const user_id = existingProfile?.user_id || crypto.randomUUID();
 
-        console.log("Upserting user:", userRow);
-
-        // First, try to upsert the user
-        const { data: upsertData, error: upsertError } = await supabase
-          .from("users")
-          .upsert(userRow, {
-            onConflict: "email",
-            ignoreDuplicates: false, // This ensures existing records are updated
-          })
-          .select()
-          .single();
-
-        if (upsertError) {
-          console.error("Supabase upsert error:", upsertError);
-          return done(upsertError);
+        if (role === "student") {
+          const studentRow = {
+            user_id,
+            name,
+            email: normalizedEmail,
+            photo_url: photoUrl,
+            avatar_url: photoUrl,
+            updated_at: new Date().toISOString(),
+          };
+          console.log("Upserting student:", { ...studentRow, role });
+          const { data: upsertData, error: upsertError } = await supabase
+            .from("students")
+            .upsert(studentRow, { onConflict: "user_id", ignoreDuplicates: false })
+            .select()
+            .single();
+          if (upsertError) {
+            console.error("Supabase students upsert error:", upsertError);
+            return done(upsertError);
+          }
+          const finalData = {
+            id: user_id,
+            email: normalizedEmail,
+            name,
+            role: "student",
+            photo_url: photoUrl,
+            avatar_url: photoUrl,
+          };
+          console.log("✅ Student login success:", finalData.email);
+          return done(null, finalData);
         }
 
-        // Explicitly update photo_url, avatar_url, and role to ensure they're always set
-        // This handles cases where upsert might not update existing records properly
-        // Also updates role in case admin status changed (e.g., email added to admin config)
-        // For admins, ensure student fields are NULL
-        console.log(
-          "🔄 Explicitly updating photo_url, avatar_url, and role for email:",
-          email
-        );
-        const updatePayload = {
-          photo_url: photoUrl,
-          avatar_url: photoUrl,
-          name: name, // Also update name in case it changed
-          role: role, // Update role in case admin status changed
-          updated_at: new Date().toISOString(),
-        };
-
-        // Ensure student fields are NULL for admins (both property_custodian and system_admin)
-        if (role !== "student") {
-          updatePayload.course_year_level = null;
-          updatePayload.student_number = null;
-          updatePayload.education_level = null;
+        if (["system_admin", "property_custodian", "finance_staff", "accounting_staff", "department_head"].includes(role)) {
+          const staffRow = {
+            user_id,
+            name,
+            email: normalizedEmail,
+            role,
+            status: existingProfile?.status === "inactive" ? "inactive" : "active",
+            photo_url: photoUrl,
+            avatar_url: photoUrl,
+            updated_at: new Date().toISOString(),
+          };
+          console.log("Upserting staff:", staffRow);
+          const { data: upsertData, error: upsertError } = await supabase
+            .from("staff")
+            .upsert(staffRow, { onConflict: "user_id", ignoreDuplicates: false })
+            .select()
+            .single();
+          if (upsertError) {
+            console.error("Supabase staff upsert error:", upsertError);
+            return done(upsertError);
+          }
+          const finalData = {
+            id: user_id,
+            email: normalizedEmail,
+            name,
+            role,
+            photo_url: photoUrl,
+            avatar_url: photoUrl,
+          };
+          console.log("✅ Staff login success:", finalData.email, "role:", finalData.role);
+          return done(null, finalData);
         }
 
-        const { data: updateData, error: updateError } = await supabase
-          .from("users")
-          .update(updatePayload)
-          .eq("email", email)
-          .select("id, email, name, role, photo_url, avatar_url")
-          .single();
-
-        if (updateError) {
-          console.error("❌ Supabase update error:", updateError);
-          // Don't fail the login if update fails, but log it
-          console.warn(
-            "Failed to update photo_url, but user was created/updated"
-          );
-        } else if (updateData) {
-          console.log(
-            "✅ Update successful - photo_url:",
-            updateData.photo_url
-          );
-          console.log(
-            "✅ Update successful - avatar_url:",
-            updateData.avatar_url
-          );
-        } else {
-          console.warn(
-            "⚠️ Update query returned no data (user might not exist yet)"
-          );
-        }
-
-        // Use the updated data if available, otherwise use upsert data
-        const finalData = updateData || upsertData;
-
-        if (!finalData) {
-          console.error("No data returned from Supabase");
-          return done(new Error("Failed to create/update user"));
-        }
-
-        // Ensure user_roles entry exists for this user
-        console.log(
-          "🔄 Ensuring user_roles entry exists for user:",
-          finalData.id
-        );
-        const { data: roleData, error: roleError } = await supabase
-          .from("user_roles")
-          .upsert(
-            {
-              user_id: finalData.id,
-              role: role,
-            },
-            {
-              onConflict: "user_id,role",
-              ignoreDuplicates: false,
-            }
-          )
-          .select()
-          .single();
-
-        if (roleError) {
-          console.warn("⚠️ Failed to create/update user_roles:", roleError);
-          // Don't fail login if role creation fails, but log it
-        } else {
-          console.log("✅ User role created/updated successfully:", roleData);
-        }
-
-        console.log(
-          "✅ Success - Final user data photo_url:",
-          finalData.photo_url || finalData.avatar_url || "NOT SET"
-        );
-        console.log(
-          "✅ Final user data:",
-          JSON.stringify(
-            {
-              email: finalData.email,
-              name: finalData.name,
-              photo_url: finalData.photo_url,
-              avatar_url: finalData.avatar_url,
-              role: finalData.role,
-            },
-            null,
-            2
-          )
-        );
-        return done(null, finalData);
+        return done(new Error("Invalid role after determination"));
       } catch (err) {
         console.error("Passport strategy error:", err);
         return done(err);

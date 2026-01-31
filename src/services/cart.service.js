@@ -1,22 +1,29 @@
 const supabase = require("../config/supabase");
+const { getStudentIdForUser } = require("./profileResolver.service");
 
 /**
  * Cart Service
- * Handles all cart-related business logic and database operations
+ * Handles all cart-related business logic and database operations.
+ * Uses student_id (students.id) after migration; resolves userId (JWT) to student_id.
  */
 class CartService {
+  async _resolveStudentId(userId) {
+    const studentId = await getStudentIdForUser(userId);
+    return studentId || userId;
+  }
+
   /**
    * Get all cart items for a user with inventory details
-   * @param {string} userId - User ID
+   * @param {string} userId - User ID (JWT id); resolved to students.id for cart lookup
    * @returns {Promise<Object>} Cart items with inventory details
    */
   async getCartItems(userId) {
     try {
-      // First, get cart items
+      const studentId = await this._resolveStudentId(userId);
       const { data: cartItems, error: cartError } = await supabase
         .from("cart_items")
         .select("*")
-        .eq("user_id", userId)
+        .eq("student_id", studentId)
         .order("created_at", { ascending: false });
 
       if (cartError) {
@@ -89,7 +96,7 @@ class CartService {
 
         return {
           id: item.id,
-          userId: item.user_id,
+          userId: item.student_id ?? item.user_id,
           inventoryId: item.inventory_id,
           size: item.size,
           quantity: item.quantity,
@@ -119,16 +126,16 @@ class CartService {
     try {
       const { userId, inventoryId, size, quantity } = cartData;
 
-      // Validate required fields
       if (!userId || !inventoryId || !size || !quantity) {
         throw new Error("Missing required fields");
       }
 
-      // Check if item already exists in cart
+      const studentId = await this._resolveStudentId(userId);
+
       const { data: existingItem, error: checkError } = await supabase
         .from("cart_items")
         .select("*")
-        .eq("user_id", userId)
+        .eq("student_id", studentId)
         .eq("inventory_id", inventoryId)
         .eq("size", size)
         .single();
@@ -277,10 +284,12 @@ class CartService {
         throw new Error("User ID is required");
       }
 
+      const studentId = await this._resolveStudentId(userId);
+
       const { error } = await supabase
         .from("cart_items")
         .delete()
-        .eq("user_id", userId);
+        .eq("student_id", studentId);
 
       if (error) {
         throw error;
@@ -307,10 +316,12 @@ class CartService {
         throw new Error("User ID is required");
       }
 
+      const studentId = await this._resolveStudentId(userId);
+
       const { count, error } = await supabase
         .from("cart_items")
         .select("*", { count: "exact", head: true })
-        .eq("user_id", userId);
+        .eq("student_id", studentId);
 
       if (error) {
         throw error;

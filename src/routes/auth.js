@@ -3,6 +3,7 @@ const router = express.Router();
 const passport = require("../config/passport");
 const authController = require("../controllers/auth.controller");
 const { verifyToken } = require("../middleware/auth");
+const { resolveProfile, getStudentIdForUser } = require("../services/profileResolver.service");
 
 router.get(
   "/google",
@@ -21,55 +22,28 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
     const supabase = require("../config/supabase");
     const { getMaxQuantitiesForStudent, resolveItemKey } = require("../config/itemMaxOrder");
     const tokenUser = req.user;
-    if (!tokenUser?.email) {
+    if (!tokenUser?.email && !tokenUser?.id) {
       return res.status(401).json({ message: "Invalid token: missing email", error: "invalid_token" });
     }
 
-    // Load user profile; retry with fewer columns if gender/student_type/education_level don't exist yet
-    let data = null;
-    let error = null;
-    let result = await supabase
-      .from("users")
-      .select("id, role, education_level, gender, student_type, total_item_limit, total_item_limit_set_at")
-      .eq("email", tokenUser.email)
-      .maybeSingle();
-    data = result.data;
-    error = result.error;
-
-    if (error && (String(error.message || "").toLowerCase().includes("does not exist") || String(error.message || "").toLowerCase().includes("column"))) {
-      result = await supabase
-        .from("users")
-        .select("id, role, education_level, total_item_limit, total_item_limit_set_at")
-        .eq("email", tokenUser.email)
-        .maybeSingle();
-      data = result.data;
-      error = result.error;
-    }
-    if (error && (String(error.message || "").toLowerCase().includes("does not exist") || String(error.message || "").toLowerCase().includes("column"))) {
-      result = await supabase
-        .from("users")
-        .select("id, role")
-        .eq("email", tokenUser.email)
-        .maybeSingle();
-      data = result.data;
-      error = result.error;
-    }
-
-    if (error) {
-      console.error("Max quantities: profile fetch error", error);
-      return res.status(500).json({ message: "Failed to load profile", details: error.message });
-    }
-    if (!data) {
+    const resolved = await resolveProfile(tokenUser);
+    if (!resolved) {
       return res.status(404).json({ message: "User profile not found. Please try logging in again.", error: "profile_not_found" });
     }
-
-    const role = data.role || tokenUser.role;
-    if (role !== "student") {
+    if (resolved.type !== "student" && resolved.role !== "student") {
       return res.status(403).json({
         message: "Max quantities are only available for students",
         error: "not_student",
       });
     }
+
+    const data = resolved.row;
+    const studentIdForOrders =
+      resolved.type === "student"
+        ? resolved.id
+        : resolved.role === "student"
+          ? (await getStudentIdForUser(tokenUser.id)) || tokenUser.id
+          : tokenUser.id;
 
     // Map Preschool/Prekindergarten → Kindergarten for segment lookup; use student_type from DB or default "new"
     const rawLevel = data.education_level || null;
@@ -106,8 +80,7 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
       // Still compute alreadyOrdered so the UI can disable items the user has already ordered
       const email = (tokenUser.email || "").trim();
       const orParts = [];
-      if (tokenUser.id) orParts.push(`student_id.eq.${tokenUser.id}`);
-      if (data.id && String(data.id) !== String(tokenUser.id)) orParts.push(`student_id.eq.${data.id}`);
+      if (studentIdForOrders) orParts.push(`student_id.eq.${studentIdForOrders}`);
       if (email) orParts.push(`student_email.eq.${email}`);
       let alreadyOrdered = {};
       if (orParts.length > 0) {
@@ -155,10 +128,8 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
     const placedStatuses = ["pending", "paid", "claimed", "processing", "ready", "payment_pending", "completed"];
     const email = (tokenUser.email || "").trim();
     const orParts = [];
-    if (tokenUser.id) orParts.push(`student_id.eq.${tokenUser.id}`);
-    if (data.id && String(data.id) !== String(tokenUser.id)) orParts.push(`student_id.eq.${data.id}`);
+    if (studentIdForOrders) orParts.push(`student_id.eq.${studentIdForOrders}`);
     if (email) orParts.push(`student_email.eq.${email}`);
-    // Defensive: ensure we have at least one condition when we have the user's email
     if (orParts.length === 0 && email) orParts.push(`student_email.eq.${email}`);
     let alreadyOrdered = {};
     if (orParts.length > 0) {
@@ -215,78 +186,34 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
   }
 });
 
-// Profile endpoint - returns user info from token
+// Profile endpoint - returns user info from token (students/staff first, fallback to users)
 router.get("/profile", verifyToken, async (req, res) => {
   try {
     const tokenUser = req.user; // from JWT payload
-    if (!tokenUser?.email) {
-      return res.status(401).json({ message: "Invalid token: missing email", error: "invalid_token" });
+    if (!tokenUser?.email && !tokenUser?.id) {
+      return res.status(401).json({ message: "Invalid token: missing email/id", error: "invalid_token" });
     }
-    const supabase = require("../config/supabase");
-    // Try full select first (includes gender, student_type if columns exist)
-    let data = null;
-    let error = null;
-    let result = await supabase
-      .from("users")
-      .select(
-        "email, name, role, avatar_url, photo_url, course_year_level, student_number, education_level, is_active, gender, student_type, onboarding_completed, onboarding_completed_at"
-      )
-      .eq("email", tokenUser.email)
-      .maybeSingle();
-    data = result.data;
-    error = result.error;
-
-    // If column(s) like gender/student_type don't exist yet, retry without them
-    if (error && (error.message || "").toLowerCase().includes("does not exist")) {
-      result = await supabase
-        .from("users")
-        .select(
-          "email, name, role, avatar_url, photo_url, course_year_level, student_number, education_level, is_active, onboarding_completed, onboarding_completed_at"
-        )
-        .eq("email", tokenUser.email)
-        .maybeSingle();
-      data = result.data;
-      error = result.error;
-    }
-    // If onboarding columns are missing (older DB), retry without them as well
-    if (error && (error.message || "").toLowerCase().includes("does not exist")) {
-      result = await supabase
-        .from("users")
-        .select(
-          "email, name, role, avatar_url, photo_url, course_year_level, student_number, education_level, is_active"
-        )
-        .eq("email", tokenUser.email)
-        .maybeSingle();
-      data = result.data;
-      error = result.error;
+    const resolved = await resolveProfile(tokenUser);
+    if (!resolved) {
+      return res.status(404).json({ message: "Profile not found. Please try logging in again.", error: "profile_not_found" });
     }
 
-    // Check if user is inactive
-    if (data && data.is_active === false) {
-      return res.status(403).json({ 
+    const { type, row: data, role: userRole } = resolved;
+    const isStaff = type === "staff";
+    const isInactive = type === "staff" ? data.status === "inactive" : (type === "user" && data.is_active === false);
+    if (isInactive) {
+      return res.status(403).json({
         message: "Account is inactive",
         error: "account_inactive",
-        is_active: false
+        is_active: false,
       });
     }
 
-    if (error) {
-      console.warn("Supabase profile fetch error:", error.message || error);
-    }
-
-    // Ensure email is always a string
     let emailString = tokenUser.email;
     if (typeof emailString !== "string") {
-      emailString = (
-        emailString?.email ||
-        emailString?.value ||
-        String(emailString) ||
-        ""
-      ).trim();
+      emailString = (emailString?.email || emailString?.value || String(emailString) || "").trim();
     }
-
-    const userRole = data?.role || tokenUser.role;
-    const isAdmin = userRole === "property_custodian" || userRole === "system_admin";
+    if (!emailString && data?.email) emailString = data.email;
 
     const profile = {
       id: tokenUser.id,
@@ -294,26 +221,19 @@ router.get("/profile", verifyToken, async (req, res) => {
       role: userRole,
       name: data?.name || null,
       photoURL: data?.photo_url || data?.avatar_url || null,
-      is_active: data?.is_active !== undefined ? data.is_active : true, // Default to true if not set
-      // Only include student fields for students, set to null for admins
-      courseYearLevel: isAdmin ? null : (data?.course_year_level || null),
-      studentNumber: isAdmin ? null : (data?.student_number || null),
-      educationLevel: isAdmin ? null : (data?.education_level || null),
-      gender: isAdmin ? null : (data?.gender || null),
-      studentType: isAdmin ? null : (data?.student_type || null),
-      onboardingCompleted: isAdmin ? null : (data?.onboarding_completed ?? false),
-      onboarding_completed: isAdmin ? null : (data?.onboarding_completed ?? false),
-      onboardingCompletedAt: isAdmin ? null : (data?.onboarding_completed_at ?? null),
-      onboarding_completed_at: isAdmin ? null : (data?.onboarding_completed_at ?? null),
+      is_active: type === "staff" ? data?.status !== "inactive" : (data?.is_active !== false),
+      courseYearLevel: isStaff ? null : (data?.course_year_level || null),
+      studentNumber: isStaff ? null : (data?.student_number || null),
+      educationLevel: isStaff ? null : (data?.education_level || null),
+      gender: isStaff ? null : (data?.gender || null),
+      studentType: isStaff ? null : (data?.student_type || null),
+      onboardingCompleted: isStaff ? null : (data?.onboarding_completed ?? false),
+      onboarding_completed: isStaff ? null : (data?.onboarding_completed ?? false),
+      onboardingCompletedAt: isStaff ? null : (data?.onboarding_completed_at ?? null),
+      onboarding_completed_at: isStaff ? null : (data?.onboarding_completed_at ?? null),
     };
 
-    // Debug logging to verify photo URL is being returned
-    console.log("📸 Profile endpoint - Returning profile data:");
-    console.log("  - photo_url from DB:", data?.photo_url);
-    console.log("  - avatar_url from DB:", data?.avatar_url);
-    console.log("  - photoURL in response:", profile.photoURL);
-    console.log("  - user role:", userRole, "isAdmin:", isAdmin);
-
+    console.log("📸 Profile endpoint - source:", type, "role:", userRole);
     return res.json(profile);
   } catch (err) {
     console.error("Profile GET endpoint error:", err?.message || err);
@@ -344,14 +264,15 @@ router.post("/profile/upload-image", verifyToken, async (req, res) => {
     } = require("../services/cloudinary.service");
     const supabase = require("../config/supabase");
 
-    // Get user's current photo URL to delete old image
-    const { data: userData } = await supabase
-      .from("users")
-      .select("photo_url")
-      .eq("email", tokenUser.email)
-      .maybeSingle();
-
-    const oldPhotoUrl = userData?.photo_url;
+    const resolved = await resolveProfile(tokenUser);
+    let oldPhotoUrl = null;
+    if (resolved?.type === "student") {
+      const { data: row } = await supabase.from("students").select("photo_url").eq("id", resolved.id).maybeSingle();
+      oldPhotoUrl = row?.photo_url;
+    } else if (resolved?.type === "staff") {
+      const { data: row } = await supabase.from("staff").select("photo_url").eq("id", resolved.id).maybeSingle();
+      oldPhotoUrl = row?.photo_url;
+    }
 
     // Upload image to Cloudinary
     console.log(`📤 Uploading profile image for user: ${tokenUser.email}`);
@@ -402,47 +323,24 @@ function normalizeGender(value) {
   return s; // already "Male"/"Female" or invalid (DB will reject)
 }
 
-// Update profile endpoint - updates user profile information
+// Update profile endpoint - updates user profile (students/staff first, fallback to users)
 router.put("/profile", verifyToken, async (req, res) => {
   try {
-    const tokenUser = req.user; // from JWT payload
-    if (!tokenUser?.email) {
+    const tokenUser = req.user;
+    if (!tokenUser?.email && !tokenUser?.id) {
       return res.status(401).json({ message: "Invalid token: missing email", error: "invalid_token" });
     }
     const supabase = require("../config/supabase");
     const { name, photoURL, courseYearLevel, studentNumber, educationLevel, gender, studentType } =
       req.body;
 
-    // Load current user (needed for role + onboarding completion checks).
-    // Retry with fewer columns if some optional columns don't exist yet.
-    let currentUser = null;
-    {
-      let cur = await supabase
-        .from("users")
-        .select(
-          "role, course_year_level, student_number, education_level, gender, student_type, onboarding_completed, onboarding_completed_at"
-        )
-        .eq("email", tokenUser.email)
-        .maybeSingle();
-      if (cur.error && (String(cur.error.message || "").toLowerCase().includes("does not exist") || String(cur.error.message || "").toLowerCase().includes("column"))) {
-        cur = await supabase
-          .from("users")
-          .select("role, course_year_level, student_number, education_level, onboarding_completed, onboarding_completed_at")
-          .eq("email", tokenUser.email)
-          .maybeSingle();
-      }
-      if (cur.error && (String(cur.error.message || "").toLowerCase().includes("does not exist") || String(cur.error.message || "").toLowerCase().includes("column"))) {
-        cur = await supabase
-          .from("users")
-          .select("role, course_year_level, student_number, education_level")
-          .eq("email", tokenUser.email)
-          .maybeSingle();
-      }
-      currentUser = cur.data || null;
+    const resolved = await resolveProfile(tokenUser);
+    if (!resolved) {
+      return res.status(404).json({ message: "Profile not found", error: "profile_not_found" });
     }
-
-    const userRole = currentUser?.role || tokenUser.role;
-    const isAdmin = userRole === "property_custodian" || userRole === "system_admin";
+    const currentUser = resolved.row;
+    const userRole = resolved.role;
+    const isAdmin = resolved.type === "staff" || ["property_custodian", "system_admin"].includes(userRole);
 
     // Prepare update data (core fields that exist on all schemas)
     const updateData = {
@@ -509,95 +407,29 @@ router.put("/profile", verifyToken, async (req, res) => {
     // Normalize gender for DB constraint (Male/Female)
     const genderValue = gender !== undefined ? normalizeGender(gender) : undefined;
 
-    // Try update with optional gender/student_type if not admin (columns may not exist yet)
     let data = null;
     let error = null;
-
     const isColumnError = (e) =>
       e && (String(e.message || "").toLowerCase().includes("does not exist") || String(e.message || "").toLowerCase().includes("column"));
 
-    if (!isAdmin && (genderValue !== undefined || studentType !== undefined)) {
-      const updateWithOptional = { ...updateData };
-      if (genderValue !== undefined) updateWithOptional.gender = genderValue;
-      if (studentType !== undefined) updateWithOptional.student_type = studentType === null || studentType === "" ? null : studentType;
-      const selectOptional = [selectCore];
-      if (genderValue !== undefined) selectOptional.push("gender");
-      if (studentType !== undefined) selectOptional.push("student_type");
+    if (resolved.type === "student") {
+      const studentUpdate = { ...updateData };
+      if (genderValue !== undefined) studentUpdate.gender = genderValue;
+      if (studentType !== undefined) studentUpdate.student_type = studentType === null || studentType === "" ? null : studentType;
       const result = await supabase
-        .from("users")
-        .update(updateWithOptional)
-        .eq("email", tokenUser.email)
-        .select(selectOptional.join(", "))
+        .from("students")
+        .update(studentUpdate)
+        .eq("id", resolved.id)
+        .select()
         .maybeSingle();
       data = result.data;
       error = result.error;
-    }
-
-    if (error && isColumnError(error)) {
-      const fallbackUpdate = { ...updateData };
-      if (genderValue !== undefined) fallbackUpdate.gender = genderValue;
-      const fallbackSelect = Object.keys(fallbackUpdate).includes("gender") ? `${selectCore}, gender` : selectCore;
-      const fallback = await supabase
-        .from("users")
-        .update(fallbackUpdate)
-        .eq("email", tokenUser.email)
-        .select(fallbackSelect)
-        .maybeSingle();
-      data = fallback.data;
-      error = fallback.error;
-    }
-
-    if (error && isColumnError(error)) {
-      const minimalUpdate = {
-        updated_at: new Date().toISOString(),
-      };
-      if (name && typeof name === "string" && name.trim().length > 0) minimalUpdate.name = name.trim();
-      if (photoURL) {
-        minimalUpdate.photo_url = photoURL;
-        minimalUpdate.avatar_url = photoURL;
-      }
-      if (!isAdmin) {
-        if (courseYearLevel !== undefined) minimalUpdate.course_year_level = courseYearLevel;
-        if (studentNumber !== undefined) minimalUpdate.student_number = studentNumber;
-        if (educationLevel !== undefined) minimalUpdate.education_level = educationLevel;
-      }
-      const minimalSelect = "email, name, role, avatar_url, photo_url, course_year_level, student_number, education_level";
-      const minimal = await supabase
-        .from("users")
-        .update(minimalUpdate)
-        .eq("email", tokenUser.email)
-        .select(minimalSelect)
-        .maybeSingle();
-      data = minimal.data;
-      error = minimal.error;
-    }
-
-    if (error && isColumnError(error)) {
-      const coreUpdate = {
-        updated_at: new Date().toISOString(),
-      };
-      if (name && typeof name === "string" && name.trim().length > 0) coreUpdate.name = name.trim();
-      if (photoURL) {
-        coreUpdate.photo_url = photoURL;
-        coreUpdate.avatar_url = photoURL;
-      }
-      const coreSelect = "email, name, role, avatar_url, photo_url";
-      const core = await supabase
-        .from("users")
-        .update(coreUpdate)
-        .eq("email", tokenUser.email)
-        .select(coreSelect)
-        .maybeSingle();
-      data = core.data;
-      error = core.error;
-    }
-
-    if (!data && !error) {
+    } else if (resolved.type === "staff") {
       const result = await supabase
-        .from("users")
+        .from("staff")
         .update(updateData)
-        .eq("email", tokenUser.email)
-        .select(selectCore)
+        .eq("id", resolved.id)
+        .select()
         .maybeSingle();
       data = result.data;
       error = result.error;
@@ -617,8 +449,8 @@ router.put("/profile", verifyToken, async (req, res) => {
 
     const profile = {
       id: tokenUser.id,
-      email: data.email,
-      role: data.role,
+      email: data.email || tokenUser.email,
+      role: data.role ?? userRole,
       name: data.name,
       photoURL: data.photo_url || data.avatar_url,
       courseYearLevel: isAdmin ? null : (data.course_year_level || null),
@@ -643,57 +475,34 @@ router.put("/profile", verifyToken, async (req, res) => {
   }
 });
 
-// Refresh profile picture endpoint - updates profile picture for existing users
+// Refresh profile picture endpoint - updates profile picture for students/staff
 router.post("/profile/refresh-picture", verifyToken, async (req, res) => {
   try {
     const supabase = require("../config/supabase");
-    const { getProfilePictureUrl } = require("../utils/avatarGenerator");
-    const tokenUser = req.user; // from JWT payload
+    const { resolveProfile } = require("../services/profileResolver.service");
+    const tokenUser = req.user;
 
-    // Get user's current data from database
-    const { data: userData, error: fetchError } = await supabase
-      .from("users")
-      .select("email, name, provider_id")
-      .eq("email", tokenUser.email)
-      .maybeSingle();
-
-    if (fetchError) {
-      console.error("Error fetching user data:", fetchError);
-      return res.status(500).json({
-        message: "Failed to fetch user data",
-        details: fetchError.message,
-      });
-    }
-
-    if (!userData) {
+    const resolved = await resolveProfile(tokenUser);
+    if (!resolved) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // Since we can't get the full Google profile here, we'll use the Google API
-    // to fetch the user's profile picture. However, we need the access token.
-    // For now, we'll check if there's a photo_url and if not, generate initials avatar.
-
-    // If user has a provider_id (Google ID), we can construct the photo URL
-    // Google profile pictures follow this pattern: https://lh3.googleusercontent.com/a/{provider_id}
-    // But the actual URL from Google OAuth is more complex, so we'll generate initials if missing
-
-    let photoUrl = userData.photo_url || userData.avatar_url;
-
-    // If no photo exists, generate initials-based avatar
+    const current = resolved.row;
+    let photoUrl = current.photo_url || current.avatar_url;
     if (!photoUrl) {
       const { generateInitialsAvatar } = require("../utils/avatarGenerator");
-      photoUrl = generateInitialsAvatar(userData.name || userData.email);
+      photoUrl = generateInitialsAvatar(current.name || current.email);
     }
 
-    // Update the user's photo_url and avatar_url
+    const table = resolved.type === "student" ? "students" : "staff";
     const { data: updatedUser, error: updateError } = await supabase
-      .from("users")
+      .from(table)
       .update({
         photo_url: photoUrl,
         avatar_url: photoUrl,
         updated_at: new Date().toISOString(),
       })
-      .eq("email", tokenUser.email)
+      .eq("id", resolved.id)
       .select("email, name, photo_url, avatar_url")
       .single();
 

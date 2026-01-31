@@ -61,9 +61,10 @@ CREATE POLICY "Property custodians can view all transactions"
   FOR SELECT
   USING (
     EXISTS (
-      SELECT 1 FROM users
-      WHERE users.id = auth.uid()::uuid
-      AND users.role = 'property_custodian'
+      SELECT 1 FROM staff
+      WHERE staff.user_id = auth.uid()::uuid
+      AND staff.role = 'property_custodian'
+      AND staff.status = 'active'
     )
   );
 

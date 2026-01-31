@@ -33,36 +33,39 @@ exports.oauthCallback = async (req, res) => {
 
     const normalizedEmail = String(email).toLowerCase();
 
-    // First, check if user exists in database (manually created by admin)
-    // This allows users with any email domain to log in if they were manually added
+    // First, check if user exists in students or staff (by email)
     let existingUser = null;
     let role = null;
     try {
-      const { data: userData, error: userError } = await supabase
-        .from("users")
-        .select("id, email, role, is_active")
+      const { data: studentRow } = await supabase
+        .from("students")
+        .select("id, user_id, email, role")
         .eq("email", normalizedEmail)
-        .single();
-
-      if (!userError && userData) {
-        existingUser = userData;
-        if (userData.is_active === false) {
-          // User exists but is inactive
-          const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
-          const redirectUrl = `${FRONTEND_URL.replace(
-            /\/$/,
-            ""
-          )}/auth/callback?error=account_inactive&email=${encodeURIComponent(
-            email
-          )}`;
-          return res.redirect(302, redirectUrl);
+        .maybeSingle();
+      if (studentRow) {
+        existingUser = { id: studentRow.user_id, email: studentRow.email, role: "student" };
+        role = "student";
+        console.log("✅ Found existing student in database");
+      }
+      if (!existingUser) {
+        const { data: staffRow } = await supabase
+          .from("staff")
+          .select("id, user_id, email, role, status")
+          .eq("email", normalizedEmail)
+          .maybeSingle();
+        if (staffRow) {
+          existingUser = { id: staffRow.user_id, email: staffRow.email, role: staffRow.role };
+          role = staffRow.role;
+          if (staffRow.status === "inactive") {
+            const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+            const redirectUrl = `${FRONTEND_URL.replace(/\/$/, "")}/auth/callback?error=account_inactive&email=${encodeURIComponent(email)}`;
+            return res.redirect(302, redirectUrl);
+          }
+          console.log(`✅ Found existing staff in database with role: ${role}`);
         }
-        // Use existing role from database
-        role = userData.role;
-        console.log(`✅ Found existing user in database with role: ${role}`);
       }
     } catch (error) {
-      console.warn("Error checking existing user in database:", error.message);
+      console.warn("Error checking existing profile in database:", error.message);
     }
 
     // STEP 2: If no existing user found, check email_role_assignments table (system admin assigned roles)

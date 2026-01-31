@@ -197,16 +197,16 @@ CREATE POLICY "Public read active items"
   ON items FOR SELECT
   USING (is_active = true);
 
--- Policy: Allow authenticated property custodian users full access
+-- Policy: Allow authenticated staff (property_custodian, system_admin) full access
 CREATE POLICY "Property Custodian full access to items"
   ON items FOR ALL
   USING (
     auth.role() = 'authenticated' AND
     EXISTS (
-      SELECT 1 FROM users
-      WHERE users.id = auth.uid()
-      AND users.role IN ('property_custodian', 'system_admin')
-      AND users.is_active = true
+      SELECT 1 FROM staff
+      WHERE staff.user_id = auth.uid()
+      AND staff.role IN ('property_custodian', 'system_admin')
+      AND staff.status = 'active'
     )
   );
 

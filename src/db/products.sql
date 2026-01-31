@@ -65,7 +65,7 @@ create policy "Enable all access for authenticated users with property custodian
   using (
     auth.role() = 'authenticated' 
     and auth.uid() in (
-      select user_id from user_roles where role IN ('property_custodian', 'system_admin')
+      select user_id from staff where role IN ('property_custodian', 'system_admin') and status = 'active'
     )
   );
 

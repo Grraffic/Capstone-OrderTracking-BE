@@ -1,6 +1,7 @@
 const supabase = require("../../config/supabase");
 const { generateOrderReceiptQRData } = require("../../utils/qrCodeGenerator");
 const { getMaxQuantityForItem, normalizeItemName, resolveItemKey } = require("../../config/itemMaxOrder");
+const { getStudentRowById } = require("../profileResolver.service");
 const isProduction = process.env.NODE_ENV === "production";
 
 /**
@@ -121,38 +122,39 @@ class OrderService {
         const studentIds = [...new Set(data.filter(o => o.student_id).map(o => o.student_id))];
         const studentEmails = [...new Set(data.filter(o => o.student_email).map(o => o.student_email))];
         
-        // Batch fetch users by ID and email in parallel
-        const [usersByIdResult, usersByEmailResult] = await Promise.all([
+        // Batch fetch students by ID and email (after migration orders.student_id = students.id)
+        const [studentsByIdResult, studentsByEmailResult] = await Promise.all([
           studentIds.length > 0
-            ? supabase
-                .from("users")
-                .select("id, photo_url, avatar_url, name, email")
-                .in("id", studentIds)
+            ? supabase.from("students").select("id, name, email").in("id", studentIds)
             : Promise.resolve({ data: [], error: null }),
           studentEmails.length > 0
-            ? supabase
-                .from("users")
-                .select("id, email, photo_url, avatar_url, name")
-                .in("email", studentEmails)
+            ? supabase.from("students").select("id, email, name").in("email", studentEmails)
             : Promise.resolve({ data: [], error: null }),
         ]);
-        
-        // Create lookup maps
         const userMapById = {};
         const userMapByEmail = {};
-        
-        if (usersByIdResult.data) {
-          usersByIdResult.data.forEach(u => userMapById[u.id] = u);
+        if (studentsByIdResult.data) {
+          studentsByIdResult.data.forEach((u) => {
+            userMapById[u.id] = { ...u, photo_url: null, avatar_url: null };
+          });
         }
-        
-        if (usersByEmailResult.data) {
-          usersByEmailResult.data.forEach(u => userMapByEmail[u.email] = u);
+        if (studentsByEmailResult.data) {
+          studentsByEmailResult.data.forEach((u) => {
+            userMapByEmail[u.email] = { ...u, photo_url: null, avatar_url: null };
+          });
         }
-        
-        // Map orders with student data (prefer ID match, fallback to email)
-        enhancedData = data.map(order => ({
+        // Fallback: legacy orders may have user id in student_id before full migration
+        const missingIds = studentIds.filter((id) => !userMapById[id]);
+        if (missingIds.length > 0) {
+          const { data: usersData } = await supabase
+            .from("users")
+            .select("id, photo_url, avatar_url, name, email")
+            .in("id", missingIds);
+          if (usersData) usersData.forEach((u) => (userMapById[u.id] = u));
+        }
+        enhancedData = data.map((order) => ({
           ...order,
-          student_data: userMapById[order.student_id] || userMapByEmail[order.student_email] || null
+          student_data: userMapById[order.student_id] || userMapByEmail[order.student_email] || null,
         }));
       }
 
@@ -205,29 +207,37 @@ class OrderService {
         student_id: data.student_id 
       });
 
-      // Attach student data
+      // Attach student data (students table first, fallback to users)
       let enhancedOrder = data;
       if (data.student_id) {
-        // Try precise match by ID first
-        const { data: user, error: userError } = await supabase
-          .from("users")
-          .select("id, photo_url, avatar_url, name, email")
-          .eq("id", data.student_id)
-          .maybeSingle();
-          
-        if (user) {
-          enhancedOrder = { ...data, student_data: user };
+        const studentRow = await getStudentRowById(data.student_id);
+        if (studentRow) {
+          enhancedOrder = {
+            ...data,
+            student_data: {
+              id: studentRow.id,
+              name: studentRow.name,
+              email: studentRow.email,
+              photo_url: null,
+              avatar_url: null,
+            },
+          };
         } else {
-           // Fallback to email match
-           const { data: userByEmail } = await supabase
+          const { data: user } = await supabase
             .from("users")
             .select("id, photo_url, avatar_url, name, email")
-            .eq("email", data.student_email)
+            .eq("id", data.student_id)
             .maybeSingle();
-            
-           if (userByEmail) {
-             enhancedOrder = { ...data, student_data: userByEmail };
-           }
+          if (user) {
+            enhancedOrder = { ...data, student_data: user };
+          } else {
+            const { data: userByEmail } = await supabase
+              .from("users")
+              .select("id, photo_url, avatar_url, name, email")
+              .eq("email", data.student_email)
+              .maybeSingle();
+            if (userByEmail) enhancedOrder = { ...data, student_data: userByEmail };
+          }
         }
       }
 
@@ -258,29 +268,36 @@ class OrderService {
       if (error) throw error;
       if (!data) throw new Error("Order not found");
 
-      // Attach student data
+      // Attach student data (students table first, fallback to users)
       let enhancedOrder = data;
       if (data.student_id) {
-        // Try precise match by ID first
-        const { data: user, error: userError } = await supabase
-          .from("users")
-          .select("id, photo_url, avatar_url, name, email")
-          .eq("id", data.student_id)
-          .maybeSingle();
-          
-        if (user) {
-          enhancedOrder = { ...data, student_data: user };
+        const studentRow = await getStudentRowById(data.student_id);
+        if (studentRow) {
+          enhancedOrder = {
+            ...data,
+            student_data: {
+              id: studentRow.id,
+              name: studentRow.name,
+              email: studentRow.email,
+              photo_url: null,
+              avatar_url: null,
+            },
+          };
         } else {
-           // Fallback to email match
-           const { data: userByEmail } = await supabase
+          const { data: user } = await supabase
             .from("users")
             .select("id, photo_url, avatar_url, name, email")
-            .eq("email", data.student_email)
+            .eq("id", data.student_id)
             .maybeSingle();
-            
-           if (userByEmail) {
-             enhancedOrder = { ...data, student_data: userByEmail };
-           }
+          if (user) enhancedOrder = { ...data, student_data: user };
+          else {
+            const { data: userByEmail } = await supabase
+              .from("users")
+              .select("id, photo_url, avatar_url, name, email")
+              .eq("email", data.student_email)
+              .maybeSingle();
+            if (userByEmail) enhancedOrder = { ...data, student_data: userByEmail };
+          }
         }
       }
 
@@ -327,16 +344,31 @@ class OrderService {
         throw new Error("Order must contain at least one item");
       }
 
-      // Enforce system-admin limits: total_item_limit and order_lockout_period
+      // Enforce system-admin limits: total_item_limit and order_lockout_period (students table first)
       const studentId = orderData.student_id || null;
       const studentEmail = (orderData.student_email || "").trim();
+      let userRow = null;
+      let userErr = null;
       if (studentId || studentEmail) {
         const userFields =
           "total_item_limit, total_item_limit_set_at, order_lockout_period, order_lockout_unit, education_level, student_type, gender";
-        const userQuery = studentId
-          ? supabase.from("users").select(userFields).eq("id", studentId).maybeSingle()
-          : supabase.from("users").select("id, " + userFields).eq("email", studentEmail).maybeSingle();
-        const { data: userRow, error: userErr } = await userQuery;
+        if (studentId) {
+          userRow = await getStudentRowById(studentId);
+          if (!userRow) {
+            const r = await supabase.from("users").select(userFields).eq("id", studentId).maybeSingle();
+            userRow = r.data;
+            userErr = r.error;
+          }
+        } else {
+          const r = await supabase.from("students").select(userFields).eq("email", studentEmail).maybeSingle();
+          userRow = r.data;
+          userErr = r.error;
+          if (!userRow) {
+            const r2 = await supabase.from("users").select("id, " + userFields).eq("email", studentEmail).maybeSingle();
+            userRow = r2.data;
+            userErr = r2.error;
+          }
+        }
         if (!userErr && userRow) {
           const rawMaxItems = userRow.total_item_limit;
           const studentType = (userRow.student_type || "new").toLowerCase();
@@ -1020,28 +1052,33 @@ class OrderService {
     if (!studentId && !studentEmail) return;
     const strikesBeforeBlock = OrderService.UNCLAIMED_VOID_STRIKES_BEFORE_BLOCK;
     try {
-      let userId = studentId;
-      if (!userId && studentEmail) {
-        const { data: user, error: findErr } = await supabase
-          .from("users")
-          .select("id")
-          .eq("email", studentEmail)
-          .maybeSingle();
-        if (findErr || !user) {
-          if (findErr) console.error("incrementVoidStrikeAndBlockIfNeeded: lookup by email failed", findErr);
-          return;
+      let targetId = studentId;
+      let table = "students";
+      if (!targetId && studentEmail) {
+        const { data: studentRow } = await supabase.from("students").select("id").eq("email", studentEmail).maybeSingle();
+        if (studentRow) {
+          targetId = studentRow.id;
+          table = "students";
+        } else {
+          const { data: user } = await supabase.from("users").select("id").eq("email", studentEmail).maybeSingle();
+          if (user) {
+            targetId = user.id;
+            table = "users";
+          }
         }
-        userId = user.id;
+      } else if (targetId) {
+        const studentRow = await getStudentRowById(targetId);
+        if (!studentRow) table = "users";
       }
-      if (!userId) return;
+      if (!targetId) return;
 
       const { data: row, error: fetchErr } = await supabase
-        .from("users")
+        .from(table)
         .select("unclaimed_void_count")
-        .eq("id", userId)
+        .eq("id", targetId)
         .single();
       if (fetchErr) {
-        console.error("incrementVoidStrikeAndBlockIfNeeded: fetch unclaimed_void_count failed", fetchErr);
+        console.error("incrementVoidStrikeAndBlockIfNeeded: fetch failed", fetchErr);
         return;
       }
       const current = Number(row?.unclaimed_void_count) || 0;
@@ -1053,13 +1090,8 @@ class OrderService {
       if (newCount >= strikesBeforeBlock) {
         updatePayload.total_item_limit = 0;
       }
-      const { error } = await supabase
-        .from("users")
-        .update(updatePayload)
-        .eq("id", userId);
-      if (error) {
-        console.error("incrementVoidStrikeAndBlockIfNeeded: update failed", error);
-      }
+      const { error } = await supabase.from(table).update(updatePayload).eq("id", targetId);
+      if (error) console.error("incrementVoidStrikeAndBlockIfNeeded: update failed", error);
     } catch (err) {
       console.error("incrementVoidStrikeAndBlockIfNeeded:", err);
     }

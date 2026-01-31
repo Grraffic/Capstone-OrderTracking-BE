@@ -88,37 +88,22 @@ function requireRole(requiredRoles) {
       try {
         const userId = req.user.id;
         const userEmail = req.user.email;
-        
+        const { getProfileByUserId, getProfileByEmail } = require("../services/profileResolver.service");
+
         let userData = null;
-        
-        // Try to fetch by ID first
-        if (userId) {
-          const { data, error } = await supabase
-            .from("users")
-            .select("role")
-            .eq("id", userId)
-            .single();
-          
-          if (!error && data) {
-            userData = data;
-            console.log("[Auth Middleware] ✅ Found user by ID:", { userId, role: data.role });
-          }
+
+        const byId = await getProfileByUserId(userId);
+        if (byId) {
+          userData = { role: byId.type === "staff" ? byId.row.role : "student" };
+          console.log("[Auth Middleware] ✅ Found profile by ID (students/staff):", { userId, role: userData.role });
         }
-        
-        // If not found by ID, try email
         if (!userData && userEmail) {
-          const { data, error } = await supabase
-            .from("users")
-            .select("role")
-            .eq("email", userEmail)
-            .single();
-          
-          if (!error && data) {
-            userData = data;
-            console.log("[Auth Middleware] ✅ Found user by email:", { email: userEmail, role: data.role });
+          const byEmail = await getProfileByEmail(userEmail);
+          if (byEmail) {
+            userData = { role: byEmail.type === "staff" ? byEmail.row.role : "student" };
+            console.log("[Auth Middleware] ✅ Found profile by email (students/staff):", { email: userEmail, role: userData.role });
           }
         }
-        
         if (userData && userData.role) {
           const dbRole = userData.role;
           const normalizedDbRole = normalizeRole(dbRole);

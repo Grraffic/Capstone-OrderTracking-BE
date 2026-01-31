@@ -77,10 +77,10 @@ CREATE POLICY "System Admin full access to item eligibility"
   USING (
     auth.role() = 'authenticated' AND
     EXISTS (
-      SELECT 1 FROM users
-      WHERE users.id = auth.uid()
-      AND users.role = 'system_admin'
-      AND users.is_active = true
+      SELECT 1 FROM staff
+      WHERE staff.user_id = auth.uid()
+      AND staff.role = 'system_admin'
+      AND staff.status = 'active'
     )
   );
 

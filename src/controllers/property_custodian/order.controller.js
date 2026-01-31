@@ -1,4 +1,5 @@
 const OrderService = require("../../services/property_custodian/order.service");
+const { getStudentIdForUser } = require("../../services/profileResolver.service");
 
 /**
  * Order Controller
@@ -99,10 +100,12 @@ class OrderController {
   async createOrder(req, res) {
     try {
       const io = req.app.get("io");
-      // Always set student identity from JWT when authenticated so "already ordered"
-      // (GET /auth/max-quantities) matches the same id/email
+      // Set student identity: use students.id when available (after migration), else users.id
       if (req.user) {
-        if (req.user.id) req.body.student_id = req.user.id;
+        if (req.user.id) {
+          const studentId = await getStudentIdForUser(req.user.id);
+          req.body.student_id = studentId || req.user.id;
+        }
         if (req.user.email) req.body.student_email = req.user.email;
       }
       const result = await OrderService.createOrder(req.body, io);
