@@ -1,5 +1,6 @@
 const OrderService = require("../../services/property_custodian/order.service");
 const { getStudentIdForUser } = require("../../services/profileResolver.service");
+const NotificationService = require("../../services/notification.service");
 
 /**
  * Order Controller
@@ -219,15 +220,41 @@ class OrderController {
         });
         console.log(`📡 Socket.IO: Emitted order:updated for order ${id}`);
 
-        // If status is "claimed", emit a specific event for activity tracking
+        // If status is "claimed", emit a specific event for activity tracking and create notification
         if (status === "claimed" && result.data) {
+          const orderData = result.data;
+          const studentId = orderData.student_id;
+          
+          // Create notification for the student
+          try {
+            const itemNames = (orderData.items || [])
+              .map(item => item.name)
+              .filter(Boolean)
+              .join(", ");
+            const itemCount = (orderData.items || []).length;
+            
+            await NotificationService.createOrderClaimedNotification({
+              studentId: studentId,
+              orderNumber: orderData.order_number,
+              orderId: orderData.id,
+              items: orderData.items || [],
+              itemNames: itemNames || "your items",
+              itemCount: itemCount,
+            });
+            console.log(`✅ Notification created for claimed order ${orderData.order_number}`);
+          } catch (notifError) {
+            console.error("Failed to create notification for claimed order:", notifError);
+            // Don't fail the order update if notification creation fails
+          }
+
+          // Emit order:claimed event for activity tracking
           io.emit("order:claimed", {
-            orderId: result.data.id,
-            orderNumber: result.data.order_number,
-            userId: result.data.student_id, // Use student_id from database
-            items: result.data.items,
+            orderId: orderData.id,
+            orderNumber: orderData.order_number,
+            userId: studentId, // Use student_id from database
+            items: orderData.items,
           });
-          console.log(`📡 Socket.IO: Emitted order:claimed for order ${result.data.order_number} to student ${result.data.student_id}`);
+          console.log(`📡 Socket.IO: Emitted order:claimed for order ${orderData.order_number} to student ${studentId}`);
         }
       }
 

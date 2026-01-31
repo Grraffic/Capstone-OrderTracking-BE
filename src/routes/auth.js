@@ -84,7 +84,8 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
       if (email) orParts.push(`student_email.eq.${email}`);
       let alreadyOrdered = {};
       if (orParts.length > 0) {
-        const placedStatusesIncomplete = ["pending", "paid", "claimed", "processing", "ready", "payment_pending", "completed"];
+        // Only count active orders - NOT claimed/completed orders
+        const placedStatusesIncomplete = ["pending", "paid", "processing", "ready", "payment_pending"];
         let ordersQuery = supabase
           .from("orders")
           .select("items, created_at")
@@ -113,10 +114,49 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
           }
         }
       }
+      
+      // Query for claimed/completed orders separately to track permanently disabled items
+      let claimedItems = {};
+      if (orParts.length > 0) {
+        const claimedStatuses = ["claimed", "completed"];
+        const claimedOrdersQuery = supabase
+          .from("orders")
+          .select("items, created_at")
+          .eq("is_active", true)
+          .in("status", claimedStatuses)
+          .or(orParts.join(","));
+        
+        // Only count orders created AFTER total_item_limit_set_at (if it exists)
+        if (data.total_item_limit_set_at) {
+          claimedOrdersQuery.gte("created_at", data.total_item_limit_set_at);
+        }
+        
+        const { data: claimedOrders, error: claimedErr } = await claimedOrdersQuery;
+        if (claimedErr) {
+          console.error("Max quantities: claimed orders query error", claimedErr);
+        }
+        for (const row of claimedOrders || []) {
+          const orderItems = Array.isArray(row.items) ? row.items : [];
+          for (const it of orderItems) {
+            const rawName = (it.name || "").trim();
+            let key = resolveItemKey(rawName);
+            if (!key && rawName) {
+              const lower = rawName.toLowerCase();
+              if (lower.includes("jogging pants")) key = "jogging pants";
+              if (lower.includes("logo patch")) key = "logo patch";
+            }
+            if (key && typeof key === "string" && key.toLowerCase().includes("logo patch")) key = "logo patch";
+            if (!key) continue;
+            claimedItems[key] = (claimedItems[key] || 0) + (Number(it.quantity) || 0);
+          }
+        }
+      }
+      
       const slotsUsedFromPlacedOrders = Object.keys(alreadyOrdered).length;
       return res.status(200).json({
         maxQuantities: maxQuantitiesNoGender,
         alreadyOrdered,
+        claimedItems,
         profileIncomplete: true,
         message: "Complete your profile (gender) to see order limits.",
         totalItemLimit: effectiveTotalItemLimit ?? null,
@@ -131,9 +171,10 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
     );
 
     // Sum quantities per item from this student's placed orders.
-    // Include all statuses that appear in the student's "Orders" and "Claimed" tabs so "already ordered" matches what they see.
+    // Only count active orders (pending, processing, ready, etc.) - NOT claimed/completed orders.
+    // Once an order is claimed/completed, the student should be able to order that item again.
     // IMPORTANT: Only count orders created AFTER total_item_limit_set_at to give students a fresh slate when limit is updated.
-    const placedStatuses = ["pending", "paid", "claimed", "processing", "ready", "payment_pending", "completed"];
+    const placedStatuses = ["pending", "paid", "processing", "ready", "payment_pending"];
     const email = (tokenUser.email || "").trim();
     const orParts = [];
     if (studentIdForOrders) orParts.push(`student_id.eq.${studentIdForOrders}`);
@@ -183,6 +224,50 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
       }
     }
 
+    // Query for claimed/completed orders separately to track permanently disabled items
+    let claimedItems = {};
+    if (orParts.length > 0) {
+      const claimedStatuses = ["claimed", "completed"];
+      const orFilter = orParts.join(",");
+      let claimedOrdersQuery = supabase
+        .from("orders")
+        .select("items, created_at")
+        .eq("is_active", true)
+        .in("status", claimedStatuses)
+        .or(orFilter);
+      
+      // Only count orders created AFTER total_item_limit_set_at (if it exists)
+      if (data.total_item_limit_set_at) {
+        claimedOrdersQuery = claimedOrdersQuery.gte("created_at", data.total_item_limit_set_at);
+      }
+      
+      const { data: claimedOrders, error: claimedErr } = await claimedOrdersQuery;
+      if (claimedErr) {
+        console.error("Max quantities: claimed orders query error", claimedErr);
+      }
+      for (const row of claimedOrders || []) {
+        const orderItems = Array.isArray(row.items) ? row.items : [];
+        for (const it of orderItems) {
+          const rawName = (it.name || "").trim();
+          let key = resolveItemKey(rawName);
+          if (!key && rawName) {
+            const lower = rawName.toLowerCase();
+            if (lower.includes("jogging pants")) key = "jogging pants";
+            if (lower.includes("logo patch")) key = "logo patch";
+          }
+          if (key && typeof key === "string" && key.toLowerCase().includes("logo patch")) key = "logo patch";
+          if (!key) continue;
+          claimedItems[key] = (claimedItems[key] || 0) + (Number(it.quantity) || 0);
+        }
+      }
+      // Debug: confirm claimed orders are included in claimedItems
+      const claimedOrderCount = claimedOrders?.length ?? 0;
+      const claimedKeys = Object.keys(claimedItems);
+      if (claimedOrderCount > 0 || claimedKeys.length > 0) {
+        console.log("Max quantities: claimedItems from", claimedOrderCount, "claimed order(s) -> keys:", claimedKeys.join(", ") || "(none)");
+      }
+    }
+
     const slotsUsedFromPlacedOrders = Object.keys(alreadyOrdered || {}).length;
 
     // Voided = total_item_limit set to 0 by auto-void (unclaimed). Only block if they also have placed orders
@@ -193,6 +278,7 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
     return res.json({
       maxQuantities,
       alreadyOrdered,
+      claimedItems,
       totalItemLimit: blockedDueToVoid ? 0 : (effectiveTotalItemLimit ?? null),
       slotsUsedFromPlacedOrders,
       blockedDueToVoid,

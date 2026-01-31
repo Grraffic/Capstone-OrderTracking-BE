@@ -27,8 +27,17 @@ class OrderService {
       // Apply filters (but not search - we'll handle search separately)
       if (filters.status) {
         query = query.eq("status", filters.status);
+      } else if (filters.student_id) {
+        // For students, return ALL their orders including claimed/completed
+        // Frontend will filter them into appropriate tabs
+        // Only exclude cancelled orders for students
+        // This ensures claimed orders appear in the "Claimed Orders" section
+        // This matches what finance/accounting sees - all claimed orders should be visible to students
+        query = query.neq("status", "cancelled");
+        console.log(`📦 OrderService: Fetching all orders for student ${filters.student_id} (excluding cancelled)`);
+        console.log(`📦 OrderService: This should include all claimed orders visible in finance/accounting`);
       } else {
-        // If no specific status filter, only show active order statuses for "Orders" tab
+        // For admin/property custodian, only show active order statuses by default
         // Orders tab should only show: pending, processing, ready, payment_pending
         // Exclude: cancelled (voided/unclaimed), claimed, completed
         // These excluded statuses should only appear in their respective tabs
@@ -517,8 +526,9 @@ class OrderService {
             totalsByItem[key] = (totalsByItem[key] || 0) + (Number(item.quantity) || 0);
           }
 
-          // Sum quantities already in placed orders for this student (pending, paid, claimed)
-          const placedStatuses = ["pending", "paid", "claimed"];
+          // Sum quantities already in placed orders for this student (pending, paid, processing, ready, etc.)
+          // Exclude "claimed" and "completed" - once an order is claimed, the student can order that item again
+          const placedStatuses = ["pending", "paid", "processing", "ready", "payment_pending"];
           const orParts = [];
           if (studentId) orParts.push(`student_id.eq.${studentId}`);
           if (studentEmail) orParts.push(`student_email.eq.${studentEmail}`);

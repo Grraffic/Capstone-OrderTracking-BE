@@ -348,6 +348,61 @@ class NotificationService {
       throw new Error(`Failed to get unread count: ${error.message}`);
     }
   }
+
+  /**
+   * Create notification when order is claimed
+   * @param {Object} notificationData - Notification details
+   * @returns {Promise<Object>} - Created notification
+   */
+  async createOrderClaimedNotification(notificationData) {
+    try {
+      const {
+        studentId,
+        orderNumber,
+        orderId,
+        items,
+        itemNames,
+        itemCount,
+      } = notificationData;
+
+      const message = itemCount > 1
+        ? `Your order #${orderNumber} with ${itemCount} items (${itemNames}) has been successfully claimed!`
+        : `Your order #${orderNumber} (${itemNames}) has been successfully claimed!`;
+
+      const notification = {
+        user_id: studentId,
+        type: "order",
+        title: "Order Claimed Successfully",
+        message: message,
+        data: {
+          orderId: orderId,
+          orderNumber: orderNumber,
+          items: items,
+          itemCount: itemCount,
+          claimedAt: new Date().toISOString(),
+        },
+        is_read: false,
+        created_at: new Date().toISOString(),
+      };
+
+      const { data, error } = await supabase
+        .from("notifications")
+        .insert([notification])
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      console.log(`✅ Order claimed notification created for student ${studentId}`);
+      return {
+        success: true,
+        data,
+      };
+    } catch (error) {
+      console.error("Create order claimed notification error:", error);
+      throw new Error(`Failed to create notification: ${error.message}`);
+    }
+  }
 }
 
 module.exports = new NotificationService();
