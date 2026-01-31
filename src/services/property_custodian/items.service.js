@@ -141,102 +141,129 @@ class ItemsService {
 
       // If userEducationLevel is provided, filter by eligibility table AND approval status
       // This is for students - they should only see approved items they're eligible for
+      // EXCEPTION: Old students see ALL items for their education level (but can only order allowed items like logo patch)
       if (filters.userEducationLevel) {
         // Only show approved items to students
         // Note: If is_approved column doesn't exist (migration not run), error will be caught below
         // and query will be retried without approval filter for backward compatibility
         query = query.eq("is_approved", true);
-        // Map user education level to eligibility table format
-        // Users table: "Preschool" -> Eligibility: "Kindergarten" (item_eligibility uses Kindergarten)
-        // Users table: "Kindergarten" -> Eligibility: "Kindergarten" (Preschool checkbox)
-        // Users table: "Elementary" -> Eligibility: "Elementary"
-        // Users table: "High School" -> Eligibility: "Junior High School" (JHS checkbox)
-        // Users table: "Senior High School" -> Eligibility: "Senior High School" (SHS checkbox)
-        // Users table: "College" -> Eligibility: "College"
-        const educationLevelMap = {
-          "Preschool": "Kindergarten",
-          "Kindergarten": "Kindergarten",
-          "Elementary": "Elementary",
-          "High School": "Junior High School",
-          "Senior High School": "Senior High School",
-          "College": "College",
-        };
         
-        const eligibilityLevel = educationLevelMap[filters.userEducationLevel] || filters.userEducationLevel;
+        // Check if this is an old student - if so, show ALL items for their education level
+        const isOldStudent = filters.studentType && String(filters.studentType).toLowerCase() === "old";
         
-        // Get all item IDs that are eligible for this education level
-        const { data: eligibleItems, error: eligibilityError } = await supabase
-          .from("item_eligibility")
-          .select("item_id")
-          .eq("education_level", eligibilityLevel);
-        
-        // Also get items with "All Education Levels" (e.g. Logo Patch, ID Lace) so every student can order
-        const { data: allEducationLevelsItems } = await supabase
-          .from("item_eligibility")
-          .select("item_id")
-          .eq("education_level", "All Education Levels");
-        const allEducationLevelsIds = (allEducationLevelsItems || []).map((e) => e.item_id);
-        
-        if (eligibilityError) {
-          // If table doesn't exist, log warning and show all items (backward compatibility)
-          console.warn("Eligibility filtering error (table may not exist):", eligibilityError.message);
-        } else if ((eligibleItems && eligibleItems.length > 0) || allEducationLevelsIds.length > 0) {
-          // Filter to only show eligible items (user's level + All Education Levels)
-          let eligibleItemIds = [...(eligibleItems || []).map((e) => e.item_id), ...allEducationLevelsIds];
-          // Include items applicable to ALL education levels by name (e.g. Logo Patch, New Logo Patch)
-          const { data: allLevelItems } = await supabase
-            .from("items")
-            .select("id")
-            .eq("is_active", true)
-            .eq("is_approved", true)
-            .or("is_archived.eq.false,is_archived.is.null")
-            .ilike("name", ALL_LEVEL_ITEM_NAME_PATTERN);
-          const allLevelIds = (allLevelItems || []).map((i) => i.id);
-          eligibleItemIds = [...new Set([...eligibleItemIds, ...allLevelIds])];
-          query = query.in("id", eligibleItemIds);
-        } else {
-          // No eligible items found - check if there are items without eligibility records
-          // (backward compatibility: items without eligibility records are shown to all)
-          const { data: allEligibilityRecords, error: allEligibilityError } = await supabase
-            .from("item_eligibility")
-            .select("item_id");
+        if (isOldStudent) {
+          // For old students: Show ALL items for their education level (not just eligible ones)
+          // They can see everything but only order allowed items (logo patch, etc.)
+          // Map user education level to items table format
+          const educationLevelMap = {
+            "Preschool": "Kindergarten",
+            "Kindergarten": "Kindergarten",
+            "Elementary": "Elementary",
+            "High School": "Junior High School",
+            "Senior High School": "Senior High School",
+            "College": "College",
+            "Vocational": "College",
+          };
           
-          if (!allEligibilityError && allEligibilityRecords) {
-            const itemsWithEligibilityIds = new Set(allEligibilityRecords.map(e => e.item_id));
-            
-            // Get all active, non-archived item IDs
-            const { data: allItems, error: allItemsError } = await supabase
+          const itemEducationLevel = educationLevelMap[filters.userEducationLevel] || filters.userEducationLevel;
+          
+          // Get all items for this education level OR "All Education Levels" OR "General"
+          // Use .or() with proper format for Supabase
+          query = query.or(`education_level.eq.${itemEducationLevel},education_level.eq.All Education Levels,education_level.eq.General`);
+        } else {
+          // For new students: Filter by eligibility table (existing logic)
+          // Map user education level to eligibility table format
+          // Users table: "Preschool" -> Eligibility: "Kindergarten" (item_eligibility uses Kindergarten)
+          // Users table: "Kindergarten" -> Eligibility: "Kindergarten" (Preschool checkbox)
+          // Users table: "Elementary" -> Eligibility: "Elementary"
+          // Users table: "High School" -> Eligibility: "Junior High School" (JHS checkbox)
+          // Users table: "Senior High School" -> Eligibility: "Senior High School" (SHS checkbox)
+          // Users table: "College" -> Eligibility: "College"
+          const educationLevelMap = {
+            "Preschool": "Kindergarten",
+            "Kindergarten": "Kindergarten",
+            "Elementary": "Elementary",
+            "High School": "Junior High School",
+            "Senior High School": "Senior High School",
+            "College": "College",
+          };
+          
+          const eligibilityLevel = educationLevelMap[filters.userEducationLevel] || filters.userEducationLevel;
+          
+          // Get all item IDs that are eligible for this education level
+          const { data: eligibleItems, error: eligibilityError } = await supabase
+            .from("item_eligibility")
+            .select("item_id")
+            .eq("education_level", eligibilityLevel);
+          
+          // Also get items with "All Education Levels" (e.g. Logo Patch, ID Lace) so every student can order
+          const { data: allEducationLevelsItems } = await supabase
+            .from("item_eligibility")
+            .select("item_id")
+            .eq("education_level", "All Education Levels");
+          const allEducationLevelsIds = (allEducationLevelsItems || []).map((e) => e.item_id);
+          
+          if (eligibilityError) {
+            // If table doesn't exist, log warning and show all items (backward compatibility)
+            console.warn("Eligibility filtering error (table may not exist):", eligibilityError.message);
+          } else if ((eligibleItems && eligibleItems.length > 0) || allEducationLevelsIds.length > 0) {
+            // Filter to only show eligible items (user's level + All Education Levels)
+            let eligibleItemIds = [...(eligibleItems || []).map((e) => e.item_id), ...allEducationLevelsIds];
+            // Include items applicable to ALL education levels by name (e.g. Logo Patch, New Logo Patch)
+            const { data: allLevelItems } = await supabase
               .from("items")
               .select("id")
               .eq("is_active", true)
-              .or("is_archived.eq.false,is_archived.is.null");
+              .eq("is_approved", true)
+              .or("is_archived.eq.false,is_archived.is.null")
+              .ilike("name", ALL_LEVEL_ITEM_NAME_PATTERN);
+            const allLevelIds = (allLevelItems || []).map((i) => i.id);
+            eligibleItemIds = [...new Set([...eligibleItemIds, ...allLevelIds])];
+            query = query.in("id", eligibleItemIds);
+          } else {
+            // No eligible items found - check if there are items without eligibility records
+            // (backward compatibility: items without eligibility records are shown to all)
+            const { data: allEligibilityRecords, error: allEligibilityError } = await supabase
+              .from("item_eligibility")
+              .select("item_id");
             
-            if (!allItemsError && allItems) {
-              const allItemIds = allItems.map(i => i.id);
-              // Items without eligibility records should be shown to all
-              const itemsWithoutEligibility = allItemIds.filter(id => !itemsWithEligibilityIds.has(id));
+            if (!allEligibilityError && allEligibilityRecords) {
+              const itemsWithEligibilityIds = new Set(allEligibilityRecords.map(e => e.item_id));
               
-              if (itemsWithoutEligibility.length > 0) {
-                query = query.in("id", itemsWithoutEligibility);
-              } else {
-                // All items have eligibility but none match - show items with "All Education Levels" or name pattern
-                const { data: allEduLevelRows } = await supabase
-                  .from("item_eligibility")
-                  .select("item_id")
-                  .eq("education_level", "All Education Levels");
-                const allEduLevelIds = (allEduLevelRows || []).map((e) => e.item_id);
-                const { data: allLevelItems } = await supabase
-                  .from("items")
-                  .select("id")
-                  .eq("is_active", true)
-                  .eq("is_approved", true)
-                  .or("is_archived.eq.false,is_archived.is.null")
-                  .ilike("name", ALL_LEVEL_ITEM_NAME_PATTERN);
-                const allLevelIds = [...new Set([...allEduLevelIds, ...(allLevelItems || []).map((i) => i.id)])];
-                if (allLevelIds.length > 0) {
-                  query = query.in("id", allLevelIds);
+              // Get all active, non-archived item IDs
+              const { data: allItems, error: allItemsError } = await supabase
+                .from("items")
+                .select("id")
+                .eq("is_active", true)
+                .or("is_archived.eq.false,is_archived.is.null");
+              
+              if (!allItemsError && allItems) {
+                const allItemIds = allItems.map(i => i.id);
+                // Items without eligibility records should be shown to all
+                const itemsWithoutEligibility = allItemIds.filter(id => !itemsWithEligibilityIds.has(id));
+                
+                if (itemsWithoutEligibility.length > 0) {
+                  query = query.in("id", itemsWithoutEligibility);
                 } else {
-                  query = query.eq("id", "00000000-0000-0000-0000-000000000000");
+                  // All items have eligibility but none match - show items with "All Education Levels" or name pattern
+                  const { data: allEduLevelRows } = await supabase
+                    .from("item_eligibility")
+                    .select("item_id")
+                    .eq("education_level", "All Education Levels");
+                  const allEduLevelIds = (allEduLevelRows || []).map((e) => e.item_id);
+                  const { data: allLevelItems } = await supabase
+                    .from("items")
+                    .select("id")
+                    .eq("is_active", true)
+                    .eq("is_approved", true)
+                    .or("is_archived.eq.false,is_archived.is.null")
+                    .ilike("name", ALL_LEVEL_ITEM_NAME_PATTERN);
+                  const allLevelIds = [...new Set([...allEduLevelIds, ...(allLevelItems || []).map((i) => i.id)])];
+                  if (allLevelIds.length > 0) {
+                    query = query.in("id", allLevelIds);
+                  } else {
+                    query = query.eq("id", "00000000-0000-0000-0000-000000000000");
+                  }
                 }
               }
             }

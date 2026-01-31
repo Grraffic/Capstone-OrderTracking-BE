@@ -66,13 +66,15 @@ class ItemsController {
    */
   async getItems(req, res) {
     try {
-      const { page, limit, userEducationLevel, ...filters } = req.query;
+      const { page, limit, userEducationLevel, studentType, ...filters } = req.query;
       
       // If userEducationLevel is provided, use it for eligibility filtering
       // This is typically sent by students to see only items they're eligible for
+      // studentType is used to determine if old students should see all items
       const filtersWithEligibility = {
         ...filters,
         ...(userEducationLevel ? { userEducationLevel } : {}),
+        ...(studentType ? { studentType } : {}),
       };
       
       const result = await ItemsService.getItems(

@@ -33,18 +33,19 @@ class OrderService {
         // Only exclude cancelled orders for students
         // This ensures claimed orders appear in the "Claimed Orders" section
         // This matches what finance/accounting sees - all claimed orders should be visible to students
-        // IMPORTANT: Some orders may have student_id=null (legacy data), so we need to also match by student_email
-        // if provided, or handle null student_id cases
+        // IMPORTANT: Orders may be created with students.id (from getStudentIdForUser) but JWT contains users.id
+        // So we need to match by email as well to find all orders regardless of which ID was used
         query = query.neq("status", "cancelled");
         
-        // If student_email is provided, also match orders with null student_id by email
-        // This handles legacy orders that don't have student_id set
+        // If student_email is provided, match orders by either:
+        // 1. student_id matches (for orders created with same ID as JWT)
+        // 2. student_email matches (for orders created with students.id different from JWT users.id, or legacy null student_id)
+        // This ensures all orders are found regardless of ID mismatch
         if (filters.student_email) {
-          // Use .or() to match either by student_id OR (null student_id AND matching email)
-          query = query.or(`student_id.eq.${filters.student_id},and(student_id.is.null,student_email.eq.${filters.student_email})`);
+          // Match by student_id OR by student_email (handles ID mismatches and legacy null student_id)
+          query = query.or(`student_id.eq.${filters.student_id},student_email.eq.${filters.student_email}`);
         } else {
-          // Only match by student_id, but also include orders with null student_id if we can't match by email
-          // For now, just match by student_id - we'll handle null cases separately if needed
+          // Only match by student_id if no email provided
           query = query.eq("student_id", filters.student_id);
         }
       } else {

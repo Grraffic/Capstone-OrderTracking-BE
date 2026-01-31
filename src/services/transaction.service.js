@@ -32,70 +32,108 @@ class TransactionService {
       if (userId) {
         console.log("[TransactionService] 🔍 Fetching user info for userId:", userId);
         
-        // Try to fetch by ID first
-        let { data: user, error: userError } = await supabase
-          .from("users")
-          .select("name, role, email")
+        // Try to fetch from students table first (since userId might be student_id)
+        let { data: student, error: studentError } = await supabase
+          .from("students")
+          .select("id, name, email, student_type")
           .eq("id", userId)
           .single();
 
-        // If not found by ID, try by email (in case JWT has email as ID or userId is not a valid UUID)
-        if (userError || !user) {
-          console.log("[TransactionService] ⚠️ User not found by ID, trying email lookup...");
-          
-          // Determine which email to use for lookup
-          let emailToLookup = null;
-          if (typeof userId === "string" && userId.includes("@")) {
-            // userId itself is an email
-            emailToLookup = userId;
-          } else if (userEmail) {
-            // Use provided userEmail as fallback
-            emailToLookup = userEmail;
-          }
-          
-          if (emailToLookup) {
-            const { data: emailUser, error: emailError } = await supabase
-              .from("users")
-              .select("name, role, email")
-              .eq("email", emailToLookup.toLowerCase())
-              .single();
-            
-            if (!emailError && emailUser) {
-              user = emailUser;
-              userError = null;
-              console.log("[TransactionService] ✅ Found user by email:", {
-                email: emailUser.email,
-                name: emailUser.name,
-                role: emailUser.role,
-              });
-            } else {
-              console.warn("[TransactionService] ⚠️ Could not find user by email either:", {
-                email: emailToLookup,
-                error: emailError?.message,
-              });
-            }
+        // If found in students table, use that
+        if (!studentError && student) {
+          userName = student.name || "Unknown Student";
+          userRole = "student";
+          console.log("[TransactionService] ✅ Found student:", {
+            id: student.id,
+            name: student.name,
+            email: student.email,
+          });
+        } else {
+          // Try to fetch from users table
+          let { data: user, error: userError } = await supabase
+            .from("users")
+            .select("name, role, email")
+            .eq("id", userId)
+            .single();
+
+          if (!userError && user) {
+            userName = user.name || "Unknown User";
+            userRole = user.role || "unknown";
+            console.log("[TransactionService] ✅ Found user:", {
+              id: user.id,
+              name: user.name,
+              email: user.email,
+              role: user.role,
+            });
           } else {
-            console.warn("[TransactionService] ⚠️ No email available for fallback lookup");
+            // If not found by ID, try by email lookup
+            console.log("[TransactionService] ⚠️ User not found by ID, trying email lookup...");
+            
+            // Determine which email to use for lookup
+            let emailToLookup = null;
+            if (typeof userId === "string" && userId.includes("@")) {
+              // userId itself is an email
+              emailToLookup = userId;
+            } else if (metadata?.student_email) {
+              // Use student_email from metadata as fallback
+              emailToLookup = metadata.student_email;
+            } else if (metadata?.email) {
+              // Use email from metadata as fallback
+              emailToLookup = metadata.email;
+            }
+            
+            if (emailToLookup) {
+              // Try students table first
+              const { data: emailStudent, error: emailStudentError } = await supabase
+                .from("students")
+                .select("id, name, email, student_type")
+                .eq("email", emailToLookup.toLowerCase())
+                .single();
+              
+              if (!emailStudentError && emailStudent) {
+                userName = emailStudent.name || "Unknown Student";
+                userRole = "student";
+                console.log("[TransactionService] ✅ Found student by email:", {
+                  email: emailStudent.email,
+                  name: emailStudent.name,
+                });
+              } else {
+                // Try users table
+                const { data: emailUser, error: emailError } = await supabase
+                  .from("users")
+                  .select("name, role, email")
+                  .eq("email", emailToLookup.toLowerCase())
+                  .single();
+                
+                if (!emailError && emailUser) {
+                  userName = emailUser.name || "Unknown User";
+                  userRole = emailUser.role || "unknown";
+                  console.log("[TransactionService] ✅ Found user by email:", {
+                    email: emailUser.email,
+                    name: emailUser.name,
+                    role: emailUser.role,
+                  });
+                } else {
+                  console.warn("[TransactionService] ⚠️ Could not find user/student by email:", {
+                    email: emailToLookup,
+                    studentError: emailStudentError?.message,
+                    userError: emailError?.message,
+                  });
+                }
+              }
+            } else {
+              console.warn("[TransactionService] ⚠️ No email available for fallback lookup");
+            }
           }
         }
 
-        if (!userError && user) {
-          userName = user.name || "Unknown User";
-          userRole = user.role || "unknown";
-          console.log("[TransactionService] ✅ User info fetched:", { 
-            userName, 
-            userRole,
+        // User info is already set above if found
+        if (userName === "System") {
+          console.warn("[TransactionService] ⚠️ Could not fetch user/student:", {
             userId,
-            userEmail: user.email,
+            hasMetadata: !!metadata,
+            studentEmail: metadata?.student_email,
           });
-        } else {
-          console.warn("[TransactionService] ⚠️ Could not fetch user:", {
-            userId,
-            error: userError?.message || "User not found",
-            errorCode: userError?.code,
-          });
-          // Try to get user info from JWT token if available (fallback)
-          // This will be handled by the middleware that sets req.user
         }
       } else {
         console.log("[TransactionService] ℹ️ No userId provided, using System user");
