@@ -158,10 +158,7 @@ exports.updateMaintenanceMode = async (req, res) => {
  */
 exports.getMaintenanceStatus = async (req, res) => {
   try {
-    console.log("📡 GET /api/maintenance/status - Checking maintenance status...");
     const result = await maintenanceService.isMaintenanceActive();
-    
-    console.log("📊 Maintenance status result:", result);
 
     res.json({
       success: true,

@@ -39,7 +39,6 @@ async function getMaintenanceMode() {
     if (error) {
       // If no rows exist, create a default one
       if (error.code === "PGRST116") {
-        console.log("No maintenance mode settings found, creating default...");
         const defaultSettings = {
           is_enabled: false,
           display_message: null,
@@ -207,11 +206,8 @@ async function updateMaintenanceMode(settings, userId) {
 async function isMaintenanceActive() {
   try {
     const result = await getMaintenanceMode();
-    
-    console.log("🔍 isMaintenanceActive - getMaintenanceMode result:", result);
 
     if (!result || !result.success) {
-      console.log("⚠️ No maintenance mode data found, maintenance is not active");
       // If error or no data, maintenance is not active
       return {
         isActive: false,
@@ -222,24 +218,14 @@ async function isMaintenanceActive() {
     const settings = result.data;
     
     if (!settings) {
-      console.log("⚠️ Maintenance settings are null, maintenance is not active");
       return {
         isActive: false,
         message: null,
       };
     }
-    
-    console.log("🔍 Checking maintenance status:", {
-      is_enabled: settings.is_enabled,
-      scheduled_date: settings.scheduled_date,
-      start_time: settings.start_time,
-      end_time: settings.end_time,
-      is_all_day: settings.is_all_day,
-    });
 
     // If maintenance is not enabled, it's not active
     if (!settings.is_enabled) {
-      console.log("✅ Maintenance mode is disabled");
       return {
         isActive: false,
         message: null,
@@ -248,7 +234,6 @@ async function isMaintenanceActive() {
 
     // If no scheduled date, maintenance is active immediately when enabled
     if (!settings.scheduled_date) {
-      console.log("✅ Maintenance mode is ACTIVE (no scheduled date, active immediately)");
       return {
         isActive: true,
         message: settings.display_message || "System is under maintenance",
@@ -270,7 +255,6 @@ async function isMaintenanceActive() {
 
     // If all day, maintenance is active
     if (settings.is_all_day) {
-      console.log("✅ Maintenance mode is ACTIVE (all day)");
       return {
         isActive: true,
         message: settings.display_message || "System is under maintenance",
@@ -287,29 +271,15 @@ async function isMaintenanceActive() {
       const endTotal = endHours * 60 + endMinutes;
       const currentTotal = currentHours * 60 + currentMinutes;
 
-      console.log("🕐 Time check:", {
-        currentTime,
-        startTime: settings.start_time,
-        endTime: settings.end_time,
-        currentTotal,
-        startTotal,
-        endTotal,
-        inRange: currentTotal >= startTotal && currentTotal < endTotal,
-      });
-
       if (currentTotal >= startTotal && currentTotal < endTotal) {
-        console.log("✅ Maintenance mode is ACTIVE (within time range)");
         return {
           isActive: true,
           message: settings.display_message || "System is under maintenance",
         };
-      } else {
-        console.log("⏰ Maintenance mode is scheduled but not currently active (outside time range)");
       }
     }
 
     // Maintenance is scheduled but not currently active
-    console.log("⏰ Maintenance mode is scheduled but not currently active");
     return {
       isActive: false,
       message: null,

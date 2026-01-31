@@ -463,11 +463,8 @@ router.put("/profile", verifyToken, async (req, res) => {
       if (courseYearLevel !== undefined) updateData.course_year_level = courseYearLevel;
       if (studentNumber !== undefined) updateData.student_number = studentNumber;
       if (educationLevel !== undefined) updateData.education_level = educationLevel;
-    } else {
-      updateData.course_year_level = null;
-      updateData.student_number = null;
-      updateData.education_level = null;
     }
+    // Note: For admins/staff, we don't set these fields as they don't exist in the staff table
 
     // Determine if onboarding should be marked complete (students only)
     const nextCourseYearLevel =
@@ -528,9 +525,19 @@ router.put("/profile", verifyToken, async (req, res) => {
       data = result.data;
       error = result.error;
     } else if (resolved.type === "staff") {
+      // Filter out student-specific fields that don't exist in staff table
+      const staffUpdate = { ...updateData };
+      delete staffUpdate.course_year_level;
+      delete staffUpdate.student_number;
+      delete staffUpdate.education_level;
+      delete staffUpdate.gender;
+      delete staffUpdate.student_type;
+      delete staffUpdate.onboarding_completed;
+      delete staffUpdate.onboarding_completed_at;
+      
       const result = await supabase
         .from("staff")
-        .update(updateData)
+        .update(staffUpdate)
         .eq("id", resolved.id)
         .select()
         .maybeSingle();
