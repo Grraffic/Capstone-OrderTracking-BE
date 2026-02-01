@@ -123,9 +123,9 @@ function resolveItemKey(name) {
   const n = normalizeItemName(name);
   // Any "X Jogging Pants" (e.g. "Small Jogging Pants") counts as "jogging pants" for limits
   if (n && n.includes("jogging pants")) return "jogging pants";
-  // "New Logo Patch (College)" etc. -> "new logo patch"; "Logo Patch (College)" etc. -> "logo patch"
-  if (n && n.includes("new logo patch")) return "new logo patch";
-  if (n && n.includes("logo patch")) return "logo patch";
+  // "New Logo Patch" and "Logo Patch" are the SAME item - always normalize to "logo patch"
+  // The "new" is just text, they're identical items
+  if (n && (n.includes("new logo patch") || n.includes("logo patch"))) return "logo patch";
   if (ITEM_ALIASES[n]) return ITEM_ALIASES[n];
   return n;
 }
@@ -150,10 +150,10 @@ const SEGMENT_RULES = {
     "logo patch": 3,
   },
   Kindergarten_old_Female: {
-    "new logo patch": 3,
+    "logo patch": 3,
   },
   Kindergarten_old_Male: {
-    "new logo patch": 3,
+    "logo patch": 3,
   },
 
   // Elementary
@@ -177,11 +177,11 @@ const SEGMENT_RULES = {
     "number patch": 3,
   },
   Elementary_old_Female: {
-    "new logo patch": 3,
+    "logo patch": 3,
     "number patch": 3,
   },
   Elementary_old_Male: {
-    "new logo patch": 3,
+    "logo patch": 3,
     "number patch": 3,
   },
 
@@ -206,11 +206,11 @@ const SEGMENT_RULES = {
     "number patch": 3,
   },
   "Junior High School_old_Female": {
-    "new logo patch": 3,
+    "logo patch": 3,
     "number patch": 3,
   },
   "Junior High School_old_Male": {
-    "new logo patch": 3,
+    "logo patch": 3,
     "number patch": 3,
   },
 
@@ -236,11 +236,11 @@ const SEGMENT_RULES = {
     "number patch": 3,
   },
   "Senior High School_old_Female": {
-    "new logo patch": 3,
+    "logo patch": 3,
     "number patch": 3,
   },
   "Senior High School_old_Male": {
-    "new logo patch": 3,
+    "logo patch": 3,
     "number patch": 3,
   },
 
@@ -263,10 +263,10 @@ const SEGMENT_RULES = {
     "logo patch": 3,
   },
   College_old_Female: {
-    "new logo patch": 3,
+    "logo patch": 3,
   },
   College_old_Male: {
-    "new logo patch": 3,
+    "logo patch": 3,
   },
 };
 
@@ -301,15 +301,6 @@ function getMaxQuantityForItem(itemName, educationLevel, studentType, gender) {
   const normalized = normalizeItemName(itemName);
   if (rules[normalized] !== undefined) return rules[normalized];
 
-  // Old students: "logo patch" (catalog) is the same orderable item as "new logo patch" (segment rule).
-  const type = (studentType || "").toLowerCase();
-  if (type === "old") {
-    if ((itemKey === "logo patch" || normalized === "logo patch") && rules["new logo patch"] !== undefined) {
-      return rules["new logo patch"];
-    }
-    return 0;
-  }
-
   return DEFAULT_MAX;
 }
 
@@ -329,10 +320,6 @@ function getMaxQuantitiesForStudent(educationLevel, studentType, gender) {
   const out = {};
   for (const [itemKey, maxQty] of Object.entries(rules)) {
     out[normalizeItemName(itemKey) || itemKey] = maxQty;
-  }
-  // Old students: catalog may list "Logo Patch (College)" which resolves to "logo patch"; allow it via "new logo patch" rule.
-  if (type === "old" && rules["new logo patch"] !== undefined && out["logo patch"] === undefined) {
-    out["logo patch"] = rules["new logo patch"];
   }
   return out;
 }

@@ -19,7 +19,7 @@ router.post("/", userController.createUser);
 // Update a user
 router.put("/:id", userController.updateUser);
 
-// Delete a user (soft delete)
+// Delete a user (hard delete)
 router.delete("/:id", userController.deleteUser);
 
 // Bulk update users

@@ -159,6 +159,44 @@ exports.createUser = async (req, res) => {
       });
     }
 
+    // Additional validation for students
+    if (userData.role === "student" || userData.email?.toLowerCase().endsWith("@student.laverdad.edu.ph")) {
+      const errors = [];
+
+      // Validate name (required and not blank)
+      if (!userData.name || typeof userData.name !== "string" || !userData.name.trim()) {
+        errors.push("Name is required and cannot be blank");
+      }
+
+      // Validate student_number (required and not blank)
+      if (!userData.student_number || typeof userData.student_number !== "string" || !userData.student_number.trim()) {
+        errors.push("Student number is required and cannot be blank");
+      }
+
+      // Validate course_year_level (required and not blank)
+      if (!userData.course_year_level || typeof userData.course_year_level !== "string" || !userData.course_year_level.trim()) {
+        errors.push("Grade level is required and cannot be blank");
+      }
+
+      // Validate gender (required and not blank)
+      if (!userData.gender || typeof userData.gender !== "string" || !userData.gender.trim()) {
+        errors.push("Gender is required and cannot be blank");
+      }
+
+      // Validate student_type (required and not blank)
+      if (!userData.student_type || typeof userData.student_type !== "string" || !userData.student_type.trim()) {
+        errors.push("Student type is required and cannot be blank");
+      }
+
+      if (errors.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed",
+          errors: errors,
+        });
+      }
+    }
+
     const createdByUserId = req.user?.id; // Get authenticated user ID for email_role_assignments
     const user = await userService.createUser(userData, createdByUserId);
 
@@ -230,7 +268,7 @@ exports.updateUser = async (req, res) => {
 };
 
 /**
- * Delete a user (soft delete)
+ * Delete a user (hard delete - removes user from database)
  * DELETE /api/users/:id
  */
 exports.deleteUser = async (req, res) => {
@@ -252,10 +290,22 @@ exports.deleteUser = async (req, res) => {
     });
   } catch (error) {
     console.error("Error in deleteUser controller:", error);
+    console.error("Error details:", {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId: req.params.id,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
+    });
     return res.status(500).json({
       success: false,
       message: "Failed to delete user",
       error: error.message,
+      ...(process.env.NODE_ENV === 'development' && { 
+        details: error.details,
+        hint: error.hint,
+      }),
     });
   }
 };

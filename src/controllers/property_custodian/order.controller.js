@@ -316,13 +316,38 @@ class OrderController {
           // Use Supabase Auth UID when available (same pattern as restock)
           if (io) {
             const activityUserId = supabaseAuthUid || studentId;
-            io.emit("order:claimed", {
-              orderId: orderData.id,
-              orderNumber: orderData.order_number,
-              userId: activityUserId,
-              items: orderData.items,
-            });
-            console.log(`📡 Socket.IO: Emitted order:claimed for order ${orderData.order_number} to user ${activityUserId}`);
+            
+            // Ensure items array exists and is valid
+            const orderItems = Array.isArray(orderData.items) ? orderData.items : [];
+            const orderId = orderData.id || null;
+            const orderNumber = orderData.order_number || null;
+            
+            // Validate required fields before emitting
+            if (!activityUserId) {
+              console.warn(`⚠️ OrderController: Cannot emit order:claimed - No userId available for order ${orderId || orderNumber || 'unknown'}`);
+            } else if (!orderId && !orderNumber) {
+              console.warn(`⚠️ OrderController: Cannot emit order:claimed - Missing orderId and orderNumber`);
+            } else {
+              const eventData = {
+                orderId: orderId,
+                orderNumber: orderNumber,
+                userId: activityUserId,
+                items: orderItems,
+                itemCount: orderItems.length,
+              };
+              
+              io.emit("order:claimed", eventData);
+              console.log(`📡 Socket.IO: Emitted order:claimed for order ${orderNumber || orderId} to user ${activityUserId}`);
+              console.log(`📡 Socket.IO: Event data includes:`, {
+                orderId: eventData.orderId,
+                orderNumber: eventData.orderNumber,
+                userId: eventData.userId,
+                itemCount: eventData.itemCount,
+                hasItems: eventData.items.length > 0
+              });
+            }
+          } else {
+            console.warn(`⚠️ OrderController: Cannot emit order:claimed - Socket.IO not available`);
           }
         }
       }

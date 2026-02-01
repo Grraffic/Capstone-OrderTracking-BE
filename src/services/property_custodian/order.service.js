@@ -448,7 +448,9 @@ class OrderService {
             if (studentEmail) orParts.push(`student_email.eq.${studentEmail}`);
             let slotsUsedFromPlacedOrders = 0;
             if (orParts.length > 0) {
-              const placedStatuses = ["pending", "paid", "claimed", "processing", "ready", "payment_pending", "completed"];
+              // Only count active orders (pending, processing, ready, etc.) - NOT claimed/completed orders.
+              // Once an order is claimed/completed, the student should be able to order new item types.
+              const placedStatuses = ["pending", "paid", "processing", "ready", "payment_pending"];
               const { data: placedOrders } = await supabase
                 .from("orders")
                 .select("items")
@@ -471,6 +473,15 @@ class OrderService {
               slotsUsedFromPlacedOrders = placedSlotKeys.size;
             }
             const slotsLeftForThisOrder = Math.max(0, Number(maxItems) - slotsUsedFromPlacedOrders);
+            
+            // Check if student has already exceeded their limit
+            if (slotsUsedFromPlacedOrders >= Number(maxItems)) {
+              throw new Error(
+                `You have already reached your item type limit. You have used ${slotsUsedFromPlacedOrders} item type${slotsUsedFromPlacedOrders !== 1 ? "s" : ""} in placed orders, which exceeds your maximum of ${maxItems}. You cannot place any more orders until some of your existing orders are completed or cancelled.`
+              );
+            }
+            
+            // Check if this order would exceed the remaining limit
             if (slotCount > slotsLeftForThisOrder) {
               throw new Error(
                 `Order exceeds your item type limit. You have ${slotsLeftForThisOrder} item type${slotsLeftForThisOrder !== 1 ? "s" : ""} left for this order (max ${maxItems} total; ${slotsUsedFromPlacedOrders} already used in placed orders). This order has ${slotCount}. Only placed orders count toward the limit—cart does not.`
@@ -541,6 +552,7 @@ class OrderService {
           for (const item of orderData.items || []) {
             const key = resolveItemKey(item.name || "");
             if (!key) continue;
+            // resolveItemKey now always returns "logo patch" for both "new logo patch" and "logo patch"
             totalsByItem[key] = (totalsByItem[key] || 0) + (Number(item.quantity) || 0);
           }
 
@@ -564,14 +576,50 @@ class OrderService {
                 const rawName = (it.name || "").trim();
                 let key = resolveItemKey(rawName);
                 if (!key && rawName && rawName.toLowerCase().includes("jogging pants")) key = "jogging pants";
+                if (!key && rawName && rawName.toLowerCase().includes("logo patch")) key = "logo patch";
                 if (!key) continue;
+                // resolveItemKey now always returns "logo patch" for both "new logo patch" and "logo patch"
                 alreadyOrderedByItem[key] =
                   (alreadyOrderedByItem[key] || 0) + (Number(it.quantity) || 0);
               }
             }
           }
 
+          // Also check claimed/completed orders for items that have a max limit
+          // Some items like "logo patch" have a max of 3 per student lifetime, so claimed items should count
+          // IMPORTANT: Claimed orders are validated against the CURRENT student type's max limits (from userRow.student_type),
+          // not the student type when the order was placed. This ensures that when a student changes from "new" to "old"
+          // (or vice versa), their historical claimed orders still count toward their current type's limits.
+          // Example: New student claims 2 logo patches → changes to old student → still sees 2 claimed, can order 1 more (max 3 - 2 = 1)
+          // Count ALL claimed orders regardless of student type when placed - they all count toward current type's limits
+          let claimedItemsByItem = {};
+          if (orParts.length > 0) {
+            const claimedStatuses = ["claimed", "completed"];
+            const { data: claimedOrders } = await supabase
+              .from("orders")
+              .select("items")
+              .eq("is_active", true)
+              .in("status", claimedStatuses)
+              .or(orParts.join(","));
+            for (const row of claimedOrders || []) {
+              const orderItems = Array.isArray(row.items) ? row.items : [];
+              for (const it of orderItems) {
+                const rawName = (it.name || "").trim();
+                let key = resolveItemKey(rawName);
+                if (!key && rawName && rawName.toLowerCase().includes("jogging pants")) key = "jogging pants";
+                if (!key && rawName && rawName.toLowerCase().includes("logo patch")) key = "logo patch";
+                if (!key) continue;
+                // resolveItemKey now always returns "logo patch" for both "new logo patch" and "logo patch"
+                claimedItemsByItem[key] =
+                  (claimedItemsByItem[key] || 0) + (Number(it.quantity) || 0);
+              }
+            }
+          }
+
+          // Validate each item against CURRENT student type's max limits
+          // The studentType, educationLevelForSegment, and gender are from userRow (current values, not from order history)
           for (const [itemKey, totalQty] of Object.entries(totalsByItem)) {
+            // Get max limit based on CURRENT student type (from userRow.student_type, line 417)
             const max = getMaxQuantityForItem(
               itemKey,
               educationLevelForSegment,
@@ -579,10 +627,31 @@ class OrderService {
               gender
             );
             const alreadyOrdered = alreadyOrderedByItem[itemKey] || 0;
-            const totalUsed = alreadyOrdered + totalQty;
+            // claimedCount includes ALL claimed orders regardless of student type when placed
+            const claimedCount = claimedItemsByItem[itemKey] || 0;
+            // Total includes both placed orders and claimed orders
+            const totalUsed = alreadyOrdered + claimedCount + totalQty;
+            
+            // Debug logging: Track current student type and claimed order validation
+            if (itemKey === "logo patch" || (claimedCount > 0 && max > 0)) {
+              console.log(`[Order Validation] Item: ${itemKey}, student type: ${studentType}, claimed: ${claimedCount}, max: ${max}, already ordered: ${alreadyOrdered}, new order qty: ${totalQty}, total used: ${totalUsed}`, {
+                studentType,
+                educationLevel: educationLevelForSegment,
+                gender,
+                itemKey,
+                claimedCount,
+                max,
+                alreadyOrdered,
+                totalQty,
+                totalUsed,
+                remaining: max > 0 ? Math.max(0, max - alreadyOrdered - claimedCount) : 0
+              });
+            }
+            
             if (totalUsed > max) {
+              const totalAlreadyHave = alreadyOrdered + claimedCount;
               throw new Error(
-                `You have already ordered ${alreadyOrdered} of this item. Adding ${totalQty} would exceed the maximum (${max}) per student.`
+                `You have already ordered ${alreadyOrdered} of this item (and claimed ${claimedCount}). Adding ${totalQty} would exceed the maximum (${max}) per student.`
               );
             }
           }

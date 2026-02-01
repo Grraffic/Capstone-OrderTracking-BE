@@ -306,25 +306,86 @@ async function createUser(userData, createdByUserId = null) {
       authUserId = crypto.randomUUID();
     }
 
+    // Helper function to calculate education_level from course_year_level
+    const calculateEducationLevel = (courseYearLevel) => {
+      if (!courseYearLevel) return null;
+      const level = String(courseYearLevel).trim();
+      
+      // Preschool: Prekindergarten and Kindergarten
+      if (level === "Prekindergarten" || level === "Kindergarten" || level === "Kinder") {
+        return "Kindergarten";
+      }
+      
+      // Elementary (Grades 1-6)
+      if (level.match(/^Grade [1-6]$/)) {
+        return "Elementary";
+      }
+      
+      // Junior High School (Grades 7-10)
+      if (level.match(/^Grade (7|8|9|10)$/)) {
+        return "Junior High School";
+      }
+      
+      // Senior High School (Grades 11-12)
+      if (level.match(/^Grade (11|12)$/)) {
+        return "Senior High School";
+      }
+      
+      // College Programs (BSIS, BSA, BSAIS, BSSW, BAB, ACT)
+      if (level.match(/^(BSIS|BSA|BSAIS|BSSW|BAB|ACT) (1st|2nd|3rd|4th) (Year|yr)$/i)) {
+        return "College";
+      }
+      
+      return null;
+    };
+
     // Step 2: Create user record in the appropriate table (students or staff)
     let dbUser = null;
     
     if (isStudentEmail || isStudentRole) {
+      // Calculate education_level from course_year_level if not provided
+      const courseYearLevel = userData.course_year_level || null;
+      const educationLevel = userData.education_level || calculateEducationLevel(courseYearLevel);
+      
+      // When admin creates a student, all required fields are provided, so mark onboarding as completed
+      // Check if all required fields are present (non-empty strings/values)
+      const hasRequiredFields = 
+        userData.name && 
+        String(userData.name).trim() &&
+        userData.student_number && 
+        String(userData.student_number).trim() &&
+        courseYearLevel && 
+        String(courseYearLevel).trim() &&
+        userData.gender && 
+        String(userData.gender).trim() &&
+        userData.student_type && 
+        String(userData.student_type).trim();
+      
+      // If admin is creating student with all required fields, explicitly mark onboarding as completed
+      // Only override if not explicitly set to false
+      const shouldMarkOnboardingComplete = hasRequiredFields && 
+        (userData.onboarding_completed !== false);
+      
+      // Explicitly set to boolean true or false (never null/undefined)
+      const onboardingCompleted = shouldMarkOnboardingComplete ? true : false;
+      const onboardingCompletedAt = shouldMarkOnboardingComplete ? new Date().toISOString() : null;
+
       // Insert into students table
       const studentRecord = {
         user_id: authUserId,
         email: normalizedEmail,
         name: userData.name || "",
         student_number: userData.student_number || null,
-        course_year_level: userData.course_year_level || null,
-        education_level: userData.education_level || null,
+        course_year_level: courseYearLevel,
+        education_level: educationLevel,
         enrollment_status: userData.enrollment_status || "currently_enrolled",
         total_item_limit: userData.total_item_limit || null,
         order_lockout_period: userData.order_lockout_period || null,
         order_lockout_unit: userData.order_lockout_unit || null,
         gender: userData.gender || null,
         student_type: userData.student_type || null,
-        onboarding_completed: userData.onboarding_completed || false,
+        onboarding_completed: onboardingCompleted,
+        onboarding_completed_at: onboardingCompletedAt,
         avatar_url: userData.avatar_url || null,
         photo_url: userData.photo_url || null,
       };
@@ -831,26 +892,189 @@ async function updateUser(userId, updates, updatedByUserId = null) {
 }
 
 /**
- * Delete a user (soft delete by setting is_active to false)
+ * Delete a user (hard delete - removes user from database)
  * @param {string} userId - User ID
- * @returns {Promise<Object>} Deleted user
+ * @returns {Promise<Object>} Deleted user data (before deletion)
  */
 async function deleteUser(userId) {
   try {
-    const { data, error } = await supabase
-      .from("users")
-      .update({ is_active: false, updated_at: new Date().toISOString() })
-      .eq("id", userId)
-      .select()
-      .single();
+    // Determine which table the user is in (students, staff, or users for backward compatibility)
+    let currentUser = null;
+    let userTable = null;
+    let actualUserId = userId; // Use this for the actual database delete (might be different from input userId)
+    let userEmail = null;
+    let authUserId = null;
 
+    // Check students table first - try both id and user_id fields
+    let studentRow = null;
+    const { data: studentById } = await supabase
+      .from("students")
+      .select("id, user_id, email")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (studentById) {
+      studentRow = studentById;
+    } else {
+      // Try user_id field as well (in case frontend is passing user_id instead of id)
+      const { data: studentByUserId } = await supabase
+        .from("students")
+        .select("id, user_id, email")
+        .eq("user_id", userId)
+        .maybeSingle();
+      
+      if (studentByUserId) {
+        studentRow = studentByUserId;
+      }
+    }
+
+    if (studentRow) {
+      currentUser = { ...studentRow, role: "student" };
+      userTable = "students";
+      // Use the actual id from the table for deletion
+      actualUserId = studentRow.id;
+      userEmail = studentRow.email;
+      authUserId = studentRow.user_id;
+    } else {
+      // Check staff table - try both id and user_id fields
+      let staffRow = null;
+      const { data: staffById } = await supabase
+        .from("staff")
+        .select("id, user_id, email, role, status")
+        .eq("id", userId)
+        .maybeSingle();
+
+      if (staffById) {
+        staffRow = staffById;
+      } else {
+        // Try user_id field as well (in case frontend is passing user_id instead of id)
+        const { data: staffByUserId } = await supabase
+          .from("staff")
+          .select("id, user_id, email, role, status")
+          .eq("user_id", userId)
+          .maybeSingle();
+        
+        if (staffByUserId) {
+          staffRow = staffByUserId;
+        }
+      }
+
+      if (staffRow) {
+        currentUser = { ...staffRow, role: staffRow.role };
+        userTable = "staff";
+        // Use the actual id from the table for deletion
+        actualUserId = staffRow.id;
+        userEmail = staffRow.email;
+        authUserId = staffRow.user_id;
+      }
+    }
+
+    // If user not found in students or staff tables, they don't exist
+    if (!currentUser || !userTable) {
+      throw new Error(`User with ID ${userId} not found in students or staff tables`);
+    }
+
+    // Prevent deletion of the last system admin
+    if (userTable === "staff" && currentUser.role === "system_admin") {
+      const { count: staffCount, error: countError } = await supabase
+        .from("staff")
+        .select("*", { count: "exact", head: true })
+        .eq("role", "system_admin");
+
+      if (countError) {
+        console.error("Error counting system admins:", countError);
+        // Don't block the deletion if we can't count, but log the error
+      } else if (staffCount === 1) {
+        // This is the last system admin, prevent deletion
+        throw new Error(
+          "Cannot delete user: This is the last remaining system admin. At least one system admin must exist."
+        );
+      }
+    }
+
+    // Store user data before deletion for return value
+    const userDataBeforeDelete = { ...currentUser };
+
+    // Delete from user_roles table (cleanup role assignments)
+    if (authUserId) {
+      const { error: roleError } = await supabase
+        .from("user_roles")
+        .delete()
+        .eq("user_id", authUserId);
+      
+      if (roleError) {
+        console.warn("Error deleting user_roles (may not exist):", roleError.message);
+        // Don't fail the deletion if user_roles doesn't exist
+      }
+    }
+
+    // Delete from email_role_assignments if email exists
+    if (userEmail) {
+      const normalizedEmail = userEmail.toLowerCase().trim();
+      const { error: emailRoleError } = await supabase
+        .from("email_role_assignments")
+        .delete()
+        .eq("email", normalizedEmail);
+      
+      if (emailRoleError) {
+        console.warn("Error deleting email_role_assignments (may not exist):", emailRoleError.message);
+        // Don't fail the deletion if email_role_assignments doesn't exist
+      }
+    }
+
+    // Perform hard delete from the appropriate table
+    let result;
+    if (userTable === "students") {
+      result = await supabase
+        .from("students")
+        .delete()
+        .eq("id", actualUserId)
+        .select()
+        .single();
+    } else if (userTable === "staff") {
+      result = await supabase
+        .from("staff")
+        .delete()
+        .eq("id", actualUserId)
+        .select()
+        .single();
+    }
+
+    const { data, error } = result;
     if (error) {
+      console.error(`Error deleting user from ${userTable} table:`, {
+        error: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+        actualUserId,
+        userTable,
+        originalUserId: userId,
+      });
       throw error;
     }
 
-    return data;
+    // Optionally delete from Supabase Auth if authUserId exists
+    if (authUserId) {
+      try {
+        await supabase.auth.admin.deleteUser(authUserId);
+      } catch (authError) {
+        console.warn("Error deleting user from Auth (may not exist):", authError.message);
+        // Don't fail the deletion if Auth user doesn't exist or deletion fails
+      }
+    }
+
+    // Return the deleted user data
+    return userDataBeforeDelete;
   } catch (error) {
     console.error("Error deleting user:", error);
+    console.error("Error details:", {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+    });
     throw error;
   }
 }

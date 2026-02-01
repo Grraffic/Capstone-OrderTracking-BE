@@ -116,6 +116,10 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
       }
       
       // Query for claimed/completed orders separately to track permanently disabled items
+      // IMPORTANT: Claimed orders are validated against the CURRENT student type's max limits, not the student type
+      // when the order was placed. This ensures that when a student changes from "new" to "old" (or vice versa),
+      // their historical claimed orders still count toward their current type's limits.
+      // Example: New student claims 2 logo patches → changes to old student → still sees 2 claimed, can order 1 more (max 3 - 2 = 1)
       let claimedItems = {};
       if (orParts.length > 0) {
         const claimedStatuses = ["claimed", "completed"];
@@ -135,6 +139,7 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
         if (claimedErr) {
           console.error("Max quantities: claimed orders query error", claimedErr);
         }
+        // Count ALL claimed orders regardless of student type when placed - they all count toward current type's limits
         for (const row of claimedOrders || []) {
           const orderItems = Array.isArray(row.items) ? row.items : [];
           for (const it of orderItems) {
@@ -145,10 +150,25 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
               if (lower.includes("jogging pants")) key = "jogging pants";
               if (lower.includes("logo patch")) key = "logo patch";
             }
-            if (key && typeof key === "string" && key.toLowerCase().includes("logo patch")) key = "logo patch";
             if (!key) continue;
+            // resolveItemKey now always returns "logo patch" for both "new logo patch" and "logo patch" (they're the same item)
             claimedItems[key] = (claimedItems[key] || 0) + (Number(it.quantity) || 0);
           }
+        }
+        // Debug logging: Track current student type and claimed order validation
+        if (claimedOrders && claimedOrders.length > 0) {
+          const claimedOrderCount = claimedOrders.length;
+          const claimedKeys = Object.keys(claimedItems);
+          const logoPatchClaimed = claimedItems["logo patch"] || 0;
+          const logoPatchMax = maxQuantitiesNoGender["logo patch"] || 0;
+          console.log(`[Max Quantities] Validating claimed orders for student type: ${studentType}, claimed order count: ${claimedOrderCount}`, {
+            studentType,
+            educationLevel,
+            claimedKeys: claimedKeys.join(", ") || "(none)",
+            logoPatchClaimed,
+            logoPatchMax,
+            logoPatchRemaining: logoPatchMax > 0 ? Math.max(0, logoPatchMax - logoPatchClaimed) : 0
+          });
         }
       }
       
@@ -164,6 +184,8 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
       });
     }
 
+    // Get max quantities based on CURRENT student type (not the type when orders were placed)
+    // This ensures that when a student changes types, their claimed orders are validated against their current type's limits
     const maxQuantities = getMaxQuantitiesForStudent(
       educationLevel,
       studentType,
@@ -225,6 +247,10 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
     }
 
     // Query for claimed/completed orders separately to track permanently disabled items
+    // IMPORTANT: Claimed orders are validated against the CURRENT student type's max limits, not the student type
+    // when the order was placed. This ensures that when a student changes from "new" to "old" (or vice versa),
+    // their historical claimed orders still count toward their current type's limits.
+    // Example: New student claims 2 logo patches → changes to old student → still sees 2 claimed, can order 1 more (max 3 - 2 = 1)
     let claimedItems = {};
     if (orParts.length > 0) {
       const claimedStatuses = ["claimed", "completed"];
@@ -245,6 +271,7 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
       if (claimedErr) {
         console.error("Max quantities: claimed orders query error", claimedErr);
       }
+      // Count ALL claimed orders regardless of student type when placed - they all count toward current type's limits
       for (const row of claimedOrders || []) {
         const orderItems = Array.isArray(row.items) ? row.items : [];
         for (const it of orderItems) {
@@ -255,16 +282,26 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
             if (lower.includes("jogging pants")) key = "jogging pants";
             if (lower.includes("logo patch")) key = "logo patch";
           }
-          if (key && typeof key === "string" && key.toLowerCase().includes("logo patch")) key = "logo patch";
           if (!key) continue;
+          // resolveItemKey now always returns "logo patch" for both "new logo patch" and "logo patch" (they're the same item)
           claimedItems[key] = (claimedItems[key] || 0) + (Number(it.quantity) || 0);
         }
       }
-      // Debug: confirm claimed orders are included in claimedItems
-      const claimedOrderCount = claimedOrders?.length ?? 0;
-      const claimedKeys = Object.keys(claimedItems);
-      if (claimedOrderCount > 0 || claimedKeys.length > 0) {
-        console.log("Max quantities: claimedItems from", claimedOrderCount, "claimed order(s) -> keys:", claimedKeys.join(", ") || "(none)");
+      // Debug logging: Track current student type and claimed order validation
+      if (claimedOrders && claimedOrders.length > 0) {
+        const claimedOrderCount = claimedOrders.length;
+        const claimedKeys = Object.keys(claimedItems);
+        const logoPatchClaimed = claimedItems["logo patch"] || 0;
+        const logoPatchMax = maxQuantities["logo patch"] || 0;
+        console.log(`[Max Quantities] Validating claimed orders for student type: ${studentType}, claimed order count: ${claimedOrderCount}`, {
+          studentType,
+          educationLevel,
+          gender,
+          claimedKeys: claimedKeys.join(", ") || "(none)",
+          logoPatchClaimed,
+          logoPatchMax,
+          logoPatchRemaining: logoPatchMax > 0 ? Math.max(0, logoPatchMax - logoPatchClaimed) : 0
+        });
       }
     }
 
@@ -330,8 +367,8 @@ router.get("/profile", verifyToken, async (req, res) => {
       educationLevel: isStaff ? null : (data?.education_level || null),
       gender: isStaff ? null : (data?.gender || null),
       studentType: isStaff ? null : (data?.student_type || null),
-      onboardingCompleted: isStaff ? null : (data?.onboarding_completed ?? false),
-      onboarding_completed: isStaff ? null : (data?.onboarding_completed ?? false),
+      onboardingCompleted: isStaff ? null : (data?.onboarding_completed === true ? true : false),
+      onboarding_completed: isStaff ? null : (data?.onboarding_completed === true ? true : false),
       onboardingCompletedAt: isStaff ? null : (data?.onboarding_completed_at ?? null),
       onboarding_completed_at: isStaff ? null : (data?.onboarding_completed_at ?? null),
     };
@@ -568,8 +605,8 @@ router.put("/profile", verifyToken, async (req, res) => {
       educationLevel: isAdmin ? null : (data.education_level || null),
       gender: isAdmin ? null : (data.gender ?? null),
       studentType: isAdmin ? null : (data.student_type ?? null),
-      onboardingCompleted: isAdmin ? null : (data.onboarding_completed ?? false),
-      onboarding_completed: isAdmin ? null : (data.onboarding_completed ?? false),
+      onboardingCompleted: isAdmin ? null : (data.onboarding_completed === true ? true : false),
+      onboarding_completed: isAdmin ? null : (data.onboarding_completed === true ? true : false),
       onboardingCompletedAt: isAdmin ? null : (data.onboarding_completed_at ?? null),
       onboarding_completed_at: isAdmin ? null : (data.onboarding_completed_at ?? null),
     };
