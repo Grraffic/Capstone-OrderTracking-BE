@@ -372,6 +372,15 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
       console.warn("Old student but no studentIdForOrders - cannot check permissions");
     }
 
+    // Automatically enable logo patch for old students with max 3 (like new students)
+    // This ensures logo patch is always available for old students, even without explicit permissions
+    if (studentType && String(studentType).toLowerCase() === "old") {
+      if (maxQuantities["logo patch"] === undefined || maxQuantities["logo patch"] === null) {
+        maxQuantities["logo patch"] = 3;
+        console.log("[Max Quantities] Auto-enabled logo patch for old student with max 3");
+      }
+    }
+
     // Voided = total_item_limit set to 0 by auto-void (unclaimed). Only block if they also have placed orders
     // (so we don't block a student who has no orders/claimed items—voided orders are cancelled and don't show there).
     const blockedDueToVoid =
