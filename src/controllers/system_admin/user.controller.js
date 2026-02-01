@@ -200,6 +200,18 @@ exports.createUser = async (req, res) => {
     const createdByUserId = req.user?.id; // Get authenticated user ID for email_role_assignments
     const user = await userService.createUser(userData, createdByUserId);
 
+    // Emit Socket.IO event for real-time updates (only for students)
+    if (user && (userData.role === "student" || user.role === "student")) {
+      const io = req.app.get("io");
+      if (io) {
+        io.emit("student:created", {
+          student: user,
+          timestamp: new Date().toISOString(),
+        });
+        console.log(`📡 Socket.IO: Emitted student:created for student ${user.id || user.student_number}`);
+      }
+    }
+
     return res.status(201).json({
       success: true,
       data: user,
@@ -238,6 +250,19 @@ exports.updateUser = async (req, res) => {
         success: false,
         message: "User not found",
       });
+    }
+
+    // Emit Socket.IO event for real-time updates (only for students)
+    if (user && (user.role === "student" || updates.role === "student")) {
+      const io = req.app.get("io");
+      if (io) {
+        io.emit("student:updated", {
+          student: user,
+          updates: updates,
+          timestamp: new Date().toISOString(),
+        });
+        console.log(`📡 Socket.IO: Emitted student:updated for student ${user.id || id}`);
+      }
     }
 
     return res.json({
@@ -281,6 +306,19 @@ exports.deleteUser = async (req, res) => {
         success: false,
         message: "User not found",
       });
+    }
+
+    // Emit Socket.IO event for real-time updates (only for students)
+    if (user && user.role === "student") {
+      const io = req.app.get("io");
+      if (io) {
+        io.emit("student:deleted", {
+          studentId: id,
+          student: user,
+          timestamp: new Date().toISOString(),
+        });
+        console.log(`📡 Socket.IO: Emitted student:deleted for student ${id}`);
+      }
     }
 
     return res.json({
@@ -345,6 +383,21 @@ exports.bulkUpdateUsers = async (req, res) => {
     }
 
     const result = await userService.bulkUpdateUsers(userIds, updateData);
+
+    // Emit Socket.IO event for real-time updates (bulk update affects students)
+    const io = req.app.get("io");
+    if (io && result.updatedUsers && result.updatedUsers.length > 0) {
+      // Filter to only students
+      const updatedStudents = result.updatedUsers.filter(u => u.role === "student");
+      if (updatedStudents.length > 0) {
+        io.emit("students:bulk-updated", {
+          students: updatedStudents,
+          updateData: updateData,
+          timestamp: new Date().toISOString(),
+        });
+        console.log(`📡 Socket.IO: Emitted students:bulk-updated for ${updatedStudents.length} student(s)`);
+      }
+    }
 
     return res.json({
       success: true,

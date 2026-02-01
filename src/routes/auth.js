@@ -186,11 +186,20 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
 
     // Get max quantities based on CURRENT student type (not the type when orders were placed)
     // This ensures that when a student changes types, their claimed orders are validated against their current type's limits
-    const maxQuantities = getMaxQuantitiesForStudent(
-      educationLevel,
-      studentType,
-      gender
-    );
+    // For old students: Start with empty maxQuantities - only explicitly allowed items will be added
+    // For new students: Use default segment rules
+    let maxQuantities = {};
+    if (studentType && String(studentType).toLowerCase() === "old") {
+      // Old students: Start with empty - only items from manual permissions will be added
+      maxQuantities = {};
+    } else {
+      // New students: Use default segment rules
+      maxQuantities = getMaxQuantitiesForStudent(
+        educationLevel,
+        studentType,
+        gender
+      );
+    }
 
     // Sum quantities per item from this student's placed orders.
     // Only count active orders (pending, processing, ready, etc.) - NOT claimed/completed orders.
@@ -306,6 +315,62 @@ router.get("/max-quantities", verifyToken, async (req, res) => {
     }
 
     const slotsUsedFromPlacedOrders = Object.keys(alreadyOrdered || {}).length;
+
+    // Check for custom quantities from student_item_permissions for ALL students (new and old)
+    // System admins can override default max quantities by setting custom quantities in EditStudentOrderLimitsModal
+    if (studentIdForOrders) {
+      try {
+        // Get student's manual permissions
+        const { getStudentItemPermissions } = require("../services/system_admin/student_item_permissions.service");
+        const permissionsResult = await getStudentItemPermissions(studentIdForOrders);
+        
+        if (permissionsResult.success && permissionsResult.data) {
+          Object.entries(permissionsResult.data).forEach(([itemName, perm]) => {
+            const permObj = typeof perm === "object" ? perm : { enabled: Boolean(perm), quantity: null };
+            
+            if (studentType && String(studentType).toLowerCase() === "old") {
+              // For old students: ONLY add items that are explicitly enabled in permissions
+              // Items NOT in permissions will NOT be in maxQuantities, making them unorderable
+              if (permObj.enabled) {
+                maxQuantities[itemName] = permObj.quantity != null && permObj.quantity > 0 
+                  ? permObj.quantity 
+                  : 1; // Default max for manually granted items
+              }
+              // If permission is disabled, do NOT add to maxQuantities (item will be unorderable)
+            } else {
+              // For new students: Override default max quantities with custom quantities if set
+              // If a custom quantity is set, use it; otherwise keep the default from segment rules
+              if (permObj.enabled && permObj.quantity != null && permObj.quantity > 0) {
+                maxQuantities[itemName] = permObj.quantity;
+                console.log(`[Max Quantities] Using custom quantity for ${itemName}: ${permObj.quantity} (student: ${studentIdForOrders})`);
+              }
+              // If permission is disabled for new students, set max to 0 (item unorderable)
+              // This allows system admins to disable specific items for new students too
+              if (permObj.enabled === false) {
+                maxQuantities[itemName] = 0;
+              }
+            }
+          });
+        } else if (studentType && String(studentType).toLowerCase() === "old") {
+          // No permissions found - old student has no enabled items
+          // maxQuantities remains empty, so all items will be unorderable
+          console.log("Old student has no manual permissions - all items will be disabled");
+        }
+      } catch (error) {
+        // If permissions table doesn't exist or there's an error, continue without permissions
+        if (studentType && String(studentType).toLowerCase() === "old") {
+          // Old student will have empty maxQuantities, so all items will be unorderable
+          console.warn("Error checking student item permissions:", error.message);
+        } else {
+          // For new students, continue with default segment rules if permissions check fails
+          console.warn("Error checking student item permissions (using defaults):", error.message);
+        }
+      }
+    } else if (studentType && String(studentType).toLowerCase() === "old") {
+      // Old student but no studentIdForOrders - can't check permissions
+      // Leave maxQuantities empty so all items are unorderable
+      console.warn("Old student but no studentIdForOrders - cannot check permissions");
+    }
 
     // Voided = total_item_limit set to 0 by auto-void (unclaimed). Only block if they also have placed orders
     // (so we don't block a student who has no orders/claimed items—voided orders are cancelled and don't show there).

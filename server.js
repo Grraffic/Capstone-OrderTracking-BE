@@ -20,6 +20,11 @@ const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
 const isProduction = process.env.NODE_ENV === "production";
 
+// Server-level security: Set connection limits to prevent resource exhaustion
+server.maxConnections = parseInt(process.env.MAX_CONNECTIONS, 10) || 1000;
+server.keepAliveTimeout = parseInt(process.env.KEEP_ALIVE_TIMEOUT_MS, 10) || 65000; // 65 seconds
+server.headersTimeout = parseInt(process.env.HEADERS_TIMEOUT_MS, 10) || 66000; // 66 seconds (must be > keepAliveTimeout)
+
 // ============================================================================
 // SOCKET.IO CONFIGURATION
 // ============================================================================
@@ -102,10 +107,38 @@ if (voidUnclaimedAfterSeconds != null && voidUnclaimedAfterSeconds > 0) {
 // MIDDLEWARE CONFIGURATION
 // ============================================================================
 
-// Security headers
+// Enhanced Security Headers with Helmet
 app.use(helmet({
-  contentSecurityPolicy: false, // Disable CSP for API (can be configured if needed)
-  crossOriginEmbedderPolicy: false,
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      mediaSrc: ["'self'"],
+      frameSrc: ["'none'"],
+    },
+  },
+  crossOriginEmbedderPolicy: false, // Disabled for API compatibility
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" },
+  dnsPrefetchControl: true,
+  frameguard: { action: "deny" },
+  hidePoweredBy: true,
+  hsts: {
+    maxAge: 31536000, // 1 year
+    includeSubDomains: true,
+    preload: true,
+  },
+  ieNoOpen: true,
+  noSniff: true,
+  originAgentCluster: true,
+  permittedCrossDomainPolicies: false,
+  referrerPolicy: { policy: "no-referrer" },
+  xssFilter: true,
 }));
 
 // Compression middleware - compress responses
@@ -118,24 +151,123 @@ if (!isProduction) {
   app.use(morgan("combined"));
 }
 
-// Rate limiting - disabled by default for testing; set RATE_LIMIT_ENABLED=true to enable in production
-const rateLimitEnabled = process.env.RATE_LIMIT_ENABLED === "true";
-if (rateLimitEnabled) {
-  const rateLimitWindowMs = parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000;
-  const rateLimitMax = (() => {
+// ============================================================================
+// DDoS PROTECTION - Rate Limiting Configuration
+// ============================================================================
+
+// General API rate limiter - Always enabled for production security
+const generalLimiter = rateLimit({
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000, // 15 minutes
+  max: (() => {
     const env = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS, 10);
     if (!Number.isNaN(env)) return env;
-    return isProduction ? 300 : 1000;
-  })();
-  const limiter = rateLimit({
-    windowMs: rateLimitWindowMs,
-    max: rateLimitMax,
-    message: "Too many requests from this IP, please try again later.",
-    standardHeaders: true,
-    legacyHeaders: false,
+    return isProduction ? 500 : 2000; // More lenient limits for normal usage
+  })(),
+  message: {
+    error: "Too many requests from this IP, please try again later.",
+    retryAfter: "15 minutes",
+  },
+  standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
+  legacyHeaders: false,
+  skip: (req) => {
+    // Skip rate limiting if explicitly disabled via env var (for testing only)
+    if (process.env.RATE_LIMIT_ENABLED === "false" && !isProduction) return true;
+    // Skip for health check endpoints
+    if (req.path === "/health" || req.path === "/api/health") return true;
+    return false;
+  },
+  handler: (req, res) => {
+    res.status(429).json({
+      error: "Too many requests",
+      message: "You have exceeded the rate limit. Please try again later.",
+      retryAfter: "15 minutes",
+    });
+  },
+});
+
+// Stricter rate limiter for authentication endpoints
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: isProduction ? 10 : 50, // More lenient for auth endpoints
+  message: {
+    error: "Too many authentication attempts, please try again later.",
+    retryAfter: "15 minutes",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true, // Don't count successful requests
+  skip: (req) => {
+    // Skip for health check endpoints
+    if (req.path === "/health" || req.path === "/api/health") return true;
+    return false;
+  },
+});
+
+// Stricter rate limiter for write operations (POST, PUT, PATCH, DELETE)
+const writeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: isProduction ? 200 : 500, // More lenient for write operations
+  message: {
+    error: "Too many write requests from this IP, please try again later.",
+    retryAfter: "15 minutes",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => {
+    // Only apply to write methods
+    return !["POST", "PUT", "PATCH", "DELETE"].includes(req.method);
+  },
+});
+
+// Apply rate limiters
+app.use("/api", generalLimiter);
+app.use("/api/auth", authLimiter);
+app.use("/api", writeLimiter);
+
+// Request timeout middleware - Prevent long-running requests from consuming resources
+const requestTimeout = parseInt(process.env.REQUEST_TIMEOUT_MS, 10) || 30000; // 30 seconds default
+app.use((req, res, next) => {
+  req.setTimeout(requestTimeout, () => {
+    if (!res.headersSent) {
+      res.status(408).json({
+        error: "Request timeout",
+        message: "The request took too long to process. Please try again.",
+      });
+    }
   });
-  app.use("/api", limiter);
-}
+  next();
+});
+
+// Request size validation - Additional layer of protection
+app.use((req, res, next) => {
+  const contentLength = req.get("content-length");
+  if (contentLength) {
+    const sizeInMB = parseInt(contentLength, 10) / (1024 * 1024);
+    if (sizeInMB > 10) {
+      return res.status(413).json({
+        error: "Payload too large",
+        message: "Request body exceeds the maximum allowed size of 10MB.",
+      });
+    }
+  }
+  next();
+});
+
+// Security: Prevent HTTP Parameter Pollution
+app.use((req, res, next) => {
+  // Remove duplicate query parameters (keep first occurrence)
+  if (req.query) {
+    const seen = new Set();
+    Object.keys(req.query).forEach((key) => {
+      if (seen.has(key.toLowerCase())) {
+        delete req.query[key];
+      } else {
+        seen.add(key.toLowerCase());
+      }
+    });
+  }
+  next();
+});
 
 // CORS Configuration - Allow requests from frontend
 const corsOptions = {

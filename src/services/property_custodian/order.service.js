@@ -550,10 +550,17 @@ class OrderService {
           // Sum quantities in this order by resolved item key
           const totalsByItem = {};
           for (const item of orderData.items || []) {
-            const key = resolveItemKey(item.name || "");
+            const rawName = (item.name || "").trim();
+            const key = resolveItemKey(rawName);
             if (!key) continue;
             // resolveItemKey now always returns "logo patch" for both "new logo patch" and "logo patch"
-            totalsByItem[key] = (totalsByItem[key] || 0) + (Number(item.quantity) || 0);
+            const qty = Number(item.quantity) || 0;
+            totalsByItem[key] = (totalsByItem[key] || 0) + qty;
+            
+            // Debug logging for logo patch to track quantity calculation
+            if (key === "logo patch" || rawName.toLowerCase().includes("logo patch")) {
+              console.log(`[Order Validation] Logo Patch item found: rawName="${rawName}", resolvedKey="${key}", quantity=${qty}, totalForKey=${totalsByItem[key]}`);
+            }
           }
 
           // Sum quantities already in placed orders for this student (pending, paid, processing, ready, etc.)
@@ -618,41 +625,109 @@ class OrderService {
 
           // Validate each item against CURRENT student type's max limits
           // The studentType, educationLevelForSegment, and gender are from userRow (current values, not from order history)
+          // For old students with manually granted permissions, use different validation logic
+          let studentPermissions = null;
+          if (studentType && String(studentType).toLowerCase() === "old" && studentId) {
+            try {
+              const { getStudentItemPermissions } = require("../system_admin/student_item_permissions.service");
+              const permissionsResult = await getStudentItemPermissions(studentId);
+              if (permissionsResult.success && permissionsResult.data) {
+                studentPermissions = permissionsResult.data;
+              }
+            } catch (permErr) {
+              // If permissions table doesn't exist, continue without permissions
+              console.warn("Error fetching student permissions for order validation:", permErr.message);
+            }
+          }
+
           for (const [itemKey, totalQty] of Object.entries(totalsByItem)) {
             // Get max limit based on CURRENT student type (from userRow.student_type, line 417)
-            const max = getMaxQuantityForItem(
+            let max = getMaxQuantityForItem(
               itemKey,
               educationLevelForSegment,
               studentType,
               gender
             );
+            
+            // For old students with manually granted permissions, use the permission max instead
+            let hasManualPermission = false;
+            if (studentType && String(studentType).toLowerCase() === "old" && studentPermissions) {
+              const perm = studentPermissions[itemKey];
+              if (perm) {
+                const permObj = typeof perm === "object" ? perm : { enabled: Boolean(perm), quantity: null };
+                if (permObj.enabled) {
+                  hasManualPermission = true;
+                  // Use the max from permissions (this is the NEW total allowed)
+                  max = permObj.quantity != null && permObj.quantity > 0 
+                    ? permObj.quantity 
+                    : 1; // Default max for manually granted items
+                }
+              }
+            }
+
             const alreadyOrdered = alreadyOrderedByItem[itemKey] || 0;
             // claimedCount includes ALL claimed orders regardless of student type when placed
             const claimedCount = claimedItemsByItem[itemKey] || 0;
-            // Total includes both placed orders and claimed orders
-            const totalUsed = alreadyOrdered + claimedCount + totalQty;
+            
+            // For items with max > 1, only count claimed items (pending orders don't block)
+            // For items with max = 1, count both to prevent duplicates
+            let totalUsed;
+            if (hasManualPermission) {
+              // Manual permission: max is NEW total, only subtract claimed items
+              totalUsed = claimedCount + totalQty;
+            } else {
+              // For max > 1 items (like logo patch), only count claimed items
+              // For max = 1 items, count both alreadyOrdered and claimedCount
+              const shouldAllowMultipleOrders = max > 1;
+              const subtractAlreadyOrdered = !shouldAllowMultipleOrders;
+              totalUsed = (subtractAlreadyOrdered ? alreadyOrdered : 0) + claimedCount + totalQty;
+            }
             
             // Debug logging: Track current student type and claimed order validation
-            if (itemKey === "logo patch" || (claimedCount > 0 && max > 0)) {
-              console.log(`[Order Validation] Item: ${itemKey}, student type: ${studentType}, claimed: ${claimedCount}, max: ${max}, already ordered: ${alreadyOrdered}, new order qty: ${totalQty}, total used: ${totalUsed}`, {
+            // Always log for logo patch to debug the issue
+            if (itemKey === "logo patch") {
+              console.log(`[Order Validation - Logo Patch] Item: ${itemKey}, student type: ${studentType}, hasManualPermission: ${hasManualPermission}, claimed: ${claimedCount}, max: ${max}, already ordered: ${alreadyOrdered}, new order qty: ${totalQty}, total used: ${totalUsed}`, {
                 studentType,
                 educationLevel: educationLevelForSegment,
                 gender,
                 itemKey,
+                hasManualPermission,
                 claimedCount,
                 max,
                 alreadyOrdered,
                 totalQty,
                 totalUsed,
-                remaining: max > 0 ? Math.max(0, max - alreadyOrdered - claimedCount) : 0
+                totalsByItem,
+                orderItems: orderData.items?.map(i => ({ name: i.name, quantity: i.quantity })),
+                remaining: max > 0 ? Math.max(0, max - (hasManualPermission ? claimedCount : ((max > 1 ? 0 : alreadyOrdered) + claimedCount))) : 0
+              });
+            } else if (claimedCount > 0 && max > 0) {
+              console.log(`[Order Validation] Item: ${itemKey}, student type: ${studentType}, hasManualPermission: ${hasManualPermission}, claimed: ${claimedCount}, max: ${max}, already ordered: ${alreadyOrdered}, new order qty: ${totalQty}, total used: ${totalUsed}`, {
+                studentType,
+                educationLevel: educationLevelForSegment,
+                gender,
+                itemKey,
+                hasManualPermission,
+                claimedCount,
+                max,
+                alreadyOrdered,
+                totalQty,
+                totalUsed,
+                remaining: max > 0 ? Math.max(0, max - (hasManualPermission ? claimedCount : ((max > 1 ? 0 : alreadyOrdered) + claimedCount))) : 0
               });
             }
             
             if (totalUsed > max) {
-              const totalAlreadyHave = alreadyOrdered + claimedCount;
-              throw new Error(
-                `You have already ordered ${alreadyOrdered} of this item (and claimed ${claimedCount}). Adding ${totalQty} would exceed the maximum (${max}) per student.`
-              );
+              if (hasManualPermission) {
+                throw new Error(
+                  `You have already claimed ${claimedCount} of this item. Adding ${totalQty} would exceed the maximum (${max}) per student.`
+                );
+              } else {
+                const totalAlreadyHave = alreadyOrdered + claimedCount;
+                throw new Error(
+                  `You have already ordered ${alreadyOrdered} of this item (and claimed ${claimedCount}). Adding ${totalQty} would exceed the maximum (${max}) per student.`
+                );
+              }
             }
           }
         }
@@ -911,6 +986,16 @@ class OrderService {
         console.error("Failed to log transaction for order creation:", txError);
       }
 
+      // When order is placed, automatically disable permissions for items in the order
+      if (orderData.student_id) {
+        try {
+          await this.disablePermissionsOnOrderPlacement(data);
+        } catch (permErr) {
+          console.error("Failed to disable permissions on order placement:", permErr);
+          // Do not rethrow; order was already created successfully
+        }
+      }
+
       return {
         success: true,
         data,
@@ -1091,7 +1176,7 @@ class OrderService {
         .update(updates)
         .eq("id", id)
         .eq("is_active", true)
-        .select()
+        .select("*, items") // Ensure items are included for permission check
         .single();
 
       if (error) throw error;
@@ -1112,6 +1197,26 @@ class OrderService {
         } catch (restoreErr) {
           console.error("Failed to restore inventory for cancelled order:", restoreErr);
           // Do not rethrow; status was already updated
+        }
+
+        // When order is cancelled, re-enable permissions if student hasn't reached max from claimed items
+        if (data.student_id) {
+          try {
+            await this.reEnablePermissionsOnOrderCancellation(data);
+          } catch (permErr) {
+            console.error("Failed to re-enable permissions on order cancellation:", permErr);
+            // Do not rethrow; order status was already updated
+          }
+        }
+      }
+
+      // When order is claimed, check if student has reached max quantity and disable permissions if needed
+      if (status === "claimed" && data.student_id) {
+        try {
+          await this.checkAndDisablePermissionsOnClaim(data);
+        } catch (permErr) {
+          console.error("Failed to check and disable permissions on claim:", permErr);
+          // Do not rethrow; order status was already updated
         }
       }
 
@@ -1147,6 +1252,379 @@ class OrderService {
     } catch (error) {
       console.error("Update order status error:", error);
       throw error;
+    }
+  }
+
+  /**
+   * Disable permissions for items when order is placed
+   * This automatically unchecks eligible items in system admin when student places an order
+   * @param {Object} order - Order object with student_id and items
+   * @returns {Promise<void>}
+   */
+  async disablePermissionsOnOrderPlacement(order) {
+    try {
+      if (!order || !order.student_id || !order.items || !Array.isArray(order.items)) {
+        return;
+      }
+
+      // Get student info to check if they're an old student
+      const { data: studentRow } = await supabase
+        .from("students")
+        .select("id, student_type")
+        .eq("id", order.student_id)
+        .maybeSingle();
+
+      // Only process for old students (they have manual permissions)
+      if (!studentRow || String(studentRow.student_type || "").toLowerCase() !== "old") {
+        return;
+      }
+
+      // Get student's current permissions
+      const { getStudentItemPermissions } = require("../system_admin/student_item_permissions.service");
+      const permissionsResult = await getStudentItemPermissions(order.student_id);
+      
+      if (!permissionsResult.success || !permissionsResult.data) {
+        return; // No permissions to disable
+      }
+
+      // Get items that have enabled permissions and are in this order
+      const itemsToDisable = [];
+      const orderItems = Array.isArray(order.items) ? order.items : [];
+      
+      for (const item of orderItems) {
+        const rawName = (item.name || "").trim();
+        let key = resolveItemKey(rawName);
+        if (!key && rawName) {
+          const lower = rawName.toLowerCase();
+          if (lower.includes("jogging pants")) key = "jogging pants";
+          if (lower.includes("logo patch")) key = "logo patch";
+        }
+        if (key && typeof key === "string" && key.toLowerCase().includes("logo patch")) key = "logo patch";
+        if (!key) continue;
+
+        // Check if student has an enabled permission for this item
+        const perm = permissionsResult.data[key];
+        if (perm) {
+          const permObj = typeof perm === "object" ? perm : { enabled: Boolean(perm), quantity: null };
+          if (permObj.enabled) {
+            itemsToDisable.push(key);
+            console.log(`[Order Service] Disabling permission for ${key} after order placement (order #${order.order_number || order.id})`);
+          }
+        }
+      }
+
+      // Disable permissions for items in the order
+      if (itemsToDisable.length > 0) {
+        const { updateStudentItemPermissions } = require("../system_admin/student_item_permissions.service");
+        const permissionsToDisable = {};
+        itemsToDisable.forEach(itemName => {
+          permissionsToDisable[itemName] = { enabled: false, quantity: null };
+        });
+
+        const disableResult = await updateStudentItemPermissions(
+          order.student_id,
+          permissionsToDisable
+        );
+
+        if (disableResult.success) {
+          console.log(`[Order Service] Automatically disabled ${itemsToDisable.length} item permission(s) for student ${order.student_id} after order placement:`, itemsToDisable);
+        } else {
+          console.error(`[Order Service] Failed to disable permissions on placement:`, disableResult.error);
+        }
+      }
+    } catch (error) {
+      console.error("Error in disablePermissionsOnOrderPlacement:", error);
+      // Don't throw - this is a background operation
+    }
+  }
+
+  /**
+   * Check if student has reached max quantity for items in claimed order
+   * and automatically disable permissions if max is reached
+   * @param {Object} order - Order object with student_id and items
+   * @returns {Promise<void>}
+   */
+  async checkAndDisablePermissionsOnClaim(order) {
+    try {
+      if (!order || !order.student_id || !order.items || !Array.isArray(order.items)) {
+        return;
+      }
+
+      // Get student info to check if they're an old student
+      const { data: studentRow } = await supabase
+        .from("students")
+        .select("id, student_type")
+        .eq("id", order.student_id)
+        .maybeSingle();
+
+      // Only process for old students (they have manual permissions)
+      if (!studentRow || String(studentRow.student_type || "").toLowerCase() !== "old") {
+        return;
+      }
+
+      // Get student's current permissions
+      const { getStudentItemPermissions } = require("../system_admin/student_item_permissions.service");
+      const permissionsResult = await getStudentItemPermissions(order.student_id);
+      
+      if (!permissionsResult.success || !permissionsResult.data) {
+        return; // No permissions to check
+      }
+
+      // Get all claimed orders for this student to calculate total claimed quantities
+      const { data: claimedOrders, error: claimedErr } = await supabase
+        .from("orders")
+        .select("items")
+        .eq("student_id", order.student_id)
+        .eq("is_active", true)
+        .in("status", ["claimed", "completed"]);
+
+      if (claimedErr) {
+        console.error("Error fetching claimed orders for permission check:", claimedErr);
+        return;
+      }
+
+      // Calculate total claimed quantities per item
+      const claimedQuantities = {};
+      const { resolveItemKey } = require("../../config/itemMaxOrder");
+      
+      for (const claimedOrder of claimedOrders || []) {
+        const orderItems = Array.isArray(claimedOrder.items) ? claimedOrder.items : [];
+        for (const item of orderItems) {
+          const rawName = (item.name || "").trim();
+          let key = resolveItemKey(rawName);
+          if (!key && rawName) {
+            const lower = rawName.toLowerCase();
+            if (lower.includes("jogging pants")) key = "jogging pants";
+            if (lower.includes("logo patch")) key = "logo patch";
+          }
+          if (key && typeof key === "string" && key.toLowerCase().includes("logo patch")) key = "logo patch";
+          if (!key) continue;
+          claimedQuantities[key] = (claimedQuantities[key] || 0) + (Number(item.quantity) || 0);
+        }
+      }
+
+      // Check each item in permissions and disable if max is reached
+      const itemsToDisable = [];
+      for (const [itemName, perm] of Object.entries(permissionsResult.data)) {
+        const permObj = typeof perm === "object" ? perm : { enabled: Boolean(perm), quantity: null };
+        if (!permObj.enabled) continue; // Already disabled
+
+        const maxQuantity = permObj.quantity != null && permObj.quantity > 0 
+          ? permObj.quantity 
+          : 1; // Default max for manually granted items
+        
+        const claimedCount = claimedQuantities[itemName] || 0;
+        
+        // If claimed count has reached or exceeded the max, disable the permission
+        if (claimedCount >= maxQuantity) {
+          itemsToDisable.push(itemName);
+          console.log(`[Order Service] Student ${order.student_id} has reached max quantity (${maxQuantity}) for ${itemName} (claimed: ${claimedCount}). Disabling permission.`);
+        }
+      }
+
+      // Disable permissions for items that have reached max
+      if (itemsToDisable.length > 0) {
+        const { updateStudentItemPermissions } = require("../system_admin/student_item_permissions.service");
+        const permissionsToDisable = {};
+        itemsToDisable.forEach(itemName => {
+          permissionsToDisable[itemName] = { enabled: false, quantity: null };
+        });
+
+        const disableResult = await updateStudentItemPermissions(
+          order.student_id,
+          permissionsToDisable
+        );
+
+        if (disableResult.success) {
+          console.log(`[Order Service] Automatically disabled ${itemsToDisable.length} item permission(s) for student ${order.student_id} after order claim:`, itemsToDisable);
+        } else {
+          console.error(`[Order Service] Failed to disable permissions:`, disableResult.error);
+        }
+      }
+    } catch (error) {
+      console.error("Error in checkAndDisablePermissionsOnClaim:", error);
+      // Don't throw - this is a background operation
+    }
+  }
+
+  /**
+   * Re-enable permissions for items when order is cancelled
+   * This automatically checks eligible items in system admin when student cancels an order
+   * Only re-enables if student hasn't reached max quantity from claimed items
+   * @param {Object} order - Order object with student_id and items
+   * @returns {Promise<void>}
+   */
+  async reEnablePermissionsOnOrderCancellation(order) {
+    try {
+      if (!order || !order.student_id || !order.items || !Array.isArray(order.items)) {
+        return;
+      }
+
+      // Get student info to check if they're an old student
+      const { data: studentRow } = await supabase
+        .from("students")
+        .select("id, student_type")
+        .eq("id", order.student_id)
+        .maybeSingle();
+
+      // Only process for old students (they have manual permissions)
+      if (!studentRow || String(studentRow.student_type || "").toLowerCase() !== "old") {
+        return;
+      }
+
+      // Get all claimed orders for this student to calculate total claimed quantities
+      const { data: claimedOrders, error: claimedErr } = await supabase
+        .from("orders")
+        .select("items")
+        .eq("student_id", order.student_id)
+        .eq("is_active", true)
+        .in("status", ["claimed", "completed"]);
+
+      if (claimedErr) {
+        console.error("Error fetching claimed orders for permission re-enable:", claimedErr);
+        return;
+      }
+
+      // Calculate total claimed quantities per item
+      const claimedQuantities = {};
+      for (const claimedOrder of claimedOrders || []) {
+        const orderItems = Array.isArray(claimedOrder.items) ? claimedOrder.items : [];
+        for (const item of orderItems) {
+          const rawName = (item.name || "").trim();
+          let key = resolveItemKey(rawName);
+          if (!key && rawName) {
+            const lower = rawName.toLowerCase();
+            if (lower.includes("jogging pants")) key = "jogging pants";
+            if (lower.includes("logo patch")) key = "logo patch";
+          }
+          if (key && typeof key === "string" && key.toLowerCase().includes("logo patch")) key = "logo patch";
+          if (!key) continue;
+          claimedQuantities[key] = (claimedQuantities[key] || 0) + (Number(item.quantity) || 0);
+        }
+      }
+
+      // Get all placed orders (pending/processing) to check if there are other orders for these items
+      const { data: placedOrders } = await supabase
+        .from("orders")
+        .select("id, items")
+        .eq("student_id", order.student_id)
+        .eq("is_active", true)
+        .in("status", ["pending", "paid", "processing", "ready", "payment_pending"]);
+
+      // Calculate quantities in other placed orders (excluding the cancelled one)
+      const placedQuantities = {};
+      for (const placedOrder of placedOrders || []) {
+        // Skip the cancelled order
+        if (placedOrder.id && order.id && String(placedOrder.id) === String(order.id)) continue;
+        
+        const orderItems = Array.isArray(placedOrder.items) ? placedOrder.items : [];
+        for (const item of orderItems) {
+          const rawName = (item.name || "").trim();
+          let key = resolveItemKey(rawName);
+          if (!key && rawName) {
+            const lower = rawName.toLowerCase();
+            if (lower.includes("jogging pants")) key = "jogging pants";
+            if (lower.includes("logo patch")) key = "logo patch";
+          }
+          if (key && typeof key === "string" && key.toLowerCase().includes("logo patch")) key = "logo patch";
+          if (!key) continue;
+          placedQuantities[key] = (placedQuantities[key] || 0) + (Number(item.quantity) || 0);
+        }
+      }
+
+      // Get student's current permissions (including disabled ones)
+      const { getStudentItemPermissions } = require("../system_admin/student_item_permissions.service");
+      const permissionsResult = await getStudentItemPermissions(order.student_id);
+      
+      // Also get all permissions (enabled and disabled) from database to check original max
+      const { data: allPermissions } = await supabase
+        .from("student_item_permissions")
+        .select("item_name, enabled, quantity")
+        .eq("student_id", order.student_id);
+
+      const permissionsMap = {};
+      if (allPermissions) {
+        allPermissions.forEach((p) => {
+          permissionsMap[p.item_name] = {
+            enabled: p.enabled,
+            quantity: p.quantity,
+          };
+        });
+      }
+
+      // Check each item in cancelled order and re-enable if appropriate
+      const itemsToReEnable = [];
+      const orderItems = Array.isArray(order.items) ? order.items : [];
+      
+      for (const item of orderItems) {
+        const rawName = (item.name || "").trim();
+        let key = resolveItemKey(rawName);
+        if (!key && rawName) {
+          const lower = rawName.toLowerCase();
+          if (lower.includes("jogging pants")) key = "jogging pants";
+          if (lower.includes("logo patch")) key = "logo patch";
+        }
+        if (key && typeof key === "string" && key.toLowerCase().includes("logo patch")) key = "logo patch";
+        if (!key) continue;
+
+        // Check if there are other placed orders for this item
+        // If yes, don't re-enable (student still has pending orders)
+        const otherPlacedQty = placedQuantities[key] || 0;
+        if (otherPlacedQty > 0) {
+          console.log(`[Order Service] Not re-enabling ${key} - student has ${otherPlacedQty} in other placed orders`);
+          continue;
+        }
+
+        // Get the original max quantity from permission (if it existed)
+        const originalPermission = permissionsMap[key];
+        const maxQuantity = originalPermission && originalPermission.quantity != null && originalPermission.quantity > 0
+          ? originalPermission.quantity
+          : 1; // Default max if permission didn't exist
+
+        const claimedCount = claimedQuantities[key] || 0;
+        
+        // Only re-enable if claimed count hasn't reached the max
+        if (claimedCount < maxQuantity) {
+          itemsToReEnable.push({
+            itemName: key,
+            maxQuantity,
+            claimedCount,
+            originalPermission,
+          });
+          console.log(`[Order Service] Will re-enable ${key} after order cancellation (claimed: ${claimedCount}, max: ${maxQuantity})`);
+        } else {
+          console.log(`[Order Service] Not re-enabling ${key} - student has reached max (claimed: ${claimedCount}, max: ${maxQuantity})`);
+        }
+      }
+
+      // Re-enable permissions for items that can be re-enabled
+      if (itemsToReEnable.length > 0) {
+        const { updateStudentItemPermissions } = require("../system_admin/student_item_permissions.service");
+        const permissionsToReEnable = {};
+        itemsToReEnable.forEach(({ itemName, maxQuantity, originalPermission }) => {
+          // Re-enable with the original quantity (or default 1 if it didn't exist)
+          permissionsToReEnable[itemName] = {
+            enabled: true,
+            quantity: originalPermission && originalPermission.quantity != null && originalPermission.quantity > 0
+              ? originalPermission.quantity
+              : null, // Use default from config if null
+          };
+        });
+
+        const reEnableResult = await updateStudentItemPermissions(
+          order.student_id,
+          permissionsToReEnable
+        );
+
+        if (reEnableResult.success) {
+          console.log(`[Order Service] Automatically re-enabled ${itemsToReEnable.length} item permission(s) for student ${order.student_id} after order cancellation:`, itemsToReEnable.map(i => i.itemName));
+        } else {
+          console.error(`[Order Service] Failed to re-enable permissions on cancellation:`, reEnableResult.error);
+        }
+      }
+    } catch (error) {
+      console.error("Error in reEnablePermissionsOnOrderCancellation:", error);
+      // Don't throw - this is a background operation
     }
   }
 
