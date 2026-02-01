@@ -46,14 +46,12 @@ GOOGLE_CALLBACK_URL=http://localhost:5000/api/auth/google/callback
 # Cloudinary
 CLOUDINARY_URL=cloudinary://...
 
-# Email (SMTP) – used for contact-form notifications to property custodians
+# Email (Resend) – used for contact-form notifications to property custodians
 # When a user submits the contact form, one email is sent BCC to all property custodians.
-EMAIL_HOST=smtp.gmail.com
-EMAIL_PORT=587
-EMAIL_USER=ramosraf278@gmail.com
-EMAIL_PASS=your-gmail-app-password
-# Optional: from address for contact notifications (defaults to EMAIL_USER)
-# CONTACT_FROM_EMAIL=noreply@example.com
+RESEND_API_KEY=re_your_resend_api_key_here
+# Optional: from address for contact notifications (defaults to onboarding@resend.dev for testing)
+# For production, use a verified domain email (e.g., noreply@yourdomain.com)
+RESEND_FROM_EMAIL=onboarding@resend.dev
 
 # Property custodians who receive contact form emails (and have property_custodian access)
 # Add ramosraf278@gmail.com and any other custodians; DB users with role property_custodian are included automatically.
@@ -65,32 +63,36 @@ PORT=5000
 NODE_ENV=development
 ```
 
-**Contact form email setup (optional):** To send contact form submissions to ramosraf278@gmail.com and other property custodians:
+**Contact form email setup (optional):** To send contact form submissions to property custodians:
 
-1. In your `.env`, set `EMAIL_HOST=smtp.gmail.com`, `EMAIL_PORT=587`, `EMAIL_USER=ramosraf278@gmail.com`, and `EMAIL_PASS` to a [Gmail App Password](https://support.google.com/accounts/answer/185833) (not your normal password).
-2. Set `SPECIAL_ADMIN_EMAILS=ramosraf278@gmail.com` (add more custodians comma-separated if needed). Users with role property_custodian in the database also receive the BCC automatically.
-3. Restart the backend. When someone submits the contact form, one email is sent BCC to all property custodians (config + DB).
+1. **Get your Resend API key:**
+   - Sign up at [resend.com](https://resend.com) (free tier available)
+   - Go to API Keys in your dashboard
+   - Create a new API key and copy it
 
-#### Contact form on Render (Gmail)
+2. **Set environment variables:**
+   - In your `.env`, set `RESEND_API_KEY` to your Resend API key
+   - Optionally set `RESEND_FROM_EMAIL` (defaults to `onboarding@resend.dev` for testing)
+   - Set `SPECIAL_ADMIN_EMAILS=ramosraf278@gmail.com` (add more custodians comma-separated if needed). Users with role property_custodian in the database also receive the BCC automatically.
 
-If the contact form works locally but not on Render, set these **exact** environment variable **Key** names in Render → Your Web Service → Environment:
+3. **Domain verification (for production):**
+   - For production use, verify your domain in Resend dashboard
+   - Use a verified email address for `RESEND_FROM_EMAIL` (e.g., `noreply@yourdomain.com`)
+   - For testing, you can use `onboarding@resend.dev` without domain verification
+
+4. Restart the backend. When someone submits the contact form, one email is sent BCC to all property custodians (config + DB).
+
+#### Contact form on Render (Resend)
+
+Set these **exact** environment variable **Key** names in Render → Your Web Service → Environment:
 
 | Key           | Value                 | Required |
 |---------------|-----------------------|----------|
-| `EMAIL_HOST`  | `smtp.gmail.com`      | Yes      |
-| `EMAIL_PORT`  | `587`                 | Yes      |
-| `EMAIL_USER`  | Your Gmail address    | Yes      |
-| `EMAIL_PASS`  | Gmail App Password    | Yes      |
-| `SPECIAL_ADMIN_EMAILS` | Gmail(s) that receive contact form emails (comma-separated) | Yes (for recipients) |
+| `RESEND_API_KEY`  | Your Resend API key   | Yes      |
+| `RESEND_FROM_EMAIL`  | Verified email or `onboarding@resend.dev` | No (defaults to `onboarding@resend.dev`) |
+| `SPECIAL_ADMIN_EMAILS` | Email(s) that receive contact form emails (comma-separated) | Yes (for recipients) |
 
-**Gmail App Password (required):** Gmail does not accept your normal password for SMTP. You must use an App Password:
-
-1. Enable [2-Step Verification](https://myaccount.google.com/signinoptions/two-step-verification) on your Google account.
-2. Go to [App Passwords](https://myaccount.google.com/apppasswords) (or Google Account → Security → 2-Step Verification → App passwords).
-3. Select app: **Mail**, device: **Other** (e.g. "La Verdad OrderFlow"), then **Generate**.
-4. Copy the 16-character password (no spaces) and set it as `EMAIL_PASS` in Render. Do **not** use your regular Gmail password.
-
-After saving env vars, redeploy the backend. Check Render **Logs** when someone submits the form: you should see either "Contact service: notification email sent successfully." or an error (e.g. "Invalid login" means `EMAIL_PASS` is wrong or not an App Password).
+After saving env vars, redeploy the backend. Check Render **Logs** when someone submits the form: you should see either "Contact service: notification email sent successfully via Resend." or an error message from the Resend API.
 
 ### Running the Server
 

@@ -1,5 +1,5 @@
 require("dotenv").config();
-const nodemailer = require("nodemailer");
+const { Resend } = require("resend");
 const supabase = require("../config/supabase");
 const { getSpecialAdminEmails } = require("../config/admin");
 
@@ -59,7 +59,7 @@ async function getPropertyCustodianEmails() {
 
 /**
  * Send contact form notification to all property custodians via email.
- * Uses EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASS. If not set, skips sending and logs.
+ * Uses RESEND_API_KEY and RESEND_FROM_EMAIL. If not set, skips sending and logs.
  * Does not throw; logs errors so contact creation can still return 201.
  * @param {{ name: string | null, email: string | null, message: string | null }} contactPayload
  */
@@ -71,28 +71,55 @@ async function sendContactNotificationToCustodians(contactPayload) {
     return;
   }
 
-  const host = process.env.EMAIL_HOST;
-  const port = process.env.EMAIL_PORT;
-  const user = process.env.EMAIL_USER;
-  const pass = process.env.EMAIL_PASS;
+  const apiKey = process.env.RESEND_API_KEY;
+  const fromEmail = process.env.RESEND_FROM_EMAIL || process.env.CONTACT_FROM_EMAIL || "onboarding@resend.dev";
+  const accountOwnerEmail = process.env.RESEND_ACCOUNT_OWNER_EMAIL || "ramosraf278@gmail.com";
 
-  if (!host || !user || !pass) {
+  if (!apiKey) {
     console.warn(
-      "Contact service: EMAIL_HOST, EMAIL_USER, or EMAIL_PASS not set; skipping contact notification email. Set these in Render Environment (or .env) for contact form emails."
+      "Contact service: RESEND_API_KEY not set; skipping contact notification email. Set RESEND_API_KEY in Render Environment (or .env) for contact form emails."
     );
     return;
   }
 
-  const portNum = port ? parseInt(port, 10) : 587;
-  console.log(
-    "Contact service: sending notification email via",
-    host + ":" + portNum,
-    "to",
-    recipients.length,
-    "recipient(s)"
-  );
+  // When using test email (onboarding@resend.dev), Resend only allows sending to account owner
+  // Always ensure account owner email is included when using test email
+  let finalRecipients = [...recipients];
+  const isTestEmail = fromEmail === "onboarding@resend.dev" || fromEmail.includes("@resend.dev");
+  
+  if (isTestEmail) {
+    // When using test email, Resend only allows sending to the account owner
+    // Ensure account owner email is always included
+    const accountOwnerLower = accountOwnerEmail.toLowerCase();
+    const hasAccountOwner = finalRecipients.some(email => email.toLowerCase() === accountOwnerLower);
+    
+    if (!hasAccountOwner) {
+      console.log(
+        `Contact service: Adding account owner email (${accountOwnerEmail}) to recipients for test email.`
+      );
+      finalRecipients = [accountOwnerEmail];
+    } else {
+      // Filter to only account owner when using test email
+      finalRecipients = finalRecipients.filter(email => 
+        email.toLowerCase() === accountOwnerLower
+      );
+    }
+    
+    if (recipients.length > finalRecipients.length) {
+      console.log(
+        `Contact service: Using test email (${fromEmail}) - Resend restriction: can only send to account owner (${accountOwnerEmail}). ` +
+        `Filtered ${recipients.length} recipient(s) to ${finalRecipients.length} (account owner only). ` +
+        `To send to all recipients, verify a domain at resend.com/domains and use a verified email as FROM address.`
+      );
+    }
+  }
 
-  const fromAddress = process.env.CONTACT_FROM_EMAIL || user;
+  console.log(
+    "Contact service: sending notification email via Resend to",
+    finalRecipients.length,
+    "recipient(s):",
+    finalRecipients.join(", ")
+  );
   const subject = "New contact form message – La Verdad OrderFlow";
   const bodyText = [
     "A new message was submitted from the contact form.",
@@ -164,29 +191,68 @@ async function sendContactNotificationToCustodians(contactPayload) {
   `.trim();
 
   try {
-    // Gmail: use port 587 with STARTTLS (requireTLS) or port 465 with SSL (secure)
-    const transporter = nodemailer.createTransport({
-      host,
-      port: portNum,
-      secure: portNum === 465,
-      requireTLS: portNum === 587,
-      auth: { user, pass },
-    });
+    const resend = new Resend(apiKey);
 
-    await transporter.sendMail({
-      from: fromAddress,
-      to: fromAddress,
-      bcc: recipients.join(", "),
+    // When using test email, send directly TO the account owner (not BCC)
+    // When using verified domain, send TO fromEmail and BCC to all recipients
+    let emailTo, emailBcc;
+    
+    if (isTestEmail) {
+      // For test email: send directly TO the account owner
+      emailTo = finalRecipients[0]; // Should be account owner email
+      emailBcc = undefined; // No BCC needed
+      console.log(`Contact service: Using test email - sending directly TO ${emailTo}`);
+    } else {
+      // For verified domain: send TO fromEmail, BCC to all recipients
+      emailTo = fromEmail;
+      emailBcc = finalRecipients;
+      console.log(`Contact service: Using verified domain - sending TO ${emailTo}, BCC to ${finalRecipients.length} recipient(s)`);
+    }
+    
+    console.log(`Contact service: Attempting to send email from ${fromEmail} to ${finalRecipients.length} recipient(s)`);
+    
+    const emailPayload = {
+      from: fromEmail,
+      to: emailTo,
       subject,
       text: bodyText,
       html: bodyHtml,
-    });
-    console.log("Contact service: notification email sent successfully.");
+    };
+    
+    // Only add BCC if not using test email
+    if (emailBcc && emailBcc.length > 0) {
+      emailPayload.bcc = emailBcc;
+    }
+    
+    const result = await resend.emails.send(emailPayload);
+    
+    if (result.data) {
+      console.log("✅ Contact service: notification email sent successfully via Resend.");
+      console.log("📧 Resend email ID:", result.data.id);
+      console.log("📬 Recipients:", finalRecipients.join(", "));
+      console.log("🔗 Check email status at: https://resend.com/emails");
+    } else if (result.error) {
+      console.error("❌ Contact service: Resend API error:", result.error);
+      console.error("Error details:", JSON.stringify(result.error, null, 2));
+      
+      // If it's a validation error about test email, provide helpful message
+      if (result.error.message && result.error.message.includes("testing emails")) {
+        console.error(
+          "💡 Solution: Resend test email can only send to account owner. " +
+          "Make sure your email (ramosraf278@gmail.com) is in SPECIAL_ADMIN_EMAILS in .env file."
+        );
+      }
+    } else {
+      console.warn("⚠️ Contact service: Unexpected Resend response:", JSON.stringify(result, null, 2));
+    }
   } catch (err) {
-    // Log full error so Render logs show Gmail errors (e.g. "Invalid login" = need App Password)
-    const msg = err.response || err.message || String(err);
-    console.error("Contact service: failed to send notification email:", msg);
-    if (err.response) console.error("SMTP response:", err.response);
+    // Log full error so Render logs show Resend API errors
+    const msg = err.message || String(err);
+    console.error("❌ Contact service: failed to send notification email via Resend:", msg);
+    if (err.response) {
+      console.error("Resend API response:", JSON.stringify(err.response, null, 2));
+    }
+    console.error("Full error object:", JSON.stringify(err, Object.getOwnPropertyNames(err), 2));
   }
 }
 

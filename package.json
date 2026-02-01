@@ -40,6 +40,7 @@
     "node-cron": "^3.0.3",
     "nodemailer": "^7.0.6",
     "passport": "^0.7.0",
+    "resend": "^4.0.0",
     "passport-google-oauth20": "^2.0.0",
     "postgres": "^3.4.7",
     "socket.io": "^4.8.1"
