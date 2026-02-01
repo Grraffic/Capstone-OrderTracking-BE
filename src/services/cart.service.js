@@ -83,7 +83,27 @@ class CartService {
    */
   async getCartItems(userId) {
     try {
-      const studentId = await this._resolveStudentId(userId);
+      if (!userId) {
+        throw new Error("User ID is required");
+      }
+
+      let studentId;
+      try {
+        studentId = await this._resolveStudentId(userId);
+      } catch (resolveError) {
+        // If student cannot be resolved, log and return empty cart
+        // This prevents 500 errors for students whose accounts might not be fully set up
+        console.warn("Could not resolve student ID for cart:", {
+          userId,
+          error: resolveError.message,
+        });
+        return {
+          success: true,
+          data: [],
+          count: 0,
+        };
+      }
+
       const { data: cartItems, error: cartError } = await supabase
         .from("cart_items")
         .select("*")
@@ -91,6 +111,7 @@ class CartService {
         .order("created_at", { ascending: false });
 
       if (cartError) {
+        console.error("Error fetching cart items from database:", cartError);
         throw cartError;
       }
 

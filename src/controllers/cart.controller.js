@@ -36,14 +36,22 @@ class CartController {
       const result = await CartService.getCartItems(userId);
       res.status(200).json(result);
     } catch (error) {
-      console.error("Get cart items error:", error);
+      console.error("Get cart items error:", {
+        error: error.message,
+        stack: error.stack,
+        userId,
+        userRole: req.user?.role,
+      });
       
-      // If error is about student not found, return empty cart for non-students
+      // If error is about student not found, handle gracefully
       if (error.message && (
         error.message.includes("Student account not found") ||
-        error.message.includes("not a student")
+        error.message.includes("not a student") ||
+        error.message.includes("Failed to verify student account")
       )) {
         const userRole = req.user?.role;
+        
+        // For non-students, return empty cart
         if (userRole && userRole !== "student") {
           return res.status(200).json({
             success: true,
@@ -51,8 +59,19 @@ class CartController {
             message: "Cart is empty (not a student account)",
           });
         }
+        
+        // For students who can't be found, return empty cart instead of error
+        // This can happen during account setup or if there's a sync issue
+        console.warn("Student account not found for user:", userId);
+        return res.status(200).json({
+          success: true,
+          data: [],
+          count: 0,
+          message: "Cart is empty",
+        });
       }
       
+      // For other errors, return 500 with proper error message
       res.status(500).json({
         success: false,
         message: error.message || "Failed to fetch cart items",
