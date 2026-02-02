@@ -161,7 +161,8 @@ const generalLimiter = rateLimit({
   max: (() => {
     const env = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS, 10);
     if (!Number.isNaN(env)) return env;
-    return isProduction ? 100 : 1000; // Stricter limits to prevent abuse
+    // Allow more requests per IP in production while still protecting the API
+    return isProduction ? 300 : 1000;
   })(),
   message: {
     error: "Too many requests from this IP, please try again later.",
@@ -191,8 +192,12 @@ const generalLimiter = rateLimit({
 
 // Stricter rate limiter for authentication endpoints
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: isProduction ? 5 : 20, // Stricter limits for auth to prevent brute force
+  windowMs: parseInt(process.env.AUTH_RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000, // 15 minutes
+  max: (() => {
+    const env = parseInt(process.env.AUTH_RATE_LIMIT_MAX_REQUESTS, 10);
+    if (!Number.isNaN(env)) return env;
+    return isProduction ? 5 : 20; // Stricter limits for auth to prevent brute force
+  })(),
   message: {
     error: "Too many authentication attempts, please try again later.",
     retryAfter: "15 minutes",
@@ -203,6 +208,8 @@ const authLimiter = rateLimit({
   skip: (req) => {
     // Skip for health check endpoints
     if (req.path === "/health" || req.path === "/api/health") return true;
+    // Skip for profile endpoints (GET requests) - these are not auth attempts
+    if (req.method === "GET" && (req.path.includes("/profile") || req.path.includes("/me") || req.path.includes("/max-quantities"))) return true;
     return false;
   },
   handler: (req, res) => {
@@ -219,8 +226,13 @@ const authLimiter = rateLimit({
 
 // Stricter rate limiter for write operations (POST, PUT, PATCH, DELETE)
 const writeLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: isProduction ? 100 : 300, // Stricter limits for write operations
+  windowMs: parseInt(process.env.WRITE_RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000, // 15 minutes
+  // Allow more write operations per IP in production while keeping a safety cap
+  max: (() => {
+    const env = parseInt(process.env.WRITE_RATE_LIMIT_MAX_REQUESTS, 10);
+    if (!Number.isNaN(env)) return env;
+    return isProduction ? 300 : 500;
+  })(),
   message: {
     error: "Too many write requests from this IP, please try again later.",
     retryAfter: "15 minutes",

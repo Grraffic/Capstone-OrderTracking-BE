@@ -49,11 +49,23 @@ class OrderService {
           query = query.eq("student_id", filters.student_id);
         }
       } else {
-        // For admin/property custodian, only show active order statuses by default
-        // Orders tab should only show: pending, processing, ready, payment_pending
-        // Exclude: cancelled (voided/unclaimed), claimed, completed
-        // These excluded statuses should only appear in their respective tabs
-        query = query.in("status", ["pending", "processing", "ready", "payment_pending"]);
+        // For admin/property custodian
+        if (filters.order_type) {
+          // When order_type is specified, show orders of that type except cancelled
+          // For regular orders, also exclude claimed (claimed orders should only appear in Claimed tab)
+          // For pre-orders, show all except cancelled
+          query = query.neq("status", "cancelled");
+          if (filters.order_type === "regular") {
+            // Regular orders tab should not show claimed orders
+            query = query.neq("status", "claimed");
+          }
+        } else {
+          // Default: only show active order statuses
+          // Orders tab should only show: pending, processing, ready, payment_pending
+          // Exclude: cancelled (voided/unclaimed), claimed, completed
+          // These excluded statuses should only appear in their respective tabs
+          query = query.in("status", ["pending", "processing", "ready", "payment_pending"]);
+        }
       }
 
       if (filters.order_type) {
@@ -92,13 +104,25 @@ class OrderService {
         
         // Filter by ALL fields including item names (client-side for JSONB)
         const allMatchingOrders = (allData || []).filter(order => {
-          // Safety check: Exclude cancelled, claimed, and completed orders when no status filter
-          // Orders tab should only show: pending, processing, ready, payment_pending
+          // Safety check: When order_type is set, only exclude cancelled orders
+          // When order_type is not set, exclude cancelled, claimed, and completed orders
           if (!filters.status) {
             const status = order.status?.toLowerCase();
-            const activeStatuses = ["pending", "processing", "ready", "payment_pending"];
-            if (!activeStatuses.includes(status)) {
-              return false;
+            if (filters.order_type) {
+              // When order_type is specified, only exclude cancelled orders
+              if (status === "cancelled") {
+                return false;
+              }
+              // For regular orders, also exclude claimed (claimed orders should only appear in Claimed tab)
+              if (filters.order_type === "regular" && status === "claimed") {
+                return false;
+              }
+            } else {
+              // Default: only show active order statuses
+              const activeStatuses = ["pending", "processing", "ready", "payment_pending"];
+              if (!activeStatuses.includes(status)) {
+                return false;
+              }
             }
           }
           
@@ -746,9 +770,10 @@ class OrderService {
         console.log("QR code data generated successfully");
       }
 
-      // Step 1: Create the order (student_confirmed_at = null until student confirms within claim window)
+      // Step 1: Create the order (auto-confirm orders when placed - student has already confirmed by placing order)
+      // This prevents the auto-void system from cancelling newly placed orders
       if (orderData.student_confirmed_at === undefined) {
-        orderData.student_confirmed_at = null;
+        orderData.student_confirmed_at = new Date().toISOString();
       }
       const { data, error } = await supabase
         .from("orders")
