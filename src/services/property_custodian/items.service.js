@@ -891,10 +891,41 @@ class ItemsService {
       const beginningUnitPrice = itemData.beginning_inventory_unit_price != null
         ? Number(itemData.beginning_inventory_unit_price)
         : (Number(itemData.price) || 0);
+      
+      // Process accessoryEntries if present (for accessories with multiple entries)
+      let totalBeginningInventory = itemData.stock || 0;
+      let totalPurchases = 0;
+      
+      if (itemData.note && typeof itemData.note === "string") {
+        try {
+          const parsedNote = JSON.parse(itemData.note);
+          if (parsedNote?._type === "accessoryEntries" && Array.isArray(parsedNote.accessoryEntries)) {
+            // Calculate totals from accessory entries
+            // Entry 1 (index 0) is beginning_inventory, Entry 2+ are purchases
+            totalBeginningInventory = 0;
+            totalPurchases = 0;
+            
+            parsedNote.accessoryEntries.forEach((entry, index) => {
+              const entryBeginningInv = Number(entry.beginning_inventory) || 0;
+              const entryPurchases = Number(entry.purchases) || 0;
+              
+              totalBeginningInventory += entryBeginningInv;
+              totalPurchases += entryPurchases;
+            });
+            
+            console.log(
+              `[createItem] Processed accessoryEntries: totalBeginningInventory=${totalBeginningInventory}, totalPurchases=${totalPurchases}`
+            );
+          }
+        } catch (_) {
+          // Not JSON or parse error, use defaults
+        }
+      }
+      
       const itemToInsert = {
         ...itemData,
-        beginning_inventory: itemData.stock || 0,
-        purchases: 0, // New items start with 0 purchases
+        beginning_inventory: totalBeginningInventory,
+        purchases: totalPurchases, // Sum of purchases from Entry 2+
         beginning_inventory_date: new Date().toISOString(),
         fiscal_year_start: new Date().toISOString().split("T")[0], // Current date
         beginning_inventory_unit_price: beginningUnitPrice,
@@ -1081,7 +1112,7 @@ class ItemsService {
   /**
    * Update existing item
    */
-  async updateItem(id, updates, io = null) {
+  async updateItem(id, updates, io = null, userId = null) {
     try {
       const { data: currentItem, error: fetchError } = await supabase
         .from("items")
@@ -1168,10 +1199,34 @@ class ItemsService {
       // so we don't add the total stock delta to item-level purchases (which would
       // make every size show the same purchases in the UI).
       let noteHasSizeVariations = false;
+      let noteHasAccessoryEntries = false;
       if (updates.note) {
         try {
           const parsedNote = JSON.parse(updates.note);
+          // Process accessoryEntries
           if (
+            parsedNote &&
+            parsedNote._type === "accessoryEntries" &&
+            Array.isArray(parsedNote.accessoryEntries) &&
+            parsedNote.accessoryEntries.length > 0
+          ) {
+            noteHasAccessoryEntries = true;
+            // Calculate total beginning_inventory (from Entry 1) and total purchases (from Entry 2+)
+            const totalBeginningInventory = parsedNote.accessoryEntries[0]?.beginning_inventory || 0;
+            const totalPurchases = parsedNote.accessoryEntries.slice(1).reduce((sum, e) => {
+              return sum + (Number(e.purchases) || 0);
+            }, 0);
+            
+            // Update item-level fields
+            updates.beginning_inventory = totalBeginningInventory;
+            updates.purchases = totalPurchases;
+            
+            console.log(
+              `[updateItem] Processed accessoryEntries: totalBeginningInventory=${totalBeginningInventory}, totalPurchases=${totalPurchases}`
+            );
+          }
+          // Process sizeVariations
+          else if (
             parsedNote &&
             parsedNote._type === "sizeVariations" &&
             Array.isArray(parsedNote.sizeVariations) &&
@@ -1196,10 +1251,11 @@ class ItemsService {
         }
       }
 
-      // Only apply "stock increase -> add to purchases" when NOT updating via sizeVariations note
+      // Only apply "stock increase -> add to purchases" when NOT updating via sizeVariations or accessoryEntries note
       // (otherwise we'd add the delta to item-level and every size would show it)
       if (
         !noteHasSizeVariations &&
+        !noteHasAccessoryEntries &&
         updates.stock !== undefined &&
         updates.stock > currentItem.stock
       ) {
@@ -1209,8 +1265,11 @@ class ItemsService {
       }
 
       // ALWAYS protect beginning_inventory from being changed
+      // EXCEPT when updating via accessoryEntries (where we explicitly set it)
       // Remove beginning_inventory and beginning_inventory_date from updates
-      delete updates.beginning_inventory;
+      if (!noteHasAccessoryEntries) {
+        delete updates.beginning_inventory;
+      }
       delete updates.beginning_inventory_date;
 
       const { id: _, created_at, ...allowedUpdates } = updates;
@@ -1302,11 +1361,13 @@ class ItemsService {
         const TransactionService = require("../../services/transaction.service");
         const updatedFields = Object.keys(allowedUpdates).filter(key => key !== 'updated_at');
         const finalData = updatedItemData || data;
-        const details = `Item details updated: ${finalData.name} (${finalData.education_level}) - Changed: ${updatedFields.join(", ")}`;
+        // Create concise message: "Updated [Item Name] item details"
+        const educationLevelText = finalData.education_level ? ` (${finalData.education_level})` : '';
+        const details = `Updated ${finalData.name}${educationLevelText} item details`;
         await TransactionService.logTransaction(
           "Item",
           `ITEM DETAILS UPDATED ${finalData.name}`,
-          null, // Will be set by controller if available
+          userId, // Pass userId directly
           details,
           {
             item_id: finalData.id,

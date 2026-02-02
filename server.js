@@ -171,11 +171,13 @@ const generalLimiter = rateLimit({
   standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
   legacyHeaders: false,
   skip: (req) => {
+    // Rate limiting disabled - always skip
+    return true;
     // Skip rate limiting if explicitly disabled via env var
-    if (process.env.RATE_LIMIT_ENABLED === "false") return true;
+    // if (process.env.RATE_LIMIT_ENABLED === "false") return true;
     // Skip for health check endpoints
-    if (req.path === "/health" || req.path === "/api/health") return true;
-    return false;
+    // if (req.path === "/health" || req.path === "/api/health") return true;
+    // return false;
   },
   handler: (req, res) => {
     const resetTime = new Date(Date.now() + (15 * 60 * 1000)).toISOString();
@@ -206,13 +208,15 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
   skipSuccessfulRequests: true, // Don't count successful requests
   skip: (req) => {
+    // Rate limiting disabled - always skip
+    return true;
     // Skip rate limiting if explicitly disabled via env var
-    if (process.env.RATE_LIMIT_ENABLED === "false") return true;
+    // if (process.env.RATE_LIMIT_ENABLED === "false") return true;
     // Skip for health check endpoints
-    if (req.path === "/health" || req.path === "/api/health") return true;
+    // if (req.path === "/health" || req.path === "/api/health") return true;
     // Skip for profile endpoints (GET requests) - these are not auth attempts
-    if (req.method === "GET" && (req.path.includes("/profile") || req.path.includes("/me") || req.path.includes("/max-quantities"))) return true;
-    return false;
+    // if (req.method === "GET" && (req.path.includes("/profile") || req.path.includes("/me") || req.path.includes("/max-quantities"))) return true;
+    // return false;
   },
   handler: (req, res) => {
     const resetTime = new Date(Date.now() + (15 * 60 * 1000)).toISOString();
@@ -242,10 +246,12 @@ const writeLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => {
+    // Rate limiting disabled - always skip
+    return true;
     // Skip rate limiting if explicitly disabled via env var
-    if (process.env.RATE_LIMIT_ENABLED === "false") return true;
+    // if (process.env.RATE_LIMIT_ENABLED === "false") return true;
     // Only apply to write methods
-    return !["POST", "PUT", "PATCH", "DELETE"].includes(req.method);
+    // return !["POST", "PUT", "PATCH", "DELETE"].includes(req.method);
   },
   handler: (req, res) => {
     const resetTime = new Date(Date.now() + (15 * 60 * 1000)).toISOString();

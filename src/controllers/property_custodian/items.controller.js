@@ -269,7 +269,7 @@ class ItemsController {
     try {
       const { id } = req.params;
       const io = req.app.get("io");
-      const result = await ItemsService.updateItem(id, req.body, io);
+      const result = await ItemsService.updateItem(id, req.body, io, req.user?.id);
 
       if (result.notificationInfo && result.notificationInfo.notified > 0) {
         console.log(

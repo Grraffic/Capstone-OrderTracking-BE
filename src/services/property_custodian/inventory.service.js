@@ -450,11 +450,11 @@ class InventoryService {
             const released = 0; // Calculated in frontend from orders
             const returns = 0;
 
-            // Determine status based on variant stock vs reorder_point (matches At Reorder Point table)
+            // Determine status based on ending inventory vs reorder_point (matches At Reorder Point table)
             let variantStatus = "Above Threshold";
-            if (variantStock === 0) {
+            if (endingInventory === 0) {
               variantStatus = "Out of Stock";
-            } else if (variantReorderPoint > 0 && variantStock <= variantReorderPoint) {
+            } else if (variantReorderPoint > 0 && endingInventory <= variantReorderPoint) {
               variantStatus = "At Reorder Point";
             }
 
@@ -539,12 +539,12 @@ class InventoryService {
               const released = 0; // Calculated in frontend from orders
               const returns = 0;
 
-              // Determine status based on size stock vs reorder_point (matches At Reorder Point table)
+              // Determine status based on ending inventory vs reorder_point (matches At Reorder Point table)
               const sizeReorderPoint = Number(item.reorder_point) || 0;
               let sizeStatus = "Above Threshold";
-              if (sizeStock === 0) {
+              if (endingInventory === 0) {
                 sizeStatus = "Out of Stock";
-              } else if (sizeReorderPoint > 0 && sizeStock <= sizeReorderPoint) {
+              } else if (sizeReorderPoint > 0 && endingInventory <= sizeReorderPoint) {
                 sizeStatus = "At Reorder Point";
               }
 
@@ -613,13 +613,12 @@ class InventoryService {
               (item.beginning_inventory || 0) * begUnitPrice +
               (item.purchases || 0) * purchUnitPrice;
 
-            // Determine status based on stock vs reorder_point (matches At Reorder Point table)
+            // Determine status based on ending inventory vs reorder_point (matches At Reorder Point table)
             const singleReorderPoint = Number(item.reorder_point) || 0;
-            const singleStock = Number(item.stock) || 0;
             let singleStatus = "Above Threshold";
-            if (singleStock === 0) {
+            if (endingInventory === 0) {
               singleStatus = "Out of Stock";
-            } else if (singleReorderPoint > 0 && singleStock <= singleReorderPoint) {
+            } else if (singleReorderPoint > 0 && endingInventory <= singleReorderPoint) {
               singleStatus = "At Reorder Point";
             }
 
