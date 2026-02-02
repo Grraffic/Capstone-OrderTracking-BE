@@ -554,7 +554,13 @@ router.put("/profile", verifyToken, async (req, res) => {
     }
     const currentUser = resolved.row;
     const userRole = resolved.role;
-    const isAdmin = resolved.type === "staff" || ["property_custodian", "system_admin"].includes(userRole);
+    const isAdmin = resolved.type === "staff" || [
+      "property_custodian", 
+      "system_admin", 
+      "finance_staff", 
+      "accounting_staff", 
+      "department_head"
+    ].includes(userRole);
 
     // Prepare update data (core fields that exist on all schemas)
     const updateData = {

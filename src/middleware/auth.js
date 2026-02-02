@@ -184,9 +184,15 @@ function requireRole(requiredRoles) {
   };
 }
 
-// Middleware that allows both system_admin and property_custodian
+// Middleware that allows system_admin, property_custodian, and related staff roles
 function requireAdminOrPropertyCustodian(req, res, next) {
-  return requireRole(["system_admin", "property_custodian"])(req, res, next);
+  return requireRole([
+    "system_admin", 
+    "property_custodian", 
+    "finance_staff", 
+    "accounting_staff", 
+    "department_head"
+  ])(req, res, next);
 }
 
 module.exports = {

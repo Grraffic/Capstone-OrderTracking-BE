@@ -638,6 +638,11 @@ async function updateUser(userId, updates, updatedByUserId = null) {
     
     // Remove fields that don't exist in students/staff tables
     if (userTable === "students" || userTable === "staff") {
+      // Convert is_active to status for staff (staff uses "active"/"inactive", not boolean)
+      if (cleanUpdates.is_active !== undefined && userTable === "staff") {
+        updateData.status = cleanUpdates.is_active ? "active" : "inactive";
+        console.log(`Converting is_active=${cleanUpdates.is_active} to status="${updateData.status}" for staff user`);
+      }
       // Remove is_active (students/staff don't have this - staff uses status)
       delete updateData.is_active;
       // Remove old column name if present
@@ -757,6 +762,23 @@ async function updateUser(userId, updates, updatedByUserId = null) {
         .select()
         .single();
     }
+    
+    // Handle is_active to status conversion for staff in fallback path
+    if (result.error && cleanUpdates.is_active !== undefined && userTable === "staff") {
+      console.log(`Retrying update with status conversion for staff`);
+      const fallbackData = { ...updateData };
+      // Ensure status is set correctly
+      if (cleanUpdates.is_active !== undefined) {
+        fallbackData.status = cleanUpdates.is_active ? "active" : "inactive";
+      }
+      delete fallbackData.is_active;
+      result = await supabase
+        .from(userTable)
+        .update(fallbackData)
+        .eq("id", actualUserId)
+        .select()
+        .single();
+    }
 
     const { data, error } = result;
     if (error) {
@@ -869,6 +891,12 @@ async function updateUser(userId, updates, updatedByUserId = null) {
     if (data && (data.max_items_per_order !== undefined || data.total_item_limit !== undefined)) {
       data.total_item_limit = data.total_item_limit ?? data.max_items_per_order;
     }
+    
+    // Convert status to is_active for staff (frontend expects is_active boolean)
+    if (data && userTable === "staff" && data.status !== undefined) {
+      data.is_active = data.status === "active";
+    }
+    
     return data;
   } catch (error) {
     console.error("Error updating user:", error);

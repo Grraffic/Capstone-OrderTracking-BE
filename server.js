@@ -161,7 +161,7 @@ const generalLimiter = rateLimit({
   max: (() => {
     const env = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS, 10);
     if (!Number.isNaN(env)) return env;
-    return isProduction ? 500 : 2000; // More lenient limits for normal usage
+    return isProduction ? 100 : 1000; // Stricter limits to prevent abuse
   })(),
   message: {
     error: "Too many requests from this IP, please try again later.",
@@ -177,18 +177,22 @@ const generalLimiter = rateLimit({
     return false;
   },
   handler: (req, res) => {
+    const resetTime = new Date(Date.now() + (15 * 60 * 1000)).toISOString();
     res.status(429).json({
       error: "Too many requests",
       message: "You have exceeded the rate limit. Please try again later.",
       retryAfter: "15 minutes",
+      resetTime: resetTime,
     });
+    // Set Retry-After header
+    res.setHeader("Retry-After", Math.ceil(15 * 60)); // 15 minutes in seconds
   },
 });
 
 // Stricter rate limiter for authentication endpoints
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: isProduction ? 10 : 50, // More lenient for auth endpoints
+  max: isProduction ? 5 : 20, // Stricter limits for auth to prevent brute force
   message: {
     error: "Too many authentication attempts, please try again later.",
     retryAfter: "15 minutes",
@@ -201,12 +205,22 @@ const authLimiter = rateLimit({
     if (req.path === "/health" || req.path === "/api/health") return true;
     return false;
   },
+  handler: (req, res) => {
+    const resetTime = new Date(Date.now() + (15 * 60 * 1000)).toISOString();
+    res.status(429).json({
+      error: "Too many requests",
+      message: "Too many authentication attempts. Please try again later.",
+      retryAfter: "15 minutes",
+      resetTime: resetTime,
+    });
+    res.setHeader("Retry-After", Math.ceil(15 * 60));
+  },
 });
 
 // Stricter rate limiter for write operations (POST, PUT, PATCH, DELETE)
 const writeLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: isProduction ? 200 : 500, // More lenient for write operations
+  max: isProduction ? 100 : 300, // Stricter limits for write operations
   message: {
     error: "Too many write requests from this IP, please try again later.",
     retryAfter: "15 minutes",
@@ -216,6 +230,16 @@ const writeLimiter = rateLimit({
   skip: (req) => {
     // Only apply to write methods
     return !["POST", "PUT", "PATCH", "DELETE"].includes(req.method);
+  },
+  handler: (req, res) => {
+    const resetTime = new Date(Date.now() + (15 * 60 * 1000)).toISOString();
+    res.status(429).json({
+      error: "Too many requests",
+      message: "Too many write requests. Please try again later.",
+      retryAfter: "15 minutes",
+      resetTime: resetTime,
+    });
+    res.setHeader("Retry-After", Math.ceil(15 * 60));
   },
 });
 
