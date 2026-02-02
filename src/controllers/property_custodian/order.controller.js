@@ -231,45 +231,93 @@ class OrderController {
           });
         }
         
+        // Emit order:updated event with all necessary fields for frontend matching
         io.emit("order:updated", {
           orderId: id,
+          order_number: result.data?.order_number || null,
+          orderNumber: result.data?.order_number || null, // Include both formats for compatibility
           status: status,
           order: result.data,
         });
-        console.log(`📡 Socket.IO: Emitted order:updated for order ${id} with status "${status}"`);
+        console.log(`📡 Socket.IO: Emitted order:updated for order ${id} (${result.data?.order_number || 'no order number'}) with status "${status}"`);
 
         // If status is "claimed", emit a specific event for activity tracking and create notification
         if (status === "claimed" && result.data) {
           const orderData = result.data;
           const studentId = orderData.student_id;
           
-          // Get Supabase Auth UID from student record (needed for notifications)
+          // Get Supabase Auth UID from student record (needed for notifications and activity tracking)
           let supabaseAuthUid = null;
           if (studentId) {
             try {
               const { getStudentRowById } = require("../services/profileResolver.service");
               const studentRow = await getStudentRowById(studentId);
-              if (studentRow && studentRow.user_id) {
-                supabaseAuthUid = studentRow.user_id;
-                console.log(`✅ Found Supabase Auth UID for student ${studentId}: ${supabaseAuthUid}`);
+              
+              if (studentRow) {
+                if (studentRow.user_id) {
+                  supabaseAuthUid = studentRow.user_id;
+                  console.log(`✅ OrderController: Found Supabase Auth UID for student ${studentId}: ${supabaseAuthUid}`);
+                } else {
+                  console.warn(`⚠️ OrderController: Student ${studentId} found but missing user_id field. Student row keys:`, Object.keys(studentRow));
+                  // Try to query students table directly as fallback
+                  try {
+                    const supabase = require("../../config/supabase");
+                    const { data: directQuery } = await supabase
+                      .from("students")
+                      .select("user_id")
+                      .eq("id", studentId)
+                      .maybeSingle();
+                    
+                    if (directQuery && directQuery.user_id) {
+                      supabaseAuthUid = directQuery.user_id;
+                      console.log(`✅ OrderController: Retrieved user_id via direct query: ${supabaseAuthUid}`);
+                    } else {
+                      console.warn(`⚠️ OrderController: Direct query also returned no user_id for student ${studentId}`);
+                    }
+                  } catch (queryError) {
+                    console.error(`❌ OrderController: Error in direct query fallback:`, queryError);
+                  }
+                }
               } else {
-                console.warn(`⚠️ Student ${studentId} not found or missing user_id. Student row:`, studentRow ? Object.keys(studentRow) : 'null');
-                // Fallback logic (same as restock)
+                console.warn(`⚠️ OrderController: Student ${studentId} not found in database`);
+              }
+              
+              // Final fallback: if still no supabaseAuthUid and studentId looks like a UUID (length > 20)
+              // This handles edge cases where user_id might be the same as student_id
+              if (!supabaseAuthUid && studentId && typeof studentId === 'string' && studentId.length > 20) {
+                console.warn(`⚠️ OrderController: Using studentId as fallback for Supabase Auth UID: ${studentId}`);
+                supabaseAuthUid = studentId;
+              }
+            } catch (studentError) {
+              console.error(`❌ OrderController: Error fetching Supabase Auth UID for student ${studentId}:`, studentError);
+              console.error(`❌ OrderController: Error details:`, studentError.message, studentError.stack);
+              
+              // Fallback logic: try direct Supabase query
+              try {
+                const supabase = require("../../config/supabase");
+                const { data: directQuery, error: queryError } = await supabase
+                  .from("students")
+                  .select("user_id")
+                  .eq("id", studentId)
+                  .maybeSingle();
+                
+                if (!queryError && directQuery && directQuery.user_id) {
+                  supabaseAuthUid = directQuery.user_id;
+                  console.log(`✅ OrderController: Retrieved user_id via error fallback query: ${supabaseAuthUid}`);
+                } else if (studentId && typeof studentId === 'string' && studentId.length > 20) {
+                  console.warn(`⚠️ OrderController: Using studentId as final fallback: ${studentId}`);
+                  supabaseAuthUid = studentId;
+                }
+              } catch (fallbackError) {
+                console.error(`❌ OrderController: Fallback query also failed:`, fallbackError);
                 if (studentId && typeof studentId === 'string' && studentId.length > 20) {
-                  console.log(`⚠️ Attempting to use studentId as Supabase Auth UID: ${studentId}`);
+                  console.warn(`⚠️ OrderController: Using studentId as last resort: ${studentId}`);
                   supabaseAuthUid = studentId;
                 }
               }
-            } catch (studentError) {
-              console.error(`❌ Error fetching Supabase Auth UID for student ${studentId}:`, studentError);
-              // Fallback logic
-              if (studentId && typeof studentId === 'string' && studentId.length > 20) {
-                console.log(`⚠️ Fallback: Using studentId as Supabase Auth UID: ${studentId}`);
-                supabaseAuthUid = studentId;
-              }
             }
           } else {
-            console.warn(`⚠️ No studentId found in order data`);
+            console.warn(`⚠️ OrderController: No studentId found in order data. Order ID: ${orderData.id}, Order Number: ${orderData.order_number}`);
           }
           
           // Create notification for the student (use Supabase Auth UID if available, fallback to student_id)
@@ -334,16 +382,27 @@ class OrderController {
                 userId: activityUserId,
                 items: orderItems,
                 itemCount: orderItems.length,
+                education_level: orderData.education_level || null,
+                educationLevel: orderData.education_level || null,
+                // Include first item name for activity description
+                itemName: orderItems.length > 0 ? orderItems[0].name : null,
               };
               
               io.emit("order:claimed", eventData);
               console.log(`📡 Socket.IO: Emitted order:claimed for order ${orderNumber || orderId} to user ${activityUserId}`);
+              console.log(`📡 Socket.IO: User ID resolution details:`, {
+                studentId: studentId,
+                supabaseAuthUid: supabaseAuthUid,
+                activityUserId: activityUserId,
+                userIdSource: supabaseAuthUid ? 'supabaseAuthUid' : 'studentId (fallback)'
+              });
               console.log(`📡 Socket.IO: Event data includes:`, {
                 orderId: eventData.orderId,
                 orderNumber: eventData.orderNumber,
                 userId: eventData.userId,
                 itemCount: eventData.itemCount,
-                hasItems: eventData.items.length > 0
+                hasItems: eventData.items.length > 0,
+                educationLevel: eventData.education_level || eventData.educationLevel
               });
             }
           } else {

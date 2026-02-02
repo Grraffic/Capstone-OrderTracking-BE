@@ -126,6 +126,35 @@ exports.updateStudentItemPermissions = async (req, res) => {
       return res.status(500).json(result);
     }
 
+    // Emit Socket.IO event to notify the student that their permissions have been updated
+    // This ensures the student interface immediately reflects permission changes
+    try {
+      const io = req.app.get("io");
+      if (io) {
+        // Get student's user_id (Supabase Auth UID) to emit event to the correct user
+        const supabase = require("../../config/supabase");
+        const { data: studentRow } = await supabase
+          .from("students")
+          .select("user_id")
+          .eq("id", studentId)
+          .maybeSingle();
+        
+        if (studentRow?.user_id) {
+          console.log(`📡 Emitting student:permissions:updated event for student ${studentId} to user ${studentRow.user_id}`);
+          io.emit("student:permissions:updated", {
+            studentId: studentId,
+            userId: studentRow.user_id,
+            permissions: normalizedPermissions,
+          });
+        } else {
+          console.log(`⚠️ Could not find user_id for student ${studentId}, skipping Socket.IO event`);
+        }
+      }
+    } catch (socketError) {
+      // Don't fail the request if Socket.IO emission fails
+      console.error("Error emitting student:permissions:updated event:", socketError);
+    }
+
     res.json(result);
   } catch (error) {
     console.error("Update student item permissions error:", error);
