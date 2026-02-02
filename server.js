@@ -171,8 +171,8 @@ const generalLimiter = rateLimit({
   standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
   legacyHeaders: false,
   skip: (req) => {
-    // Skip rate limiting if explicitly disabled via env var (for testing only)
-    if (process.env.RATE_LIMIT_ENABLED === "false" && !isProduction) return true;
+    // Skip rate limiting if explicitly disabled via env var
+    if (process.env.RATE_LIMIT_ENABLED === "false") return true;
     // Skip for health check endpoints
     if (req.path === "/health" || req.path === "/api/health") return true;
     return false;
@@ -206,6 +206,8 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
   skipSuccessfulRequests: true, // Don't count successful requests
   skip: (req) => {
+    // Skip rate limiting if explicitly disabled via env var
+    if (process.env.RATE_LIMIT_ENABLED === "false") return true;
     // Skip for health check endpoints
     if (req.path === "/health" || req.path === "/api/health") return true;
     // Skip for profile endpoints (GET requests) - these are not auth attempts
@@ -240,6 +242,8 @@ const writeLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => {
+    // Skip rate limiting if explicitly disabled via env var
+    if (process.env.RATE_LIMIT_ENABLED === "false") return true;
     // Only apply to write methods
     return !["POST", "PUT", "PATCH", "DELETE"].includes(req.method);
   },

@@ -61,10 +61,10 @@ class OrderService {
           }
         } else {
           // Default: only show active order statuses
-          // Orders tab should only show: pending, processing, ready, payment_pending
-          // Exclude: cancelled (voided/unclaimed), claimed, completed
-          // These excluded statuses should only appear in their respective tabs
-          query = query.in("status", ["pending", "processing", "ready", "payment_pending"]);
+        // Orders tab should only show: pending, processing, ready, payment_pending
+        // Exclude: cancelled (voided/unclaimed), claimed, completed
+        // These excluded statuses should only appear in their respective tabs
+        query = query.in("status", ["pending", "processing", "ready", "payment_pending"]);
         }
       }
 
@@ -119,9 +119,9 @@ class OrderService {
               }
             } else {
               // Default: only show active order statuses
-              const activeStatuses = ["pending", "processing", "ready", "payment_pending"];
-              if (!activeStatuses.includes(status)) {
-                return false;
+            const activeStatuses = ["pending", "processing", "ready", "payment_pending"];
+            if (!activeStatuses.includes(status)) {
+              return false;
               }
             }
           }
@@ -445,6 +445,7 @@ class OrderService {
               : baseMaxItems;
           const lockoutPeriod = userRow.order_lockout_period;
           const lockoutUnit = userRow.order_lockout_unit;
+          const totalItemLimitSetAt = userRow.total_item_limit_set_at;
 
           if (maxItems == null || Number(maxItems) <= 0) {
             throw new Error(
@@ -469,13 +470,21 @@ class OrderService {
             if (orParts.length > 0) {
               // Only count active orders (pending, processing, ready, etc.) - NOT claimed/completed orders.
               // Once an order is claimed/completed, the student should be able to order new item types.
+              // Only count orders created AFTER total_item_limit_set_at (when admin reset the limit)
               const placedStatuses = ["pending", "paid", "processing", "ready", "payment_pending"];
-              const { data: placedOrders } = await supabase
+              let placedOrdersQuery = supabase
                 .from("orders")
-                .select("items")
+                .select("items, created_at")
                 .eq("is_active", true)
                 .in("status", placedStatuses)
                 .or(orParts.join(","));
+              
+              // Only count orders created after limit was set/reset by admin
+              if (totalItemLimitSetAt) {
+                placedOrdersQuery = placedOrdersQuery.gt("created_at", totalItemLimitSetAt);
+              }
+              
+              const { data: placedOrders } = await placedOrdersQuery;
               const placedSlotKeys = new Set();
               for (const row of placedOrders || []) {
                 const orderItems = Array.isArray(row.items) ? row.items : [];
@@ -584,18 +593,26 @@ class OrderService {
 
           // Sum quantities already in placed orders for this student (pending, paid, processing, ready, etc.)
           // Exclude "claimed" and "completed" - once an order is claimed, the student can order that item again
+          // Only count orders created AFTER total_item_limit_set_at (when admin reset the limit)
           const placedStatuses = ["pending", "paid", "processing", "ready", "payment_pending"];
           const orParts = [];
           if (studentId) orParts.push(`student_id.eq.${studentId}`);
           if (studentEmail) orParts.push(`student_email.eq.${studentEmail}`);
           let alreadyOrderedByItem = {};
           if (orParts.length > 0) {
-            const { data: placedOrders } = await supabase
+            let placedOrdersQuery = supabase
               .from("orders")
-              .select("items")
+              .select("items, created_at")
               .eq("is_active", true)
               .in("status", placedStatuses)
               .or(orParts.join(","));
+            
+            // Only count orders created after limit was set/reset by admin
+            if (totalItemLimitSetAt) {
+              placedOrdersQuery = placedOrdersQuery.gt("created_at", totalItemLimitSetAt);
+            }
+            
+            const { data: placedOrders } = await placedOrdersQuery;
             for (const row of placedOrders || []) {
               const orderItems = Array.isArray(row.items) ? row.items : [];
               for (const it of orderItems) {
@@ -617,16 +634,23 @@ class OrderService {
           // not the student type when the order was placed. This ensures that when a student changes from "new" to "old"
           // (or vice versa), their historical claimed orders still count toward their current type's limits.
           // Example: New student claims 2 logo patches → changes to old student → still sees 2 claimed, can order 1 more (max 3 - 2 = 1)
-          // Count ALL claimed orders regardless of student type when placed - they all count toward current type's limits
+          // Only count claimed orders created AFTER total_item_limit_set_at (when admin reset the limit)
           let claimedItemsByItem = {};
           if (orParts.length > 0) {
             const claimedStatuses = ["claimed", "completed"];
-            const { data: claimedOrders } = await supabase
+            let claimedOrdersQuery = supabase
               .from("orders")
-              .select("items")
+              .select("items, created_at")
               .eq("is_active", true)
               .in("status", claimedStatuses)
               .or(orParts.join(","));
+            
+            // Only count orders created after limit was set/reset by admin
+            if (totalItemLimitSetAt) {
+              claimedOrdersQuery = claimedOrdersQuery.gt("created_at", totalItemLimitSetAt);
+            }
+            
+            const { data: claimedOrders } = await claimedOrdersQuery;
             for (const row of claimedOrders || []) {
               const orderItems = Array.isArray(row.items) ? row.items : [];
               for (const it of orderItems) {
@@ -1484,17 +1508,17 @@ class OrderService {
           // For old students: check if max is reached
           const perm = existingPermissions[key];
           if (perm) {
-            const permObj = typeof perm === "object" ? perm : { enabled: Boolean(perm), quantity: null };
-            if (!permObj.enabled) continue; // Already disabled
+        const permObj = typeof perm === "object" ? perm : { enabled: Boolean(perm), quantity: null };
+        if (!permObj.enabled) continue; // Already disabled
 
-            const maxQuantity = permObj.quantity != null && permObj.quantity > 0 
-              ? permObj.quantity 
-              : 1; // Default max for manually granted items
-            
+        const maxQuantity = permObj.quantity != null && permObj.quantity > 0 
+          ? permObj.quantity 
+          : 1; // Default max for manually granted items
+        
             const claimedCount = claimedQuantities[key] || 0;
-            
-            // If claimed count has reached or exceeded the max, disable the permission
-            if (claimedCount >= maxQuantity) {
+        
+        // If claimed count has reached or exceeded the max, disable the permission
+        if (claimedCount >= maxQuantity) {
               itemsToDisable.push(key);
               console.log(`[Order Service] Student ${order.student_id} (old student) has reached max quantity (${maxQuantity}) for ${key} (claimed: ${claimedCount}). Disabling permission.`);
             }
@@ -1668,23 +1692,23 @@ class OrderService {
           console.log(`[Order Service] Will re-enable ${key} (new student) after order cancellation`);
         } else {
           // For old students: check if max is reached before re-enabling
-          const originalPermission = permissionsMap[key];
-          const maxQuantity = originalPermission && originalPermission.quantity != null && originalPermission.quantity > 0
-            ? originalPermission.quantity
-            : 1; // Default max if permission didn't exist
+        const originalPermission = permissionsMap[key];
+        const maxQuantity = originalPermission && originalPermission.quantity != null && originalPermission.quantity > 0
+          ? originalPermission.quantity
+          : 1; // Default max if permission didn't exist
 
-          const claimedCount = claimedQuantities[key] || 0;
-          
-          // Only re-enable if claimed count hasn't reached the max
-          if (claimedCount < maxQuantity) {
-            itemsToReEnable.push({
-              itemName: key,
-              maxQuantity,
-              claimedCount,
-              originalPermission,
-            });
+        const claimedCount = claimedQuantities[key] || 0;
+        
+        // Only re-enable if claimed count hasn't reached the max
+        if (claimedCount < maxQuantity) {
+          itemsToReEnable.push({
+            itemName: key,
+            maxQuantity,
+            claimedCount,
+            originalPermission,
+          });
             console.log(`[Order Service] Will re-enable ${key} (old student) after order cancellation (claimed: ${claimedCount}, max: ${maxQuantity})`);
-          } else {
+        } else {
             console.log(`[Order Service] Not re-enabling ${key} (old student) - student has reached max (claimed: ${claimedCount}, max: ${maxQuantity})`);
           }
         }
@@ -1704,12 +1728,12 @@ class OrderService {
             };
           } else {
             // Old students: re-enable with the original quantity
-            permissionsToReEnable[itemName] = {
-              enabled: true,
-              quantity: originalPermission && originalPermission.quantity != null && originalPermission.quantity > 0
-                ? originalPermission.quantity
-                : null, // Use default from config if null
-            };
+          permissionsToReEnable[itemName] = {
+            enabled: true,
+            quantity: originalPermission && originalPermission.quantity != null && originalPermission.quantity > 0
+              ? originalPermission.quantity
+              : null, // Use default from config if null
+          };
           }
         });
 
