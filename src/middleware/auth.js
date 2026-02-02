@@ -69,6 +69,13 @@ function requireRole(requiredRoles) {
       requiredRole => requiredRole === normalizedUserRole
     );
     
+    console.log("[Auth Middleware] 🔍 Initial role check:", {
+      normalizedUserRole,
+      normalizedRequiredRoles,
+      hasRequiredRole,
+      originalUserRole: userRole,
+    });
+    
     // If role is missing from token OR doesn't match required role, fetch from database
     const shouldFetchFromDatabase = !userRole || 
                                     userRole === null || 
@@ -95,13 +102,23 @@ function requireRole(requiredRoles) {
         const byId = await getProfileByUserId(userId);
         if (byId) {
           userData = { role: byId.type === "staff" ? byId.row.role : "student" };
-          console.log("[Auth Middleware] ✅ Found profile by ID (students/staff):", { userId, role: userData.role });
+          console.log("[Auth Middleware] ✅ Found profile by ID (students/staff):", { 
+            userId, 
+            type: byId.type,
+            role: userData.role,
+            staffRow: byId.type === "staff" ? { role: byId.row.role, status: byId.row.status } : null
+          });
         }
         if (!userData && userEmail) {
           const byEmail = await getProfileByEmail(userEmail);
           if (byEmail) {
             userData = { role: byEmail.type === "staff" ? byEmail.row.role : "student" };
-            console.log("[Auth Middleware] ✅ Found profile by email (students/staff):", { email: userEmail, role: userData.role });
+            console.log("[Auth Middleware] ✅ Found profile by email (students/staff):", { 
+              email: userEmail, 
+              type: byEmail.type,
+              role: userData.role,
+              staffRow: byEmail.type === "staff" ? { role: byEmail.row.role, status: byEmail.row.status } : null
+            });
           }
         }
         if (userData && userData.role) {
@@ -121,23 +138,65 @@ function requireRole(requiredRoles) {
               requiredRoles: requiredRoles,
             });
           } else {
-            // Database role also doesn't match - user doesn't have required role
-            console.error("[Auth Middleware] ❌ Database role doesn't match required role:", {
-              databaseRole: dbRole,
-              requiredRoles: requiredRoles,
-              tokenRole: req.user.role,
-            });
-            return res.status(403).json({ 
-              message: "Forbidden",
-              details: `Access denied. Required role: ${Array.isArray(requiredRoles) ? requiredRoles.join(" or ") : requiredRoles}. Your role in database: ${dbRole}. Please contact administrator to update your role.`
-            });
+            // Database role doesn't match, but check if token role matches
+            // This handles cases where user hasn't been added to staff table yet
+            const tokenHasRequiredRole = normalizedRequiredRoles.some(
+              requiredRole => requiredRole === normalizedUserRole
+            );
+            
+            if (tokenHasRequiredRole) {
+              // Token role matches, allow access even if database role doesn't
+              // This is a fallback for users who haven't been migrated to staff table yet
+              console.log("[Auth Middleware] ⚠️ Database role doesn't match, but token role matches - allowing access:", {
+                databaseRole: dbRole,
+                tokenRole: userRole,
+                requiredRoles: requiredRoles,
+              });
+              // Keep the token role
+              req.user.role = userRole;
+            } else {
+              // Neither database nor token role matches - deny access
+              console.error("[Auth Middleware] ❌ Database role doesn't match required role:", {
+                databaseRole: dbRole,
+                requiredRoles: requiredRoles,
+                tokenRole: req.user.role,
+              });
+              return res.status(403).json({ 
+                message: "Forbidden",
+                details: `Access denied. Required role: ${Array.isArray(requiredRoles) ? requiredRoles.join(" or ") : requiredRoles}. Your role in database: ${dbRole}. Please contact administrator to update your role.`
+              });
+            }
           }
         } else {
-          console.error("[Auth Middleware] ❌ Could not find user in database:", { userId, userEmail });
-          return res.status(403).json({ 
-            message: "Forbidden: Role not found in token or database",
-            details: "User role could not be determined. Please log in again."
-          });
+          // User not found in database, but check if token role matches
+          // This handles cases where user hasn't been added to staff/students table yet
+          const tokenHasRequiredRole = normalizedRequiredRoles.some(
+            requiredRole => requiredRole === normalizedUserRole
+          );
+          
+          if (tokenHasRequiredRole && userRole) {
+            // Token role matches required role - allow access even if not in database
+            // This is a fallback for users who haven't been migrated yet
+            console.log("[Auth Middleware] ⚠️ User not found in database, but token role matches - allowing access:", {
+              userId,
+              userEmail,
+              tokenRole: userRole,
+              requiredRoles: requiredRoles,
+            });
+            // Keep the token role
+            req.user.role = userRole;
+          } else {
+            console.error("[Auth Middleware] ❌ Could not find user in database and token role doesn't match:", { 
+              userId, 
+              userEmail,
+              tokenRole: userRole,
+              requiredRoles: requiredRoles,
+            });
+            return res.status(403).json({ 
+              message: "Forbidden: Role not found in token or database",
+              details: "User role could not be determined. Please log in again."
+            });
+          }
         }
       } catch (dbError) {
         console.error("[Auth Middleware] ❌ Database error while fetching role:", dbError);

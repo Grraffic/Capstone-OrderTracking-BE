@@ -23,26 +23,42 @@ async function getProfileByUserId(userId) {
 
   const uid = String(userId).trim();
 
-  const { data: student } = await supabase
+  const { data: student, error: studentError } = await supabase
     .from("students")
     .select("*")
     .eq("user_id", uid)
     .maybeSingle();
 
+  if (studentError) {
+    console.log("[ProfileResolver] ⚠️ Error querying students table:", studentError);
+  }
+
   if (student) {
+    console.log("[ProfileResolver] ✅ Found student profile:", { userId: uid, studentId: student.id });
     return { type: "student", row: student, id: student.id };
   }
 
-  const { data: staffRow } = await supabase
+  const { data: staffRow, error: staffError } = await supabase
     .from("staff")
     .select("*")
     .eq("user_id", uid)
     .maybeSingle();
 
+  if (staffError) {
+    console.log("[ProfileResolver] ⚠️ Error querying staff table:", staffError);
+  }
+
   if (staffRow) {
+    console.log("[ProfileResolver] ✅ Found staff profile:", { 
+      userId: uid, 
+      staffId: staffRow.id, 
+      role: staffRow.role, 
+      status: staffRow.status 
+    });
     return { type: "staff", row: staffRow, id: staffRow.id };
   }
 
+  console.log("[ProfileResolver] ❌ No profile found for userId:", uid);
   return null;
 }
 
@@ -56,24 +72,44 @@ async function getProfileByEmail(email) {
 
   const normalized = String(email).toLowerCase().trim();
 
-  const { data: student } = await supabase
+  const { data: student, error: studentError } = await supabase
     .from("students")
     .select("*")
     .ilike("email", normalized)
     .limit(1)
     .maybeSingle();
 
-  if (student) return { type: "student", row: student, id: student.id };
+  if (studentError) {
+    console.log("[ProfileResolver] ⚠️ Error querying students table by email:", studentError);
+  }
 
-  const { data: staffRow } = await supabase
+  if (student) {
+    console.log("[ProfileResolver] ✅ Found student profile by email:", { email: normalized, studentId: student.id });
+    return { type: "student", row: student, id: student.id };
+  }
+
+  const { data: staffRow, error: staffError } = await supabase
     .from("staff")
     .select("*")
     .ilike("email", normalized)
     .limit(1)
     .maybeSingle();
 
-  if (staffRow) return { type: "staff", row: staffRow, id: staffRow.id };
+  if (staffError) {
+    console.log("[ProfileResolver] ⚠️ Error querying staff table by email:", staffError);
+  }
 
+  if (staffRow) {
+    console.log("[ProfileResolver] ✅ Found staff profile by email:", { 
+      email: normalized, 
+      staffId: staffRow.id, 
+      role: staffRow.role, 
+      status: staffRow.status 
+    });
+    return { type: "staff", row: staffRow, id: staffRow.id };
+  }
+
+  console.log("[ProfileResolver] ❌ No profile found for email:", normalized);
   return null;
 }
 

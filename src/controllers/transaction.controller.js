@@ -28,6 +28,7 @@ class TransactionController {
         type,
         action,
         userId,
+        userRole,
         startDate,
         endDate,
         limit,
@@ -40,6 +41,7 @@ class TransactionController {
       if (type) filters.type = type;
       if (action) filters.action = action;
       if (userId) filters.userId = userId;
+      if (userRole) filters.userRole = userRole;
 
       if (startDate) {
         filters.startDate = new Date(startDate);

@@ -49,80 +49,116 @@ class TransactionService {
             email: student.email,
           });
         } else {
-          // Try to fetch from users table
-          let { data: user, error: userError } = await supabase
-            .from("users")
-            .select("name, role, email")
+          // Try to fetch from staff table
+          let { data: staff, error: staffError } = await supabase
+            .from("staff")
+            .select("id, name, email, role")
             .eq("id", userId)
             .single();
 
-          if (!userError && user) {
-            userName = user.name || "Unknown User";
-            userRole = user.role || "unknown";
-            console.log("[TransactionService] ✅ Found user:", {
-              id: user.id,
-              name: user.name,
-              email: user.email,
-              role: user.role,
+          if (!staffError && staff) {
+            userName = staff.name || "Unknown Staff";
+            userRole = staff.role || "unknown";
+            console.log("[TransactionService] ✅ Found staff:", {
+              id: staff.id,
+              name: staff.name,
+              email: staff.email,
+              role: staff.role,
             });
           } else {
-            // If not found by ID, try by email lookup
-            console.log("[TransactionService] ⚠️ User not found by ID, trying email lookup...");
-            
-            // Determine which email to use for lookup
-            let emailToLookup = null;
-            if (typeof userId === "string" && userId.includes("@")) {
-              // userId itself is an email
-              emailToLookup = userId;
-            } else if (metadata?.student_email) {
-              // Use student_email from metadata as fallback
-              emailToLookup = metadata.student_email;
-            } else if (metadata?.email) {
-              // Use email from metadata as fallback
-              emailToLookup = metadata.email;
-            }
-            
-            if (emailToLookup) {
-              // Try students table first
-              const { data: emailStudent, error: emailStudentError } = await supabase
-                .from("students")
-                .select("id, name, email, student_type")
-                .eq("email", emailToLookup.toLowerCase())
-                .single();
+            // Try to fetch from users table
+            let { data: user, error: userError } = await supabase
+              .from("users")
+              .select("name, role, email")
+              .eq("id", userId)
+              .single();
+
+            if (!userError && user) {
+              userName = user.name || "Unknown User";
+              userRole = user.role || "unknown";
+              console.log("[TransactionService] ✅ Found user:", {
+                id: user.id,
+                name: user.name,
+                email: user.email,
+                role: user.role,
+              });
+            } else {
+              // If not found by ID, try by email lookup
+              console.log("[TransactionService] ⚠️ User not found by ID, trying email lookup...");
               
-              if (!emailStudentError && emailStudent) {
-                userName = emailStudent.name || "Unknown Student";
-                userRole = "student";
-                console.log("[TransactionService] ✅ Found student by email:", {
-                  email: emailStudent.email,
-                  name: emailStudent.name,
-                });
-              } else {
-                // Try users table
-                const { data: emailUser, error: emailError } = await supabase
-                  .from("users")
-                  .select("name, role, email")
+              // Determine which email to use for lookup
+              let emailToLookup = null;
+              if (typeof userId === "string" && userId.includes("@")) {
+                // userId itself is an email
+                emailToLookup = userId;
+              } else if (metadata?.student_email) {
+                // Use student_email from metadata as fallback
+                emailToLookup = metadata.student_email;
+              } else if (metadata?.email) {
+                // Use email from metadata as fallback
+                emailToLookup = metadata.email;
+              }
+              
+              if (emailToLookup) {
+                // Try students table first
+                const { data: emailStudent, error: emailStudentError } = await supabase
+                  .from("students")
+                  .select("id, name, email, student_type")
                   .eq("email", emailToLookup.toLowerCase())
                   .single();
                 
-                if (!emailError && emailUser) {
-                  userName = emailUser.name || "Unknown User";
-                  userRole = emailUser.role || "unknown";
-                  console.log("[TransactionService] ✅ Found user by email:", {
-                    email: emailUser.email,
-                    name: emailUser.name,
-                    role: emailUser.role,
+                if (!emailStudentError && emailStudent) {
+                  userName = emailStudent.name || "Unknown Student";
+                  userRole = "student";
+                  console.log("[TransactionService] ✅ Found student by email:", {
+                    email: emailStudent.email,
+                    name: emailStudent.name,
                   });
                 } else {
-                  console.warn("[TransactionService] ⚠️ Could not find user/student by email:", {
-                    email: emailToLookup,
-                    studentError: emailStudentError?.message,
-                    userError: emailError?.message,
-                  });
+                  // Try staff table
+                  const { data: emailStaff, error: emailStaffError } = await supabase
+                    .from("staff")
+                    .select("id, name, email, role")
+                    .eq("email", emailToLookup.toLowerCase())
+                    .single();
+                  
+                  if (!emailStaffError && emailStaff) {
+                    userName = emailStaff.name || "Unknown Staff";
+                    userRole = emailStaff.role || "unknown";
+                    console.log("[TransactionService] ✅ Found staff by email:", {
+                      email: emailStaff.email,
+                      name: emailStaff.name,
+                      role: emailStaff.role,
+                    });
+                  } else {
+                    // Try users table
+                    const { data: emailUser, error: emailError } = await supabase
+                      .from("users")
+                      .select("name, role, email")
+                      .eq("email", emailToLookup.toLowerCase())
+                      .single();
+                    
+                    if (!emailError && emailUser) {
+                      userName = emailUser.name || "Unknown User";
+                      userRole = emailUser.role || "unknown";
+                      console.log("[TransactionService] ✅ Found user by email:", {
+                        email: emailUser.email,
+                        name: emailUser.name,
+                        role: emailUser.role,
+                      });
+                    } else {
+                      console.warn("[TransactionService] ⚠️ Could not find user/student/staff by email:", {
+                        email: emailToLookup,
+                        studentError: emailStudentError?.message,
+                        staffError: emailStaffError?.message,
+                        userError: emailError?.message,
+                      });
+                    }
+                  }
                 }
+              } else {
+                console.warn("[TransactionService] ⚠️ No email available for fallback lookup");
               }
-            } else {
-              console.warn("[TransactionService] ⚠️ No email available for fallback lookup");
             }
           }
         }
@@ -199,6 +235,7 @@ class TransactionService {
         type: filters.type,
         action: filters.action,
         userId: filters.userId,
+        userRole: filters.userRole,
         startDate: filters.startDate?.toISOString(),
         endDate: filters.endDate?.toISOString(),
         limit: filters.limit,
@@ -224,6 +261,11 @@ class TransactionService {
       if (filters.userId) {
         query = query.eq("user_id", filters.userId);
         console.log("[TransactionService] 🔽 Filtering by userId:", filters.userId);
+      }
+
+      if (filters.userRole) {
+        query = query.eq("user_role", filters.userRole);
+        console.log("[TransactionService] 🔽 Filtering by userRole:", filters.userRole);
       }
 
       if (filters.startDate) {

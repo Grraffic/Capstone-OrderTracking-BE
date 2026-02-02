@@ -1,11 +1,11 @@
 const express = require("express");
 const router = express.Router();
 const userController = require("../../controllers/system_admin/user.controller");
-const { verifyToken, requireSystemAdmin } = require("../../middleware/auth");
+const { verifyToken, requireAdminOrPropertyCustodian } = require("../../middleware/auth");
 
-// All routes require authentication and system admin role
+// All routes require authentication and system admin, property custodian, or related staff roles
 router.use(verifyToken);
-router.use(requireSystemAdmin);
+router.use(requireAdminOrPropertyCustodian);
 
 // Get all users with pagination and filters
 router.get("/", userController.getUsers);
