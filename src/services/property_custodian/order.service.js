@@ -77,25 +77,20 @@ class OrderService {
       let data, error, count;
 
       if (filters.search) {
-        // Optimized search: Use database-level search for basic fields first
-        // This is much more efficient than fetching all records
+        // Search across all fields including item names
+        // Since item names are in JSONB, we need to fetch and filter client-side
         const searchTerm = filters.search.trim();
+        const searchTermLower = searchTerm.toLowerCase();
         
-        // Try database-level search first (faster)
-        query = query.or(
-          `order_number.ilike.%${searchTerm}%,student_name.ilike.%${searchTerm}%,student_email.ilike.%${searchTerm}%`
-        );
-        
-        // For item name search, we need to fetch and filter client-side
-        // But limit the initial fetch to reduce memory usage
-        const searchLimit = 500; // Reduced from 1000
+        // Fetch a larger set of orders to search through (including item names)
+        // We can't use database-level filtering for JSONB item names, so we fetch more records
+        const searchLimit = 1000; // Increased to ensure we catch orders matching by item name
         let searchQuery = query.limit(searchLimit);
         
         const { data: allData, error: allError } = await searchQuery;
         if (allError) throw allError;
         
         // Filter by ALL fields including item names (client-side for JSONB)
-        const searchTermLower = searchTerm.toLowerCase();
         const allMatchingOrders = (allData || []).filter(order => {
           // Safety check: Exclude cancelled, claimed, and completed orders when no status filter
           // Orders tab should only show: pending, processing, ready, payment_pending
@@ -107,7 +102,7 @@ class OrderService {
             }
           }
           
-          // Basic fields already filtered by DB, but double-check
+          // Check basic fields: order_number, student_name, student_email
           const matchesBasic = 
             (order.order_number && order.order_number.toLowerCase().includes(searchTermLower)) ||
             (order.student_name && order.student_name.toLowerCase().includes(searchTermLower)) ||

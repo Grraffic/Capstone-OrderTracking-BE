@@ -115,6 +115,15 @@ router.patch("/:id/adjust", itemsController.adjustStock);
 router.post("/:id/add-stock", itemsController.addStock);
 
 /**
+ * POST /api/items/fiscal-year-rollover
+ * Perform fiscal year rollover for all items
+ * Carries forward ending inventory as beginning inventory for new fiscal year
+ * Body: { rolloverDate? } (optional, defaults to today)
+ * Note: Add auth.requireAdmin middleware when ready
+ */
+router.post("/fiscal-year-rollover", itemsController.performFiscalYearRollover);
+
+/**
  * POST /api/items/:id/record-return
  * Record a return (student returned item); appears in Returns table
  */

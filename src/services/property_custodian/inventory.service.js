@@ -129,6 +129,184 @@ class InventoryService {
   }
 
   /**
+   * Perform fiscal year rollover for all items
+   * Carries forward ending inventory from prior year as beginning inventory for new fiscal year
+   * Any items added after rollover date will be classified as purchases
+   * 
+   * @param {Date|string} rolloverDate - The date when fiscal year rolls over (defaults to today)
+   * @returns {Promise<Object>} Rollover results with counts and details
+   */
+  async performFiscalYearRollover(rolloverDate = null) {
+    try {
+      const rolloverDateObj = rolloverDate 
+        ? new Date(rolloverDate) 
+        : new Date();
+      
+      const rolloverDateStr = rolloverDateObj.toISOString().split("T")[0];
+      const rolloverDateTime = rolloverDateObj.toISOString();
+
+      if (!isProduction) {
+        console.log(`[Fiscal Year Rollover] 🗓️ Starting rollover for date: ${rolloverDateStr}`);
+      }
+
+      // Fetch all active items
+      const { data: items, error: fetchError } = await supabase
+        .from("items")
+        .select("*")
+        .eq("is_active", true);
+
+      if (fetchError) throw fetchError;
+      if (!items || items.length === 0) {
+        return {
+          success: true,
+          message: "No active items found to rollover",
+          itemsProcessed: 0,
+          itemsUpdated: 0,
+        };
+      }
+
+      let itemsUpdated = 0;
+      let itemsSkipped = 0;
+      const updatePromises = [];
+
+      for (const item of items) {
+        try {
+          // Calculate ending inventory for this item
+          const endingInventory = await this.calculateEndingInventory(item.id);
+          
+          // Check if this item already has a fiscal year start date after the rollover date
+          // If so, it's already been rolled over, skip it
+          if (item.fiscal_year_start) {
+            const fiscalYearStart = new Date(item.fiscal_year_start);
+            const rolloverDate = new Date(rolloverDateStr);
+            if (fiscalYearStart >= rolloverDate) {
+              itemsSkipped++;
+              continue;
+            }
+          }
+
+          // Prepare update: carry forward ending inventory as beginning inventory
+          const updateData = {
+            beginning_inventory: endingInventory,
+            purchases: 0, // Reset purchases for new fiscal year
+            beginning_inventory_date: rolloverDateTime,
+            fiscal_year_start: rolloverDateStr,
+          };
+
+          // For JSON variant items, also reset variant-level purchases
+          if (item.note) {
+            try {
+              const parsedNote = JSON.parse(item.note);
+              if (
+                parsedNote &&
+                parsedNote._type === "sizeVariations" &&
+                Array.isArray(parsedNote.sizeVariations)
+              ) {
+                // Reset purchases for each variant
+                parsedNote.sizeVariations.forEach((variant) => {
+                  // Calculate ending inventory for this variant
+                  const variantStock = Number(variant.stock) || 0;
+                  const variantBeginningInventory = Number(variant.beginning_inventory) || 0;
+                  const variantPurchases = Number(variant.purchases) || 0;
+                  
+                  // Ending inventory = beginning + purchases (released/returns handled separately)
+                  const variantEndingInventory = variantBeginningInventory + variantPurchases;
+                  
+                  // Carry forward ending as new beginning
+                  variant.beginning_inventory = variantEndingInventory;
+                  variant.purchases = 0;
+                });
+                updateData.note = JSON.stringify(parsedNote);
+              }
+            } catch (e) {
+              // Not JSON or parse error, continue with regular update
+            }
+          }
+
+          // Update item
+          const updatePromise = supabase
+            .from("items")
+            .update(updateData)
+            .eq("id", item.id)
+            .then(({ error: updateError }) => {
+              if (updateError) {
+                console.error(`[Fiscal Year Rollover] ❌ Error updating item ${item.id}:`, updateError);
+                throw updateError;
+              }
+              itemsUpdated++;
+              if (!isProduction) {
+                console.log(
+                  `[Fiscal Year Rollover] ✅ Item "${item.name}" (${item.size || "N/A"}): ` +
+                  `Ending=${endingInventory} → Beginning=${endingInventory}, Purchases reset to 0`
+                );
+              }
+            });
+
+          updatePromises.push(updatePromise);
+        } catch (itemError) {
+          console.error(`[Fiscal Year Rollover] ❌ Error processing item ${item.id}:`, itemError);
+          // Continue with other items
+        }
+      }
+
+      // Wait for all updates to complete
+      await Promise.all(updatePromises);
+
+      if (!isProduction) {
+        console.log(
+          `[Fiscal Year Rollover] ✅ Completed: ${itemsUpdated} items updated, ${itemsSkipped} items skipped`
+        );
+      }
+
+      return {
+        success: true,
+        message: `Fiscal year rollover completed successfully`,
+        rolloverDate: rolloverDateStr,
+        itemsProcessed: items.length,
+        itemsUpdated,
+        itemsSkipped,
+      };
+    } catch (error) {
+      console.error("[Fiscal Year Rollover] ❌ Error:", error);
+      throw new Error(`Failed to perform fiscal year rollover: ${error.message}`);
+    }
+  }
+
+  /**
+   * Check if an item addition should be classified as a purchase
+   * Items added after the fiscal year start date are purchases
+   * 
+   * @param {string} itemId - Item ID
+   * @param {Date|string} additionDate - Date when stock is being added (defaults to now)
+   * @returns {Promise<boolean>} True if should be classified as purchase
+   */
+  async isPurchaseAfterRollover(itemId, additionDate = null) {
+    try {
+      const { data: item, error } = await supabase
+        .from("items")
+        .select("fiscal_year_start, beginning_inventory_date")
+        .eq("id", itemId)
+        .single();
+
+      if (error || !item) return true; // Default to purchase if can't determine
+
+      const additionDateObj = additionDate ? new Date(additionDate) : new Date();
+      const fiscalYearStart = item.fiscal_year_start 
+        ? new Date(item.fiscal_year_start) 
+        : (item.beginning_inventory_date ? new Date(item.beginning_inventory_date) : null);
+
+      // If no fiscal year start date, classify as purchase
+      if (!fiscalYearStart) return true;
+
+      // If addition date is after fiscal year start, it's a purchase
+      return additionDateObj >= fiscalYearStart;
+    } catch (error) {
+      console.error("[isPurchaseAfterRollover] Error:", error);
+      return true; // Default to purchase on error
+    }
+  }
+
+  /**
    * Get full inventory report
    */
   async getInventoryReport(filters = {}) {
@@ -562,8 +740,11 @@ class InventoryService {
         );
       }
 
-      // Check and reset beginning inventory if expired
+      // Check and reset beginning inventory if expired (legacy 365-day check)
       await this.checkAndResetBeginningInventory(itemId);
+      
+      // Check if this addition should be classified as a purchase (after fiscal year rollover)
+      const isPurchase = await this.isPurchaseAfterRollover(itemId);
 
       const { data: item, error: fetchError } = await supabase
         .from("items")

@@ -491,6 +491,31 @@ class ItemsController {
   }
 
   /**
+   * Perform fiscal year rollover for all items
+   * POST /api/items/fiscal-year-rollover
+   * Body: { rolloverDate? } (optional, defaults to today)
+   */
+  async performFiscalYearRollover(req, res) {
+    try {
+      const { rolloverDate } = req.body;
+      const InventoryService = require("../../services/property_custodian/inventory.service");
+      
+      const result = await InventoryService.performFiscalYearRollover(rolloverDate);
+      
+      res.json({
+        success: true,
+        ...result,
+      });
+    } catch (error) {
+      console.error("Fiscal year rollover error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to perform fiscal year rollover",
+      });
+    }
+  }
+
+  /**
    * Record a return (student returned item). Increases stock only; logs "RETURN RECORDED" for Returns table.
    * POST /api/items/:id/record-return
    * Body: { quantity, size?, unitPrice? }
