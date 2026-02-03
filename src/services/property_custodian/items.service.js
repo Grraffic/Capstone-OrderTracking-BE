@@ -485,10 +485,12 @@ class ItemsService {
 
       // Optimized: Only fetch items matching name and education_level (case-insensitive)
       // This is much more efficient than fetching all active items
+      // Exclude archived items from duplicate detection - archived items should not prevent creating new active items
       const { data: potentialItems, error: queryError } = await supabase
         .from("items")
         .select("*")
         .eq("is_active", true)
+        .or("is_archived.eq.false,is_archived.is.null")
         .ilike("name", itemData.name.trim())
         .ilike("education_level", itemData.education_level.trim());
 
@@ -694,6 +696,19 @@ class ItemsService {
         });
         // Fall through to create new item instead of crashing
         isExistingSize = false;
+      }
+
+      if (isExistingSize && existingItem) {
+        // Safety check: Never update archived items - they should be excluded by the query above
+        // but this provides an extra layer of protection
+        if (existingItem.is_archived === true) {
+          console.warn(
+            `[createItem] ⚠️ WARNING: Found archived item in duplicate check (should not happen). Creating new item instead.`
+          );
+          // Fall through to create new item instead of updating archived one
+          isExistingSize = false;
+          existingItem = null;
+        }
       }
 
       if (isExistingSize && existingItem) {
