@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const transactionController = require("../controllers/transaction.controller");
-const { verifyToken, requirePropertyCustodian, requireAdminOrPropertyCustodian } = require("../middleware/auth");
+const { verifyToken, requireAdminOrPropertyCustodian, requireSystemAdmin } = require("../middleware/auth");
 
 /**
  * Transaction Routes
@@ -56,6 +56,18 @@ router.post(
   verifyToken,
   requireAdminOrPropertyCustodian,
   transactionController.createSampleTransactions
+);
+
+/**
+ * POST /api/transactions/backfill-item-users
+ * Backfill Item transactions where user is System by resolving user_name/user_role.
+ * System admin only.
+ */
+router.post(
+  "/backfill-item-users",
+  verifyToken,
+  requireSystemAdmin,
+  transactionController.backfillItemUsers
 );
 
 /**

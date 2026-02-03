@@ -169,24 +169,83 @@ async function getUserById(userId) {
   try {
     let data = null;
     let error = null;
+    
+    // Try to fetch by ID from students table first
     const { data: studentRow } = await supabase.from("students").select("*").eq("id", userId).maybeSingle();
     if (studentRow) {
       data = { ...studentRow, role: "student" };
       return data;
     }
+    
+    // Try to fetch by ID from staff table
     const { data: staffRow } = await supabase.from("staff").select("*").eq("id", userId).maybeSingle();
     if (staffRow) {
       data = { ...staffRow, is_active: staffRow.status === "active" };
       return data;
     }
+    
+    // Try to fetch by ID from users table
     const result = await supabase.from("users").select("*").eq("id", userId).maybeSingle();
     data = result.data;
     error = result.error;
-    if (error) throw error;
-    if (data && (data.max_items_per_order !== undefined || data.total_item_limit !== undefined)) {
-      data.total_item_limit = data.total_item_limit ?? data.max_items_per_order;
+    
+    // If found in users table, return it
+    if (data && !error) {
+      if (data.max_items_per_order !== undefined || data.total_item_limit !== undefined) {
+        data.total_item_limit = data.total_item_limit ?? data.max_items_per_order;
+      }
+      return data;
     }
-    return data;
+    
+    // If ID lookup failed and userId looks like an email, try email-based lookup
+    if (typeof userId === "string" && userId.includes("@")) {
+      const email = userId.toLowerCase().trim();
+      console.log(`[getUserById] ID lookup failed, trying email lookup: ${email}`);
+      
+      // Try students table by email
+      const { data: emailStudent } = await supabase
+        .from("students")
+        .select("*")
+        .eq("email", email)
+        .maybeSingle();
+      if (emailStudent) {
+        data = { ...emailStudent, role: "student" };
+        console.log(`[getUserById] ✅ Found student by email: ${email}`);
+        return data;
+      }
+      
+      // Try staff table by email
+      const { data: emailStaff } = await supabase
+        .from("staff")
+        .select("*")
+        .eq("email", email)
+        .maybeSingle();
+      if (emailStaff) {
+        data = { ...emailStaff, is_active: emailStaff.status === "active" };
+        console.log(`[getUserById] ✅ Found staff by email: ${email}`);
+        return data;
+      }
+      
+      // Try users table by email
+      const { data: emailUser } = await supabase
+        .from("users")
+        .select("*")
+        .eq("email", email)
+        .maybeSingle();
+      if (emailUser) {
+        if (emailUser.max_items_per_order !== undefined || emailUser.total_item_limit !== undefined) {
+          emailUser.total_item_limit = emailUser.total_item_limit ?? emailUser.max_items_per_order;
+        }
+        console.log(`[getUserById] ✅ Found user by email: ${email}`);
+        return emailUser;
+      }
+      
+      console.log(`[getUserById] ⚠️ User not found by email: ${email}`);
+    }
+    
+    // If we got here, user was not found
+    if (error) throw error;
+    return null;
   } catch (error) {
     console.error("Error fetching user:", error);
     throw error;

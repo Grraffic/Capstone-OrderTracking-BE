@@ -13,18 +13,25 @@ class TransactionService {
    * @param {string} userId - User ID who performed the action
    * @param {string} details - Human-readable transaction details
    * @param {object} metadata - Additional structured data (order_id, item_id, etc.)
+   * @param {string|null} userEmail - Optional email fallback (useful when userId is not a DB UUID)
    * @returns {Promise<object>} Created transaction
    */
-  async logTransaction(type, action, userId, details, metadata = {}) {
+  async logTransaction(type, action, userId, details, metadata = {}, userEmail = null) {
     try {
       console.log("[TransactionService] 📝 Logging transaction:", {
         type,
         action,
         userId,
         details,
-        metadataKeys: Object.keys(metadata),
+        userEmail,
+        metadataKeys: Object.keys(metadata || {}),
       });
       
+      // Normalize metadata to an object (defensive)
+      if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+        metadata = {};
+      }
+
       // Fetch user information if userId is provided
       let userName = "System";
       let userRole = "system";
@@ -43,10 +50,15 @@ class TransactionService {
         if (!studentError && student) {
           userName = student.name || "Unknown Student";
           userRole = "student";
-          console.log("[TransactionService] ✅ Found student:", {
+          // Store email in metadata for fallback
+          if (student.email && !metadata.email) {
+            metadata.email = student.email;
+          }
+          console.log("[TransactionService] ✅ Found student in students table:", {
             id: student.id,
             name: student.name,
             email: student.email,
+            table: "students",
           });
         } else {
           // Try to fetch from staff table
@@ -59,11 +71,16 @@ class TransactionService {
           if (!staffError && staff) {
             userName = staff.name || "Unknown Staff";
             userRole = staff.role || "unknown";
-            console.log("[TransactionService] ✅ Found staff:", {
+            // Store email in metadata for fallback
+            if (staff.email && !metadata.email) {
+              metadata.email = staff.email;
+            }
+            console.log("[TransactionService] ✅ Found staff in staff table:", {
               id: staff.id,
               name: staff.name,
               email: staff.email,
               role: staff.role,
+              table: "staff",
             });
           } else {
             // Try to fetch from users table
@@ -76,11 +93,16 @@ class TransactionService {
             if (!userError && user) {
               userName = user.name || "Unknown User";
               userRole = user.role || "unknown";
-              console.log("[TransactionService] ✅ Found user:", {
+              // Store email in metadata for fallback
+              if (user.email && !metadata.email) {
+                metadata.email = user.email;
+              }
+              console.log("[TransactionService] ✅ Found user in users table:", {
                 id: user.id,
                 name: user.name,
                 email: user.email,
                 role: user.role,
+                table: "users",
               });
             } else {
               // If not found by ID, try by email lookup
@@ -91,6 +113,9 @@ class TransactionService {
               if (typeof userId === "string" && userId.includes("@")) {
                 // userId itself is an email
                 emailToLookup = userId;
+              } else if (userEmail && typeof userEmail === "string") {
+                // Explicit email fallback passed by caller
+                emailToLookup = userEmail;
               } else if (metadata?.student_email) {
                 // Use student_email from metadata as fallback
                 emailToLookup = metadata.student_email;
@@ -100,6 +125,10 @@ class TransactionService {
               }
               
               if (emailToLookup) {
+                // Normalize/stash email in metadata for later backfills/clients
+                if (!metadata.email) {
+                  metadata.email = String(emailToLookup).toLowerCase().trim();
+                }
                 // Try students table first
                 const { data: emailStudent, error: emailStudentError } = await supabase
                   .from("students")
@@ -110,9 +139,15 @@ class TransactionService {
                 if (!emailStudentError && emailStudent) {
                   userName = emailStudent.name || "Unknown Student";
                   userRole = "student";
-                  console.log("[TransactionService] ✅ Found student by email:", {
+                  // Store email in metadata for fallback
+                  if (emailStudent.email && !metadata.email) {
+                    metadata.email = emailStudent.email;
+                  }
+                  console.log("[TransactionService] ✅ Found student by email in students table:", {
                     email: emailStudent.email,
                     name: emailStudent.name,
+                    table: "students",
+                    lookupMethod: "email",
                   });
                 } else {
                   // Try staff table
@@ -125,10 +160,16 @@ class TransactionService {
                   if (!emailStaffError && emailStaff) {
                     userName = emailStaff.name || "Unknown Staff";
                     userRole = emailStaff.role || "unknown";
-                    console.log("[TransactionService] ✅ Found staff by email:", {
+                    // Store email in metadata for fallback
+                    if (emailStaff.email && !metadata.email) {
+                      metadata.email = emailStaff.email;
+                    }
+                    console.log("[TransactionService] ✅ Found staff by email in staff table:", {
                       email: emailStaff.email,
                       name: emailStaff.name,
                       role: emailStaff.role,
+                      table: "staff",
+                      lookupMethod: "email",
                     });
                   } else {
                     // Try users table
@@ -141,10 +182,16 @@ class TransactionService {
                     if (!emailError && emailUser) {
                       userName = emailUser.name || "Unknown User";
                       userRole = emailUser.role || "unknown";
-                      console.log("[TransactionService] ✅ Found user by email:", {
+                      // Store email in metadata for fallback
+                      if (emailUser.email && !metadata.email) {
+                        metadata.email = emailUser.email;
+                      }
+                      console.log("[TransactionService] ✅ Found user by email in users table:", {
                         email: emailUser.email,
                         name: emailUser.name,
                         role: emailUser.role,
+                        table: "users",
+                        lookupMethod: "email",
                       });
                     } else {
                       console.warn("[TransactionService] ⚠️ Could not find user/student/staff by email:", {
@@ -363,6 +410,141 @@ class TransactionService {
       console.error("Get transaction by ID error:", error);
       throw new Error(`Failed to get transaction: ${error.message}`);
     }
+  }
+
+  /**
+   * Backfill Item transactions where user_name is missing/System by resolving user via user_id or metadata email.
+   * Intended for system admins to fix historic audit entries.
+   *
+   * @param {number} limit - Max transactions to process
+   * @returns {Promise<{success: boolean, updated: number, scanned: number, errors: number}>}
+   */
+  async backfillItemTransactionsSystemUsers(limit = 500) {
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 500, 5000));
+    let updated = 0;
+    let scanned = 0;
+    let errors = 0;
+
+    const { data: txs, error } = await supabase
+      .from("transactions")
+      .select("*")
+      .eq("type", "Item")
+      .order("created_at", { ascending: false })
+      .limit(safeLimit);
+
+    if (error) throw error;
+    if (!txs || txs.length === 0) {
+      return { success: true, updated: 0, scanned: 0, errors: 0 };
+    }
+
+    for (const tx of txs) {
+      scanned++;
+      const currentName = (tx.user_name || "").trim();
+      if (currentName && currentName !== "System") continue;
+
+      try {
+        const metadata = tx.metadata && typeof tx.metadata === "object" ? { ...tx.metadata } : {};
+        const emailFallback = metadata.email || metadata.student_email || null;
+
+        // Reuse the same resolution logic by calling logTransaction's lookup part indirectly:
+        // We can't call logTransaction (it would insert). So we replicate resolution by calling logTransaction with a dry-run? Not available.
+        // Instead, call the same lookup code by calling logTransaction but prevent insert is not supported here.
+        // We'll do a lightweight resolution by leveraging existing lookup in logTransaction via a local copy using the same tables.
+
+        let userName = "System";
+        let userRole = metadata.user_role || tx.user_role || "system";
+
+        // Try ID lookups first
+        if (tx.user_id) {
+          const { data: studentRow } = await supabase
+            .from("students")
+            .select("name")
+            .eq("id", tx.user_id)
+            .maybeSingle();
+          if (studentRow?.name) {
+            userName = studentRow.name;
+            userRole = "student";
+          } else {
+            const { data: staffRow } = await supabase
+              .from("staff")
+              .select("name, role")
+              .eq("id", tx.user_id)
+              .maybeSingle();
+            if (staffRow?.name) {
+              userName = staffRow.name;
+              userRole = staffRow.role || "unknown";
+            } else {
+              const { data: userRow } = await supabase
+                .from("users")
+                .select("name, role, email")
+                .eq("id", tx.user_id)
+                .maybeSingle();
+              if (userRow?.name) {
+                userName = userRow.name;
+                userRole = userRow.role || "unknown";
+                if (userRow.email && !metadata.email) metadata.email = userRow.email;
+              }
+            }
+          }
+        }
+
+        // Fallback to email lookups
+        if (userName === "System" && emailFallback) {
+          const email = String(emailFallback).toLowerCase().trim();
+          const { data: studentByEmail } = await supabase
+            .from("students")
+            .select("name")
+            .eq("email", email)
+            .maybeSingle();
+          if (studentByEmail?.name) {
+            userName = studentByEmail.name;
+            userRole = "student";
+            metadata.email = email;
+          } else {
+            const { data: staffByEmail } = await supabase
+              .from("staff")
+              .select("name, role, email")
+              .eq("email", email)
+              .maybeSingle();
+            if (staffByEmail?.name) {
+              userName = staffByEmail.name;
+              userRole = staffByEmail.role || "unknown";
+              metadata.email = staffByEmail.email || email;
+            } else {
+              const { data: userByEmail } = await supabase
+                .from("users")
+                .select("name, role, email")
+                .eq("email", email)
+                .maybeSingle();
+              if (userByEmail?.name) {
+                userName = userByEmail.name;
+                userRole = userByEmail.role || "unknown";
+                metadata.email = userByEmail.email || email;
+              }
+            }
+          }
+        }
+
+        if (!userName || userName === "System") continue;
+
+        const { error: updateError } = await supabase
+          .from("transactions")
+          .update({
+            user_name: userName,
+            user_role: userRole || tx.user_role || "unknown",
+            metadata,
+          })
+          .eq("id", tx.id);
+
+        if (updateError) throw updateError;
+        updated++;
+      } catch (e) {
+        errors++;
+        console.warn("[TransactionService] backfillItemTransactionsSystemUsers failed for tx:", tx?.id, e?.message);
+      }
+    }
+
+    return { success: true, updated, scanned, errors };
   }
 }
 

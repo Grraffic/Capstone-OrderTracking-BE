@@ -1112,7 +1112,7 @@ class ItemsService {
   /**
    * Update existing item
    */
-  async updateItem(id, updates, io = null, userId = null) {
+  async updateItem(id, updates, io = null, userId = null, userEmail = null) {
     try {
       const { data: currentItem, error: fetchError } = await supabase
         .from("items")
@@ -1376,7 +1376,8 @@ class ItemsService {
             updated_fields: updatedFields,
             previous_data: currentItem,
             new_data: finalData,
-          }
+          },
+          userEmail
         );
       } catch (txError) {
         console.error("Failed to log transaction for item update:", txError);

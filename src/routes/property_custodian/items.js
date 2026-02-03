@@ -1,7 +1,10 @@
 const express = require("express");
 const router = express.Router();
 const itemsController = require("../../controllers/property_custodian/items.controller");
-// const auth = require("../middleware/auth"); // Uncomment when auth middleware is ready
+const {
+  verifyToken,
+  requireAdminOrPropertyCustodian,
+} = require("../../middleware/auth");
 
 /**
  * Items Routes
@@ -88,31 +91,47 @@ router.get("/:id/pre-order-count", itemsController.getPreOrderCount);
 
 /**
  * POST /api/items
- * Create new item
- * Note: Add auth.requireAdmin middleware when ready
+ * Create new item (staff only)
  */
-router.post("/", itemsController.createItem);
+router.post(
+  "/",
+  verifyToken,
+  requireAdminOrPropertyCustodian,
+  itemsController.createItem
+);
 
 /**
  * PUT /api/items/:id
- * Update existing item
- * Note: Add auth.requireAdmin middleware when ready
+ * Update existing item (staff only)
  */
-router.put("/:id", itemsController.updateItem);
+router.put(
+  "/:id",
+  verifyToken,
+  requireAdminOrPropertyCustodian,
+  itemsController.updateItem
+);
 
 /**
  * PATCH /api/items/:id/adjust
- * Adjust item stock quantity
- * Note: Add auth.requireAdmin middleware when ready
+ * Adjust item stock quantity (staff only)
  */
-router.patch("/:id/adjust", itemsController.adjustStock);
+router.patch(
+  "/:id/adjust",
+  verifyToken,
+  requireAdminOrPropertyCustodian,
+  itemsController.adjustStock
+);
 
 /**
  * POST /api/items/:id/add-stock
- * Add stock to item (goes to purchases)
- * Note: Add auth.requireAdmin middleware when ready
+ * Add stock to item (goes to purchases) (staff only)
  */
-router.post("/:id/add-stock", itemsController.addStock);
+router.post(
+  "/:id/add-stock",
+  verifyToken,
+  requireAdminOrPropertyCustodian,
+  itemsController.addStock
+);
 
 /**
  * POST /api/items/fiscal-year-rollover
@@ -125,30 +144,47 @@ router.post("/fiscal-year-rollover", itemsController.performFiscalYearRollover);
 
 /**
  * POST /api/items/:id/record-return
- * Record a return (student returned item); appears in Returns table
+ * Record a return (student returned item); appears in Returns table (staff only)
  */
-router.post("/:id/record-return", itemsController.recordReturn);
+router.post(
+  "/:id/record-return",
+  verifyToken,
+  requireAdminOrPropertyCustodian,
+  itemsController.recordReturn
+);
 
 /**
  * POST /api/items/:id/reset-beginning-inventory
- * Manually reset beginning inventory
- * Note: Add auth.requireAdmin middleware when ready
+ * Manually reset beginning inventory (staff only)
  */
-router.post("/:id/reset-beginning-inventory", itemsController.resetBeginningInventory);
+router.post(
+  "/:id/reset-beginning-inventory",
+  verifyToken,
+  requireAdminOrPropertyCustodian,
+  itemsController.resetBeginningInventory
+);
 
 /**
  * PATCH /api/items/:id/archive
- * Archive item (hidden from default list; show when filter "Archived")
- * Note: Add auth.requireAdmin middleware when ready
+ * Archive item (hidden from default list; show when filter "Archived") (staff only)
  */
-router.patch("/:id/archive", itemsController.archiveItem);
+router.patch(
+  "/:id/archive",
+  verifyToken,
+  requireAdminOrPropertyCustodian,
+  itemsController.archiveItem
+);
 
 /**
  * DELETE /api/items/:id
- * Delete item (soft delete)
- * Note: Add auth.requireAdmin middleware when ready
+ * Delete item (soft delete) (staff only)
  */
-router.delete("/:id", itemsController.deleteItem);
+router.delete(
+  "/:id",
+  verifyToken,
+  requireAdminOrPropertyCustodian,
+  itemsController.deleteItem
+);
 
 module.exports = router;
 

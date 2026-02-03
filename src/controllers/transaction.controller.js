@@ -283,6 +283,25 @@ class TransactionController {
       });
     }
   }
+
+  /**
+   * Backfill Item transactions where user is System/missing by resolving user_name/user_role.
+   * POST /api/transactions/backfill-item-users
+   * Body: { limit?: number }
+   */
+  async backfillItemUsers(req, res) {
+    try {
+      const limit = req.body?.limit;
+      const result = await TransactionService.backfillItemTransactionsSystemUsers(limit);
+      return res.json(result);
+    } catch (error) {
+      console.error("Backfill item users error:", error);
+      return res.status(500).json({
+        success: false,
+        message: error.message || "Failed to backfill item transactions",
+      });
+    }
+  }
 }
 
 module.exports = new TransactionController();
