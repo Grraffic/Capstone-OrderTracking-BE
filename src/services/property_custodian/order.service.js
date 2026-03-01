@@ -1805,15 +1805,32 @@ class OrderService {
   }
 
   /**
-   * Void unclaimed orders older than the given number of days.
+   * Get the date that is N weekdays (Mon–Fri) before a given date. Saturday/Sunday are not counted.
+   * @param {Date} fromDate - Reference date (e.g. today)
+   * @param {number} weekdays - Number of weekdays to go back
+   * @returns {Date} Start of day that is N weekdays before fromDate
+   */
+  _dateSubtractWeekdays(fromDate, weekdays) {
+    const d = new Date(fromDate.getFullYear(), fromDate.getMonth(), fromDate.getDate());
+    let remaining = weekdays;
+    while (remaining > 0) {
+      d.setDate(d.getDate() - 1);
+      const day = d.getDay();
+      if (day >= 1 && day <= 5) remaining--;
+    }
+    return d;
+  }
+
+  /**
+   * Void unclaimed orders older than the given number of **weekdays** (Mon–Fri only).
    * Sets status to 'cancelled' and restores inventory (via updateOrderStatus).
-   * @param {number} [days=7] - Number of days after which to void unclaimed orders
+   * @param {number} [days=7] - Number of weekdays after which to void unclaimed orders (Sat/Sun not counted)
    * @returns {Promise<{ voidedCount: number, orderIds: string[] }>}
    */
   async voidUnclaimedOrdersOlderThanDays(days = 7) {
     const claimableStatuses = ["pending", "paid", "processing", "ready", "payment_pending"];
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - days);
+    const now = new Date();
+    const cutoff = this._dateSubtractWeekdays(now, days);
     const cutoffIso = cutoff.toISOString();
 
     const { data: orders, error } = await supabase
@@ -1829,14 +1846,14 @@ class OrderService {
     }
 
     const orderIds = (orders || []).map((o) => o.id);
-    const note = `Auto-voided: not claimed within ${days} day(s).`;
+    const note = `Auto-voided: not claimed within ${days} weekday(s).`;
 
     for (const order of orders || []) {
       try {
         await this.updateOrderStatus(order.id, "cancelled", note);
         await this.incrementVoidStrikeAndBlockIfNeeded(order);
         if (!isProduction) {
-          console.log(`Auto-voided order ${order.order_number || order.id} (older than ${days} days)`);
+          console.log(`Auto-voided order ${order.order_number || order.id} (older than ${days} weekday(s))`);
         }
       } catch (err) {
         console.error(`voidUnclaimedOrdersOlderThanDays: failed to void order ${order.id}:`, err);
@@ -1844,7 +1861,7 @@ class OrderService {
     }
 
     if (orderIds.length > 0) {
-      console.log(`Auto-void job: voided ${orderIds.length} order(s) older than ${days} days`);
+      console.log(`Auto-void job: voided ${orderIds.length} order(s) older than ${days} weekday(s)`);
     }
 
     return { voidedCount: orderIds.length, orderIds };

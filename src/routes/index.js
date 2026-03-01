@@ -65,4 +65,10 @@ router.use("/system-admin/student-permissions", studentPermissionsRoutes);
 // Public maintenance status endpoint (no auth required)
 router.get("/maintenance/status", maintenanceController.getMaintenanceStatus);
 
+// Public config for frontend (e.g. QR validity = VOID_UNCLAIMED_AFTER_DAYS, weekdays only)
+router.get("/config", (_req, res) => {
+  const qrValidDays = parseInt(process.env.VOID_UNCLAIMED_AFTER_DAYS, 10) || 7;
+  res.json({ qrValidDays });
+});
+
 module.exports = router;
