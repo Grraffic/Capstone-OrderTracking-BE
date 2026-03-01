@@ -5,6 +5,8 @@
  * The QR code contains order information that can be scanned by admins
  */
 
+const QR_VALID_DAYS = 7;
+
 /**
  * Generate QR code data for an order receipt
  * @param {Object} orderData - Order information
@@ -61,6 +63,8 @@ function generateOrderReceiptQRData(orderData) {
     orderDate,
     educationLevel,
     status,
+    qrIssuedAt: new Date().toISOString(),
+    qrValidDays: QR_VALID_DAYS,
   };
 
   // Validate the generated QR data structure
