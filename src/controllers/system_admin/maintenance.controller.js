@@ -1,4 +1,5 @@
 const maintenanceService = require("../../services/system_admin/maintenance.service");
+const { getProfileByUserId } = require("../../services/profileResolver.service");
 
 /**
  * Maintenance Controller
@@ -127,7 +128,14 @@ exports.updateMaintenanceMode = async (req, res) => {
       });
     }
 
-    const userId = req.user?.id || null;
+    // Resolve auth user id to staff id for FK (maintenance_mode.updated_by references staff.id)
+    let staffId = null;
+    if (req.user?.id) {
+      const profile = await getProfileByUserId(req.user.id);
+      if (profile && profile.type === "staff") {
+        staffId = profile.id;
+      }
+    }
 
     const result = await maintenanceService.updateMaintenanceMode(
       {
@@ -138,7 +146,7 @@ exports.updateMaintenanceMode = async (req, res) => {
         end_time: end_time || null,
         is_all_day: Boolean(is_all_day),
       },
-      userId
+      staffId
     );
 
     res.json(result);
