@@ -903,7 +903,7 @@ class ItemsService {
       // Beginning inventory is set ONLY on first creation and never changes
       // FIFO: unit price of beginning inventory = price at creation; purchases use price when added later
       // New items are NOT approved by default - require system admin approval
-      const beginningUnitPrice = itemData.beginning_inventory_unit_price != null
+      let beginningUnitPrice = itemData.beginning_inventory_unit_price != null
         ? Number(itemData.beginning_inventory_unit_price)
         : (Number(itemData.price) || 0);
       
@@ -928,8 +928,16 @@ class ItemsService {
               totalPurchases += entryPurchases;
             });
             
+            // FIFO: use first entry's price as beginning-inventory unit price
+            if (parsedNote.accessoryEntries.length > 0) {
+              const firstEntryPrice = Number(parsedNote.accessoryEntries[0].price);
+              if (firstEntryPrice != null && !isNaN(firstEntryPrice)) {
+                beginningUnitPrice = firstEntryPrice;
+              }
+            }
+            
             console.log(
-              `[createItem] Processed accessoryEntries: totalBeginningInventory=${totalBeginningInventory}, totalPurchases=${totalPurchases}`
+              `[createItem] Processed accessoryEntries: totalBeginningInventory=${totalBeginningInventory}, totalPurchases=${totalPurchases}, beginningUnitPrice=${beginningUnitPrice}`
             );
           }
         } catch (_) {

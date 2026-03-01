@@ -364,9 +364,11 @@ class InventoryService {
       const reportData = [];
 
       for (const item of items || []) {
-        // Check if item has JSON size variations
+        // Check if item has JSON size variations or accessory entries
         let hasJsonVariations = false;
         let sizeVariations = [];
+        let hasAccessoryEntries = false;
+        let accessoryEntries = [];
 
         if (item.note) {
           try {
@@ -378,18 +380,92 @@ class InventoryService {
             ) {
               hasJsonVariations = true;
               sizeVariations = parsedNote.sizeVariations;
+            } else if (
+              parsedNote &&
+              parsedNote._type === "accessoryEntries" &&
+              Array.isArray(parsedNote.accessoryEntries)
+            ) {
+              hasAccessoryEntries = true;
+              accessoryEntries = parsedNote.accessoryEntries;
             }
           } catch (e) {
             // Not JSON, continue with regular processing
           }
         }
 
-        if (hasJsonVariations && sizeVariations.length > 0) {
+        if (hasAccessoryEntries && accessoryEntries.length > 0) {
+          // Accessories: one row per item; FIFO from per-entry prices
+          const totalStock = accessoryEntries.reduce(
+            (sum, e) => sum + (Number(e.stock) || 0),
+            0
+          );
+          const totalBeginningInventory = Number(accessoryEntries[0]?.beginning_inventory) || 0;
+          const totalPurchases = accessoryEntries.slice(1).reduce(
+            (sum, e) => sum + (Number(e.purchases) || 0),
+            0
+          );
+          const begUnitPrice = Number(accessoryEntries[0]?.price) ?? Number(item.price) ?? 0;
+          // FIFO total: entry[0].beginning_inventory * entry[0].price + Σ(entry[i].purchases * entry[i].price) for i >= 1
+          let totalAmount = totalBeginningInventory * begUnitPrice;
+          for (let i = 1; i < accessoryEntries.length; i++) {
+            const entryPurchases = Number(accessoryEntries[i].purchases) || 0;
+            const entryPrice = Number(accessoryEntries[i].price) ?? Number(item.price) ?? 0;
+            totalAmount += entryPurchases * entryPrice;
+          }
+          // Display purchase unit price: last entry with purchases, or weighted fallback
+          let purchUnitPrice = Number(item.price) || 0;
+          for (let i = accessoryEntries.length - 1; i >= 1; i--) {
+            if ((Number(accessoryEntries[i].purchases) || 0) > 0) {
+              purchUnitPrice = Number(accessoryEntries[i].price) ?? purchUnitPrice;
+              break;
+            }
+          }
+          const endingInventory = totalBeginningInventory + totalPurchases;
+          const unreleased = 0;
+          const released = 0;
+          const returns = 0;
+          const reorderPoint = Number(item.reorder_point) || 0;
+          let status = "Above Threshold";
+          if (endingInventory === 0) status = "Out of Stock";
+          else if (reorderPoint > 0 && endingInventory <= reorderPoint) status = "At Reorder Point";
+
+          reportData.push({
+            id: `${item.id}-accessory-${item.created_at || Date.now()}`,
+            item_id: item.id,
+            name: item.name,
+            education_level: item.education_level,
+            category: item.category,
+            item_type: item.item_type,
+            size: item.size || "N/A",
+            stock: totalStock,
+            beginning_inventory: totalBeginningInventory,
+            purchases: totalPurchases,
+            released,
+            returns,
+            unreleased,
+            available: endingInventory,
+            ending_inventory: endingInventory,
+            unit_price: purchUnitPrice,
+            unit_price_beginning: begUnitPrice,
+            price: Number(item.price) || 0,
+            total_amount: totalAmount,
+            status,
+            reorder_point: item.reorder_point || 0,
+            beginning_inventory_date: item.beginning_inventory_date,
+            fiscal_year_start: item.fiscal_year_start,
+            created_at: item.created_at,
+            updated_at: item.updated_at,
+          });
+        } else if (hasJsonVariations && sizeVariations.length > 0) {
           // Use the size from each variant as stored on the item (refer to items data)
           sizeVariations.forEach((variant) => {
             const variantSize = variant.size || "N/A";
             const variantStock = Number(variant.stock) || 0;
-            const variantPurchasePrice = Number(variant.price) || item.price || 0;
+            // Per-variant purchase unit price when present; else variant.price (for display / backward compat)
+            let variantPurchasePrice =
+              variant.purchase_unit_price != null && !isNaN(Number(variant.purchase_unit_price))
+                ? Number(variant.purchase_unit_price)
+                : (Number(variant.price) || item.price || 0);
             // FIFO: first units use beginning-inventory unit price; next units use purchase (variant) price
             const variantBeginningUnitPrice = Number(variant.beginning_inventory_unit_price) ?? variantPurchasePrice;
 
@@ -405,10 +481,19 @@ class InventoryService {
               variantBeginningInventory = item.beginning_inventory || 0;
             }
 
-            // Per-size purchases only: use variant's value or derive from this size's stock - beginning_inventory.
-            // Never use item-level purchases for a specific size (so Medium stays 0 when only Small got +10).
+            // Per-size purchases: use variant.purchases or derive; when purchase_batches present, use sum of batch qty
             let variantPurchases;
-            if (variant.purchases !== undefined && variant.purchases !== null) {
+            const hasPurchaseBatches = Array.isArray(variant.purchase_batches) && variant.purchase_batches.length > 0;
+            if (hasPurchaseBatches) {
+              variantPurchases = variant.purchase_batches.reduce(
+                (sum, b) => sum + (Number(b.qty) || 0),
+                0
+              );
+              const lastBatch = variant.purchase_batches[variant.purchase_batches.length - 1];
+              if (lastBatch && (lastBatch.unit_price != null && !isNaN(Number(lastBatch.unit_price)))) {
+                variantPurchasePrice = Number(lastBatch.unit_price);
+              }
+            } else if (variant.purchases !== undefined && variant.purchases !== null) {
               variantPurchases = Number(variant.purchases) || 0;
             } else if (
               variant.stock !== undefined &&
@@ -458,10 +543,20 @@ class InventoryService {
               variantStatus = "At Reorder Point";
             }
 
-            // FIFO total: (beginning_inventory * beginning unit price) + (purchases * purchase unit price)
-            const totalAmount =
-              variantBeginningInventory * variantBeginningUnitPrice +
-              variantPurchases * variantPurchasePrice;
+            // FIFO total: when purchase_batches present use each batch's unit price; else single purchase price
+            let totalAmount;
+            if (hasPurchaseBatches) {
+              totalAmount =
+                variantBeginningInventory * variantBeginningUnitPrice +
+                variant.purchase_batches.reduce(
+                  (sum, b) => sum + (Number(b.qty) || 0) * (Number(b.unit_price) || 0),
+                  0
+                );
+            } else {
+              totalAmount =
+                variantBeginningInventory * variantBeginningUnitPrice +
+                variantPurchases * variantPurchasePrice;
+            }
 
             reportData.push({
               id: `${item.id}-${variantSize}-${item.created_at || Date.now()}`, // Ensure uniqueness even for duplicates
@@ -855,12 +950,30 @@ class InventoryService {
           0
         );
 
-        // IMPORTANT: Add to purchases per variant in JSON structure
-        // Store purchases at variant level for accurate tracking per size
+        // Add to purchases: append to purchase_batches so each add has its own unit price
         const currentVariantPurchases =
           Number(parsedNote.sizeVariations[variantIndex].purchases) || 0;
         const newVariantPurchases = currentVariantPurchases + quantity;
-        parsedNote.sizeVariations[variantIndex].purchases = newVariantPurchases;
+
+        let purchaseBatches = Array.isArray(parsedNote.sizeVariations[variantIndex].purchase_batches)
+          ? parsedNote.sizeVariations[variantIndex].purchase_batches
+          : [];
+        if (purchaseBatches.length === 0 && currentVariantPurchases > 0) {
+          const up = parsedNote.sizeVariations[variantIndex].purchase_unit_price ?? parsedNote.sizeVariations[variantIndex].price;
+          purchaseBatches = [{ qty: currentVariantPurchases, unit_price: Number(up) || 0 }];
+        }
+        const newBatch = {
+          qty: quantity,
+          unit_price: unitPrice != null && !isNaN(Number(unitPrice)) ? Number(unitPrice) : (Number(variant.price) || 0),
+        };
+        purchaseBatches = [...purchaseBatches, newBatch];
+        parsedNote.sizeVariations[variantIndex].purchase_batches = purchaseBatches;
+        parsedNote.sizeVariations[variantIndex].purchases = purchaseBatches.reduce((s, b) => s + (Number(b.qty) || 0), 0);
+
+        if (unitPrice != null) {
+          parsedNote.sizeVariations[variantIndex].price = unitPrice;
+          parsedNote.sizeVariations[variantIndex].purchase_unit_price = unitPrice;
+        }
 
         // Also update item-level purchases for backward compatibility
         const newPurchases = (item.purchases || 0) + quantity;
@@ -868,7 +981,7 @@ class InventoryService {
 
         if (!isProduction) {
           console.log(
-            `[addStock] 📊 Variant purchases update (JSON variant): variant="${variant.size}", current=${currentVariantPurchases}, adding=${quantity}, new=${newVariantPurchases}`
+            `[addStock] 📊 Variant purchases update (JSON variant): variant="${variant.size}", current=${currentVariantPurchases}, adding=${quantity}, new=${parsedNote.sizeVariations[variantIndex].purchases}`
           );
         }
 
@@ -876,14 +989,8 @@ class InventoryService {
           stock: newTotalStock,
           purchases: newPurchases, // Item-level purchases (for backward compatibility)
           // beginning_inventory is NOT updated - it stays the same
-          note: JSON.stringify(parsedNote), // Contains variant-level purchases
+          note: JSON.stringify(parsedNote), // Contains variant-level purchases and purchase_batches
         };
-
-        // Update price if provided
-        if (unitPrice !== null) {
-          parsedNote.sizeVariations[variantIndex].price = unitPrice;
-          updateData.note = JSON.stringify(parsedNote);
-        }
 
         const { data, error } = await supabase
           .from("items")
