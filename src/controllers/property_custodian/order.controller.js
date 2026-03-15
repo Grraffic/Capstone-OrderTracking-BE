@@ -208,10 +208,10 @@ class OrderController {
       }
 
       const optionalNote = isStudent && status === "cancelled" ? "Cancelled by student." : req.body.notes || undefined;
-      const result = await OrderService.updateOrderStatus(id, status, optionalNote);
+      const io = req.app.get("io");
+      const result = await OrderService.updateOrderStatus(id, status, optionalNote, io);
 
       // Emit Socket.IO event for real-time updates
-      const io = req.app.get("io");
       if (io) {
         // Verify result.data contains all required fields
         const orderData = result.data;

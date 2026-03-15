@@ -176,7 +176,7 @@ const generalLimiter = rateLimit({
     // Skip rate limiting if explicitly disabled via env var
     // if (process.env.RATE_LIMIT_ENABLED === "false") return true;
     // Skip for health check endpoints
-    // if (req.path === "/health" || req.path === "/api/health") return true;
+      // if (req.path === "/health" || req.path === "/api/health") return true;
     // return false;
   },
   handler: (req, res) => {

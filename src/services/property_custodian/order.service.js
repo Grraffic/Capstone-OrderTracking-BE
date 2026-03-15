@@ -526,6 +526,7 @@ class OrderService {
                 .from("orders")
                 .select("created_at, items")
                 .eq("is_active", true)
+                .neq("status", "cancelled")
                 .or(orParts.join(","))
                 .order("created_at", { ascending: false })
                 .limit(1)
@@ -1187,9 +1188,10 @@ class OrderService {
    * @param {string} id - Order ID
    * @param {string} status - New status
    * @param {string} [optionalNote] - Optional note (e.g. for auto-void reason when status is 'cancelled')
+   * @param {Object} [io] - Socket.IO instance (for emitting student:permissions:updated on cancel)
    * @returns {Promise<Object>} - Updated order
    */
-  async updateOrderStatus(id, status, optionalNote) {
+  async updateOrderStatus(id, status, optionalNote, io = null) {
     try {
       const updates = {
         status,
@@ -1246,7 +1248,7 @@ class OrderService {
         // When order is cancelled, re-enable permissions if student hasn't reached max from claimed items
         if (data.student_id) {
           try {
-            await this.reEnablePermissionsOnOrderCancellation(data);
+            await this.reEnablePermissionsOnOrderCancellation(data, io);
           } catch (permErr) {
             console.error("Failed to re-enable permissions on order cancellation:", permErr);
             // Do not rethrow; order status was already updated
@@ -1556,9 +1558,10 @@ class OrderService {
    * This automatically checks eligible items in system admin when student cancels an order
    * Only re-enables if student hasn't reached max quantity from claimed items
    * @param {Object} order - Order object with student_id and items
+   * @param {Object} [io] - Socket.IO instance to emit student:permissions:updated for real-time modal refresh
    * @returns {Promise<void>}
    */
-  async reEnablePermissionsOnOrderCancellation(order) {
+  async reEnablePermissionsOnOrderCancellation(order, io = null) {
     try {
       if (!order || !order.student_id || !order.items || !Array.isArray(order.items)) {
         return;
@@ -1577,6 +1580,8 @@ class OrderService {
       if (!studentRow) {
         return;
       }
+
+      const isNewStudent = String(studentRow.student_type || "").toLowerCase() === "new";
 
       // Get all claimed orders for this student to calculate total claimed quantities
       const { data: claimedOrders, error: claimedErr } = await supabase
@@ -1744,6 +1749,30 @@ class OrderService {
 
         if (reEnableResult.success) {
           console.log(`[Order Service] Automatically re-enabled ${itemsToReEnable.length} item permission(s) for student ${order.student_id} after order cancellation:`, itemsToReEnable.map(i => i.itemName));
+
+          // Emit Socket.IO event so admin modal and student app refresh (same as on order placement)
+          if (io) {
+            try {
+              const { data: studentRowForEmit } = await supabase
+                .from("students")
+                .select("user_id")
+                .eq("id", order.student_id)
+                .maybeSingle();
+
+              if (studentRowForEmit?.user_id) {
+                console.log(`📡 [Order Service] Emitting student:permissions:updated event for student ${order.student_id} after order cancellation`);
+                io.emit("student:permissions:updated", {
+                  studentId: order.student_id,
+                  userId: studentRowForEmit.user_id,
+                  permissions: permissionsToReEnable,
+                });
+              } else {
+                console.log(`⚠️ [Order Service] Could not find user_id for student ${order.student_id}, skipping Socket.IO event`);
+              }
+            } catch (socketError) {
+              console.error("Error emitting student:permissions:updated event on cancellation:", socketError);
+            }
+          }
         } else {
           console.error(`[Order Service] Failed to re-enable permissions on cancellation:`, reEnableResult.error);
         }
