@@ -1076,6 +1076,19 @@ class InventoryService {
           console.error("Failed to log transaction for stock addition:", txError);
         }
 
+        // Emit socket event to notify clients of updated purchases/stock for JSON variants too
+        if (io) {
+          io.emit("item:updated", {
+            id: data.id,
+            name: data.name,
+            stock: data.stock,
+            purchases: data.purchases,
+            beginning_inventory: data.beginning_inventory,
+            size: size || variant.size || data.size,
+            updated_at: data.updated_at,
+          });
+        }
+
         return {
           success: true,
           data,

@@ -93,14 +93,6 @@ async function getUsers({
       const studentIds = rows.map((u) => u.id).filter(Boolean);
       const placedStatuses = ["pending", "paid", "claimed", "processing", "ready", "payment_pending", "completed"];
       
-      // Create a map of student_id -> total_item_limit_set_at for filtering
-      const limitSetAtByStudentId = {};
-      for (const u of rows) {
-        if (u.total_item_limit_set_at) {
-          limitSetAtByStudentId[u.id] = u.total_item_limit_set_at;
-        }
-      }
-      
       const { data: placedOrders } = await supabase
         .from("orders")
         .select("student_id, items, created_at")
@@ -112,19 +104,7 @@ async function getUsers({
       for (const row of placedOrders || []) {
         const sid = row.student_id;
         if (!sid) continue;
-        
-        // Only count orders created AFTER total_item_limit_set_at (if it exists)
-        // This gives students a fresh slate when admin updates their limit
-        const limitSetAt = limitSetAtByStudentId[sid];
-        if (limitSetAt && row.created_at) {
-          const orderDate = new Date(row.created_at);
-          const limitDate = new Date(limitSetAt);
-          if (orderDate < limitDate) {
-            // Skip this order - it was created before the limit was set
-            continue;
-          }
-        }
-        
+
         if (!slotsByStudentId[sid]) slotsByStudentId[sid] = new Set();
         const items = Array.isArray(row.items) ? row.items : [];
         for (const it of items) {

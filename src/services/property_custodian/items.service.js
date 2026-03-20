@@ -18,6 +18,30 @@ const ALL_LEVEL_ITEM_NAME_PATTERN = "%logo patch%";
  * - Restock notifications for pre-orders
  */
 class ItemsService {
+  normalizeGradeLevel(value) {
+    if (!value) return "";
+    return String(value).toLowerCase().trim().replace(/\s+/g, " ");
+  }
+
+  itemMatchesStudentGradeLevel(item, userGradeLevel) {
+    const normalizedUserGrade = this.normalizeGradeLevel(userGradeLevel);
+    if (!normalizedUserGrade) return true;
+
+    let requiredGradeLevel = null;
+    if (item?.note) {
+      try {
+        const parsedNote = JSON.parse(item.note);
+        requiredGradeLevel =
+          parsedNote?.grade_level || parsedNote?.gradeLevel || null;
+      } catch (_) {
+        requiredGradeLevel = null;
+      }
+    }
+
+    // No grade restriction on this item -> visible to everyone in eligible education level
+    if (!requiredGradeLevel) return true;
+    return this.normalizeGradeLevel(requiredGradeLevel) === normalizedUserGrade;
+  }
   /**
    * Get curated item name suggestions for autocomplete/typeahead.
    *
@@ -388,6 +412,15 @@ class ItemsService {
       }
       
       if (error) throw error;
+
+      // Optional student grade-level restriction (currently used for accessories).
+      // If item note contains grade_level/gradeLevel, only matching students can see it.
+      if (filters.userEducationLevel && filters.userGradeLevel) {
+        data = (data || []).filter((item) =>
+          this.itemMatchesStudentGradeLevel(item, filters.userGradeLevel)
+        );
+        count = data.length;
+      }
 
       return {
         success: true,
