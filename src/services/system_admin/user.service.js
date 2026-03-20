@@ -35,58 +35,149 @@ async function getUsers({
   try {
     const listStaff = excludeRole && String(excludeRole).trim() === "student";
     const table = listStaff ? "staff" : "students";
+    const studentStatusFilter = !listStaff && status && status !== "All Status" ? status : "";
+    const useStudentStatusColumn = true;
 
-    let query = supabase
-      .from(table)
-      .select("*", { count: "exact" })
-      .order("created_at", { ascending: false });
+    const buildQuery = (useStatusColumnForStudent = true) => {
+      let query = supabase
+        .from(table)
+        .select("*", { count: "exact" })
+        .order("created_at", { ascending: false });
 
-    if (search) {
+      if (search) {
+        if (listStaff) {
+          query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%`);
+        } else {
+          query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%,student_number.ilike.%${search}%`);
+        }
+      }
+
       if (listStaff) {
-        query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%`);
-      } else {
-        query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%,student_number.ilike.%${search}%`);
+        if (role && role !== "All Roles") {
+          query = query.eq("role", role);
+        }
+        if (status && status !== "All Status") {
+          if (status === "Active") query = query.eq("status", "active");
+          else if (status === "Inactive") query = query.eq("status", "inactive");
+        }
       }
+
+      if (!listStaff) {
+        const trimmedEducationLevel = (education_level != null) ? String(education_level).trim() : "";
+        if (trimmedEducationLevel && trimmedEducationLevel !== "All Education Levels") {
+          query = query.eq("education_level", trimmedEducationLevel);
+        }
+        if (course_year_level && typeof course_year_level === "string" && course_year_level.trim() !== "" && course_year_level !== "All Grade Levels") {
+          query = query.ilike("course_year_level", course_year_level.trim());
+        }
+        if (studentStatusFilter) {
+          const isActive = studentStatusFilter === "Active";
+          if (useStatusColumnForStudent) {
+            query = query.eq("status", isActive ? "active" : "inactive");
+          } else {
+            query = query.eq("is_active", isActive);
+          }
+        }
+      }
+
+      if (listStaff) {
+        const from = (page - 1) * limit;
+        const to = from + limit - 1;
+        return query.range(from, to);
+      }
+      // For students, fetch full filtered set first so we can globally push
+      // inactive/voided records to the last pages before slicing.
+      return query;
+    };
+
+    let { data, error, count } = await buildQuery(useStudentStatusColumn);
+
+    // Student schema compatibility: if status column doesn't exist, retry with is_active.
+    if (
+      error &&
+      !listStaff &&
+      studentStatusFilter &&
+      (error.code === "42703" || String(error.message || "").toLowerCase().includes("column"))
+    ) {
+      const retry = await buildQuery(false);
+      data = retry.data;
+      error = retry.error;
+      count = retry.count;
     }
-
-    if (listStaff) {
-      if (role && role !== "All Roles") {
-        query = query.eq("role", role);
-      }
-      if (status && status !== "All Status") {
-        if (status === "Active") query = query.eq("status", "active");
-        else if (status === "Inactive") query = query.eq("status", "inactive");
-      }
-    } else {
-      // Student filters
-    }
-
-    if (!listStaff) {
-      const trimmedEducationLevel = (education_level != null) ? String(education_level).trim() : "";
-      if (trimmedEducationLevel && trimmedEducationLevel !== "All Education Levels") {
-        query = query.eq("education_level", trimmedEducationLevel);
-      }
-      if (course_year_level && typeof course_year_level === "string" && course_year_level.trim() !== "" && course_year_level !== "All Grade Levels") {
-        query = query.ilike("course_year_level", course_year_level.trim());
-      }
-    }
-
-    // Apply pagination
-    const from = (page - 1) * limit;
-    const to = from + limit - 1;
-    query = query.range(from, to);
-
-    const { data, error, count } = await query;
 
     if (error) {
       throw error;
+    }
+
+    if (!listStaff) {
+      const allStudentsRaw = Array.isArray(data) ? data : [];
+      const isExplicitZero = (value) =>
+        value !== null &&
+        value !== undefined &&
+        value !== "" &&
+        !Number.isNaN(Number(value)) &&
+        Number(value) === 0;
+
+      const allStudents = allStudentsRaw.map((u) => {
+        const normalizedTotalItemLimit = u.total_item_limit ?? u.max_items_per_order ?? null;
+        const computedVoided =
+          u.blocked_due_to_void === true || isExplicitZero(normalizedTotalItemLimit);
+        return {
+          ...u,
+          total_item_limit: normalizedTotalItemLimit,
+          blocked_due_to_void: computedVoided,
+        };
+      });
+
+      const sortedAllStudents = [...allStudents].sort((a, b) => {
+        const aVoided =
+          a.blocked_due_to_void === true ||
+          isExplicitZero(a.total_item_limit) ||
+          isExplicitZero(a.max_items_per_order);
+        const bVoided =
+          b.blocked_due_to_void === true ||
+          isExplicitZero(b.total_item_limit) ||
+          isExplicitZero(b.max_items_per_order);
+
+        const aInactive =
+          a.status !== undefined && a.status !== null
+            ? a.status === "inactive"
+            : a.is_active === false;
+        const bInactive =
+          b.status !== undefined && b.status !== null
+            ? b.status === "inactive"
+            : b.is_active === false;
+
+        // Keep voided records on the very last pages.
+        if (aVoided !== bVoided) return aVoided ? 1 : -1;
+        // Then keep inactive records near the end.
+        if (aInactive !== bInactive) return aInactive ? 1 : -1;
+
+        // Stable fallback: newest first.
+        const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
+        const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
+        return bTime - aTime;
+      });
+
+      const from = (page - 1) * limit;
+      const toExclusive = from + limit;
+      data = sortedAllStudents.slice(from, toExclusive);
+      count = typeof count === "number" ? count : sortedAllStudents.length;
     }
 
     const rows = (data || []).map((u) => {
       if (listStaff) {
         return { ...u, role: u.role, is_active: u.status === "active" };
       }
-      return { ...u, role: "student" };
+      return {
+        ...u,
+        id: u.id,
+        role: "student",
+        is_active:
+          u.status !== undefined && u.status !== null
+            ? u.status !== "inactive"
+            : (u.is_active !== false),
+      };
     });
 
     if (rows.length > 0 && !listStaff) {
@@ -121,7 +212,7 @@ async function getUsers({
       for (const u of rows) {
         u.slots_used_from_placed_orders = slotsByStudentId[u.id] ? slotsByStudentId[u.id].size : 0;
         u.total_item_limit = u.total_item_limit ?? u.max_items_per_order ?? null;
-        u.blocked_due_to_void = u.total_item_limit === 0;
+        u.blocked_due_to_void = u.blocked_due_to_void === true || u.total_item_limit === 0;
       }
     }
 
@@ -151,9 +242,27 @@ async function getUserById(userId) {
     let error = null;
     
     // Try to fetch by ID from students table first
-    const { data: studentRow } = await supabase.from("students").select("*").eq("id", userId).maybeSingle();
+    const { data: studentRow } = await supabase
+      .from("students")
+      .select("*")
+      .eq("id", userId)
+      .maybeSingle();
     if (studentRow) {
-      data = { ...studentRow, role: "student" };
+      data = { ...studentRow, role: "student", is_active: studentRow.status !== "inactive" };
+      return data;
+    }
+    // Try legacy_user_id for backward compatibility with pre-migration references
+    const { data: studentByLegacyUserId } = await supabase
+      .from("students")
+      .select("*")
+      .eq("legacy_user_id", userId)
+      .maybeSingle();
+    if (studentByLegacyUserId) {
+      data = {
+        ...studentByLegacyUserId,
+        role: "student",
+        is_active: studentByLegacyUserId.status !== "inactive",
+      };
       return data;
     }
     
@@ -189,7 +298,7 @@ async function getUserById(userId) {
         .eq("email", email)
         .maybeSingle();
       if (emailStudent) {
-        data = { ...emailStudent, role: "student" };
+        data = { ...emailStudent, role: "student", is_active: emailStudent.status !== "inactive" };
         console.log(`[getUserById] ✅ Found student by email: ${email}`);
         return data;
       }
@@ -427,6 +536,7 @@ async function createUser(userData, createdByUserId = null) {
         onboarding_completed_at: onboardingCompletedAt,
         avatar_url: userData.avatar_url || null,
         photo_url: userData.photo_url || null,
+        status: userData.is_active === false ? "inactive" : "active",
       };
 
       const { data: studentData, error: studentError } = await supabase
@@ -450,7 +560,7 @@ async function createUser(userData, createdByUserId = null) {
         throw studentError;
       }
 
-      dbUser = { ...studentData, role: "student" };
+      dbUser = { ...studentData, role: "student", is_active: studentData.status !== "inactive" };
     } else {
       // Insert into staff table
       const staffRecord = {
@@ -555,6 +665,9 @@ async function createUser(userData, createdByUserId = null) {
  */
 async function updateUser(userId, updates, updatedByUserId = null) {
   try {
+    const isInactiveStudentRow = (row) =>
+      row?.status === "inactive" || row?.is_active === false;
+
     // Determine which table the user is in (students, staff, or users for backward compatibility)
     let currentUser = null;
     let userTable = null;
@@ -565,7 +678,7 @@ async function updateUser(userId, updates, updatedByUserId = null) {
     let studentRow = null;
     const { data: studentById } = await supabase
       .from("students")
-      .select("id, user_id, email")
+      .select("*")
       .eq("id", userId)
       .maybeSingle();
 
@@ -575,17 +688,31 @@ async function updateUser(userId, updates, updatedByUserId = null) {
       // Try user_id field as well (in case frontend is passing user_id instead of id)
       const { data: studentByUserId } = await supabase
         .from("students")
-        .select("id, user_id, email")
+        .select("*")
         .eq("user_id", userId)
         .maybeSingle();
       
       if (studentByUserId) {
         studentRow = studentByUserId;
+      } else {
+        // Legacy fallback: some rows are still referenced by legacy_user_id
+        try {
+          const { data: studentByLegacyUserId } = await supabase
+            .from("students")
+            .select("*")
+            .eq("legacy_user_id", userId)
+            .maybeSingle();
+          if (studentByLegacyUserId) {
+            studentRow = studentByLegacyUserId;
+          }
+        } catch (_) {
+          // legacy_user_id may not exist in newer schemas
+        }
       }
     }
 
     if (studentRow) {
-      currentUser = { ...studentRow, role: "student", is_active: true };
+      currentUser = { ...studentRow, role: "student", is_active: !isInactiveStudentRow(studentRow) };
       userTable = "students";
       userRole = "student";
       // Use the actual id from the table for updates
@@ -620,6 +747,29 @@ async function updateUser(userId, updates, updatedByUserId = null) {
         userRole = staffRow.role;
         // Use the actual id from the table for updates
         actualUserId = staffRow.id;
+      }
+    }
+
+    // Final fallback: resolve student by email when ID mappings are missing.
+    // Some migrated datasets can surface stale IDs in UI while email remains authoritative.
+    if (!currentUser && updates.lookup_email) {
+      const normalizedLookupEmail = String(updates.lookup_email).toLowerCase().trim();
+      if (normalizedLookupEmail) {
+        const { data: studentByEmail } = await supabase
+          .from("students")
+          .select("*")
+          .eq("email", normalizedLookupEmail)
+          .maybeSingle();
+        if (studentByEmail) {
+          currentUser = {
+            ...studentByEmail,
+            role: "student",
+            is_active: !isInactiveStudentRow(studentByEmail),
+          };
+          userTable = "students";
+          userRole = "student";
+          actualUserId = studentByEmail.id;
+        }
       }
     }
 
@@ -677,13 +827,22 @@ async function updateUser(userId, updates, updatedByUserId = null) {
     
     // Remove fields that don't exist in students/staff tables
     if (userTable === "students" || userTable === "staff") {
-      // Convert is_active to status for staff (staff uses "active"/"inactive", not boolean)
-      if (cleanUpdates.is_active !== undefined && userTable === "staff") {
-        updateData.status = cleanUpdates.is_active ? "active" : "inactive";
-        console.log(`Converting is_active=${cleanUpdates.is_active} to status="${updateData.status}" for staff user`);
+      // Convert is_active for staff/students with schema compatibility.
+      if (cleanUpdates.is_active !== undefined && (userTable === "staff" || userTable === "students")) {
+        if (userTable === "staff" || Object.prototype.hasOwnProperty.call(currentUser, "status")) {
+          updateData.status = cleanUpdates.is_active ? "active" : "inactive";
+          console.log(`Converting is_active=${cleanUpdates.is_active} to status="${updateData.status}" for ${userTable} user`);
+        } else {
+          updateData.is_active = !!cleanUpdates.is_active;
+        }
       }
-      // Remove is_active (students/staff don't have this - staff uses status)
-      delete updateData.is_active;
+      // Remove temporary lookup-only input.
+      // Internal lookup helper - never write this to DB.
+      delete updateData.lookup_email;
+      // If status mapping is used, don't send is_active to avoid unknown column errors.
+      if (updateData.status !== undefined) {
+        delete updateData.is_active;
+      }
       // Remove old column name if present
       delete updateData.max_items_per_order;
       // Remove role (it's stored differently in students/staff)
@@ -931,9 +1090,13 @@ async function updateUser(userId, updates, updatedByUserId = null) {
       data.total_item_limit = data.total_item_limit ?? data.max_items_per_order;
     }
     
-    // Convert status to is_active for staff (frontend expects is_active boolean)
-    if (data && userTable === "staff" && data.status !== undefined) {
-      data.is_active = data.status === "active";
+    // Convert status/is_active for frontend compatibility.
+    if (data && (userTable === "staff" || userTable === "students")) {
+      if (data.status !== undefined) {
+        data.is_active = data.status === "active";
+      } else if (data.is_active === undefined) {
+        data.is_active = true;
+      }
     }
     
     return data;
@@ -976,7 +1139,7 @@ async function deleteUser(userId) {
     let studentRow = null;
     const { data: studentById } = await supabase
       .from("students")
-      .select("id, user_id, email")
+      .select("id, user_id, legacy_user_id, email")
       .eq("id", userId)
       .maybeSingle();
 
@@ -986,12 +1149,22 @@ async function deleteUser(userId) {
       // Try user_id field as well (in case frontend is passing user_id instead of id)
       const { data: studentByUserId } = await supabase
         .from("students")
-        .select("id, user_id, email")
+        .select("id, user_id, legacy_user_id, email")
         .eq("user_id", userId)
         .maybeSingle();
       
       if (studentByUserId) {
         studentRow = studentByUserId;
+      } else {
+        // Legacy fallback: support delete requests using legacy_user_id
+        const { data: studentByLegacyUserId } = await supabase
+          .from("students")
+          .select("id, user_id, legacy_user_id, email")
+          .eq("legacy_user_id", userId)
+          .maybeSingle();
+        if (studentByLegacyUserId) {
+          studentRow = studentByLegacyUserId;
+        }
       }
     }
 

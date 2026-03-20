@@ -14,6 +14,7 @@ const eligibilityRoutes = require("./system_admin/eligibility");
 const systemAdminItemsRoutes = require("./system_admin/items");
 const maintenanceRoutes = require("./system_admin/maintenance");
 const studentPermissionsRoutes = require("./system_admin/student_permissions");
+const studentStatusRoutes = require("./system_admin/student_status");
 const maintenanceController = require("../controllers/system_admin/maintenance.controller");
 
 // Contact routes
@@ -61,6 +62,9 @@ router.use("/system-admin/maintenance", maintenanceRoutes);
 
 // Student permissions routes (System Admin only)
 router.use("/system-admin/student-permissions", studentPermissionsRoutes);
+
+// Student status routes (System Admin/Property Custodian)
+router.use("/system-admin/students", studentStatusRoutes);
 
 // Public maintenance status endpoint (no auth required)
 router.get("/maintenance/status", maintenanceController.getMaintenanceStatus);
