@@ -1196,6 +1196,21 @@ class ItemsService {
       const reorderValue = Number(updates.reorder_point);
       const isValidReorder = updates.reorder_point !== undefined && !Number.isNaN(reorderValue) && reorderValue >= 0;
       const noteSource = updates.note || currentItem.note;
+      const sizeLooselyMatches = (stored, incoming) => {
+        const s = String(stored || "").trim();
+        const t = String(incoming || "").trim();
+        if (!t) return true;
+        if (!s) return false;
+        const sBase = s.replace(/\([^)]*\)/g, "").trim();
+        const tBase = t.replace(/\([^)]*\)/g, "").trim();
+        return (
+          s === t ||
+          sBase === tBase ||
+          s.includes(t) ||
+          t.includes(s) ||
+          s.toLowerCase() === t.toLowerCase()
+        );
+      };
       if (isValidReorder && noteSource) {
         try {
           const parsed = JSON.parse(noteSource);
@@ -1209,7 +1224,27 @@ class ItemsService {
             const target = (sizeOrVariant != null && String(sizeOrVariant).trim() !== "")
               ? String(sizeOrVariant).trim()
               : null;
-            if (target) {
+
+            const vIdxRaw = updates.variant_json_index;
+            if (
+              vIdxRaw !== undefined &&
+              vIdxRaw !== null &&
+              String(vIdxRaw).trim() !== ""
+            ) {
+              const vi = Number(vIdxRaw);
+              if (
+                Number.isInteger(vi) &&
+                vi >= 0 &&
+                vi < parsed.sizeVariations.length
+              ) {
+                const slotSize = parsed.sizeVariations[vi].size;
+                if (!target || sizeLooselyMatches(slotSize, target)) {
+                  idx = vi;
+                }
+              }
+            }
+
+            if (idx === -1 && target) {
               idx = parsed.sizeVariations.findIndex((v) => {
                 const s = (v.size || "").trim();
                 const sBase = s.replace(/\([^)]*\)/g, "").trim();
@@ -1230,6 +1265,10 @@ class ItemsService {
             if (idx !== -1) {
               parsed.sizeVariations[idx].reorder_point = reorderValue;
               updates.note = JSON.stringify(parsed);
+              // Do not set items.reorder_point to one variant's threshold when multiple sizes exist
+              if (parsed.sizeVariations.length > 1) {
+                delete updates.reorder_point;
+              }
             }
           }
         } catch (e) {
@@ -1237,6 +1276,9 @@ class ItemsService {
         }
         delete updates.size;
         delete updates.variant;
+        if (Object.prototype.hasOwnProperty.call(updates, "variant_json_index")) {
+          delete updates.variant_json_index;
+        }
       }
 
       const wasOutOfStock =
@@ -1327,6 +1369,10 @@ class ItemsService {
         delete updates.beginning_inventory;
       }
       delete updates.beginning_inventory_date;
+
+      if (Object.prototype.hasOwnProperty.call(updates, "variant_json_index")) {
+        delete updates.variant_json_index;
+      }
 
       const { id: _, created_at, ...allowedUpdates } = updates;
       const { data, error } = await supabase
