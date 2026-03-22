@@ -45,7 +45,9 @@ async function getUsers({
       if (listStaff) {
         query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%`);
       } else {
-        query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%,student_number.ilike.%${search}%`);
+        query = query.or(
+          `name.ilike.%${search}%,email.ilike.%${search}%,student_number.ilike.%${search}%`,
+        );
       }
     }
 
@@ -62,11 +64,20 @@ async function getUsers({
     }
 
     if (!listStaff) {
-      const trimmedEducationLevel = (education_level != null) ? String(education_level).trim() : "";
-      if (trimmedEducationLevel && trimmedEducationLevel !== "All Education Levels") {
+      const trimmedEducationLevel =
+        education_level != null ? String(education_level).trim() : "";
+      if (
+        trimmedEducationLevel &&
+        trimmedEducationLevel !== "All Education Levels"
+      ) {
         query = query.eq("education_level", trimmedEducationLevel);
       }
-      if (course_year_level && typeof course_year_level === "string" && course_year_level.trim() !== "" && course_year_level !== "All Grade Levels") {
+      if (
+        course_year_level &&
+        typeof course_year_level === "string" &&
+        course_year_level.trim() !== "" &&
+        course_year_level !== "All Grade Levels"
+      ) {
         query = query.ilike("course_year_level", course_year_level.trim());
       }
     }
@@ -91,15 +102,23 @@ async function getUsers({
 
     if (rows.length > 0 && !listStaff) {
       const studentIds = rows.map((u) => u.id).filter(Boolean);
-      const placedStatuses = ["pending", "paid", "claimed", "processing", "ready", "payment_pending", "completed"];
-      
+      const placedStatuses = [
+        "pending",
+        "paid",
+        "claimed",
+        "processing",
+        "ready",
+        "payment_pending",
+        "completed",
+      ];
+
       const { data: placedOrders } = await supabase
         .from("orders")
         .select("student_id, items, created_at")
         .eq("is_active", true)
         .in("status", placedStatuses)
         .in("student_id", studentIds);
-      
+
       const slotsByStudentId = {};
       for (const row of placedOrders || []) {
         const sid = row.student_id;
@@ -119,8 +138,11 @@ async function getUsers({
         }
       }
       for (const u of rows) {
-        u.slots_used_from_placed_orders = slotsByStudentId[u.id] ? slotsByStudentId[u.id].size : 0;
-        u.total_item_limit = u.total_item_limit ?? u.max_items_per_order ?? null;
+        u.slots_used_from_placed_orders = slotsByStudentId[u.id]
+          ? slotsByStudentId[u.id].size
+          : 0;
+        u.total_item_limit =
+          u.total_item_limit ?? u.max_items_per_order ?? null;
         u.blocked_due_to_void = u.total_item_limit === 0;
       }
     }
@@ -149,39 +171,57 @@ async function getUserById(userId) {
   try {
     let data = null;
     let error = null;
-    
+
     // Try to fetch by ID from students table first
-    const { data: studentRow } = await supabase.from("students").select("*").eq("id", userId).maybeSingle();
+    const { data: studentRow } = await supabase
+      .from("students")
+      .select("*")
+      .eq("id", userId)
+      .maybeSingle();
     if (studentRow) {
       data = { ...studentRow, role: "student" };
       return data;
     }
-    
+
     // Try to fetch by ID from staff table
-    const { data: staffRow } = await supabase.from("staff").select("*").eq("id", userId).maybeSingle();
+    const { data: staffRow } = await supabase
+      .from("staff")
+      .select("*")
+      .eq("id", userId)
+      .maybeSingle();
     if (staffRow) {
       data = { ...staffRow, is_active: staffRow.status === "active" };
       return data;
     }
-    
+
     // Try to fetch by ID from users table
-    const result = await supabase.from("users").select("*").eq("id", userId).maybeSingle();
+    const result = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", userId)
+      .maybeSingle();
     data = result.data;
     error = result.error;
-    
+
     // If found in users table, return it
     if (data && !error) {
-      if (data.max_items_per_order !== undefined || data.total_item_limit !== undefined) {
-        data.total_item_limit = data.total_item_limit ?? data.max_items_per_order;
+      if (
+        data.max_items_per_order !== undefined ||
+        data.total_item_limit !== undefined
+      ) {
+        data.total_item_limit =
+          data.total_item_limit ?? data.max_items_per_order;
       }
       return data;
     }
-    
+
     // If ID lookup failed and userId looks like an email, try email-based lookup
     if (typeof userId === "string" && userId.includes("@")) {
       const email = userId.toLowerCase().trim();
-      console.log(`[getUserById] ID lookup failed, trying email lookup: ${email}`);
-      
+      console.log(
+        `[getUserById] ID lookup failed, trying email lookup: ${email}`,
+      );
+
       // Try students table by email
       const { data: emailStudent } = await supabase
         .from("students")
@@ -193,7 +233,7 @@ async function getUserById(userId) {
         console.log(`[getUserById] ✅ Found student by email: ${email}`);
         return data;
       }
-      
+
       // Try staff table by email
       const { data: emailStaff } = await supabase
         .from("staff")
@@ -205,7 +245,7 @@ async function getUserById(userId) {
         console.log(`[getUserById] ✅ Found staff by email: ${email}`);
         return data;
       }
-      
+
       // Try users table by email
       const { data: emailUser } = await supabase
         .from("users")
@@ -213,16 +253,20 @@ async function getUserById(userId) {
         .eq("email", email)
         .maybeSingle();
       if (emailUser) {
-        if (emailUser.max_items_per_order !== undefined || emailUser.total_item_limit !== undefined) {
-          emailUser.total_item_limit = emailUser.total_item_limit ?? emailUser.max_items_per_order;
+        if (
+          emailUser.max_items_per_order !== undefined ||
+          emailUser.total_item_limit !== undefined
+        ) {
+          emailUser.total_item_limit =
+            emailUser.total_item_limit ?? emailUser.max_items_per_order;
         }
         console.log(`[getUserById] ✅ Found user by email: ${email}`);
         return emailUser;
       }
-      
+
       console.log(`[getUserById] ⚠️ User not found by email: ${email}`);
     }
-    
+
     // If we got here, user was not found
     if (error) throw error;
     return null;
@@ -298,7 +342,7 @@ async function createUser(userData, createdByUserId = null) {
           authError.message?.includes("already exists")
         ) {
           console.log(
-            `User ${normalizedEmail} already exists in Auth, will use existing account`
+            `User ${normalizedEmail} already exists in Auth, will use existing account`,
           );
           // Try to get existing user
           try {
@@ -307,7 +351,7 @@ async function createUser(userData, createdByUserId = null) {
               data: { users },
             } = await supabase.auth.admin.listUsers();
             const existingAuthUser = users?.find(
-              (u) => u.email?.toLowerCase() === normalizedEmail
+              (u) => u.email?.toLowerCase() === normalizedEmail,
             );
             if (existingAuthUser) {
               authUserId = existingAuthUser.id;
@@ -315,26 +359,26 @@ async function createUser(userData, createdByUserId = null) {
           } catch (listErr) {
             console.warn(
               "Could not retrieve existing Auth user:",
-              listErr.message
+              listErr.message,
             );
           }
         } else {
           console.warn(
             "Could not create Auth user (they'll need to log in via OAuth first):",
-            authError.message
+            authError.message,
           );
           // Continue anyway - they can log in via OAuth and the passport strategy will handle it
         }
       } else if (authData?.user) {
         authUserId = authData.user.id;
         console.log(
-          `✅ Created Auth user for ${normalizedEmail} with ID: ${authUserId}`
+          `✅ Created Auth user for ${normalizedEmail} with ID: ${authUserId}`,
         );
       }
     } catch (authErr) {
       console.warn(
         "Error creating Auth user (user will need to log in via OAuth first):",
-        authErr.message
+        authErr.message,
       );
       // Continue - the passport strategy will create the Auth user when they log in
     }
@@ -349,65 +393,76 @@ async function createUser(userData, createdByUserId = null) {
     const calculateEducationLevel = (courseYearLevel) => {
       if (!courseYearLevel) return null;
       const level = String(courseYearLevel).trim();
-      
+
       // Preschool: Prekindergarten and Kindergarten
-      if (level === "Prekindergarten" || level === "Kindergarten" || level === "Kinder") {
+      if (
+        level === "Prekindergarten" ||
+        level === "Kindergarten" ||
+        level === "Kinder"
+      ) {
         return "Kindergarten";
       }
-      
+
       // Elementary (Grades 1-6)
       if (level.match(/^Grade [1-6]$/)) {
         return "Elementary";
       }
-      
+
       // Junior High School (Grades 7-10)
       if (level.match(/^Grade (7|8|9|10)$/)) {
         return "Junior High School";
       }
-      
+
       // Senior High School (Grades 11-12)
       if (level.match(/^Grade (11|12)$/)) {
         return "Senior High School";
       }
-      
+
       // College Programs (BSIS, BSA, BSAIS, BSSW, BAB, ACT)
-      if (level.match(/^(BSIS|BSA|BSAIS|BSSW|BAB|ACT) (1st|2nd|3rd|4th) (Year|yr)$/i)) {
+      if (
+        level.match(
+          /^(BSIS|BSA|BSAIS|BSSW|BAB|ACT) (1st|2nd|3rd|4th) (Year|yr)$/i,
+        )
+      ) {
         return "College";
       }
-      
+
       return null;
     };
 
     // Step 2: Create user record in the appropriate table (students or staff)
     let dbUser = null;
-    
+
     if (isStudentEmail || isStudentRole) {
       // Calculate education_level from course_year_level if not provided
       const courseYearLevel = userData.course_year_level || null;
-      const educationLevel = userData.education_level || calculateEducationLevel(courseYearLevel);
-      
+      const educationLevel =
+        userData.education_level || calculateEducationLevel(courseYearLevel);
+
       // When admin creates a student, all required fields are provided, so mark onboarding as completed
       // Check if all required fields are present (non-empty strings/values)
-      const hasRequiredFields = 
-        userData.name && 
+      const hasRequiredFields =
+        userData.name &&
         String(userData.name).trim() &&
-        userData.student_number && 
+        userData.student_number &&
         String(userData.student_number).trim() &&
-        courseYearLevel && 
+        courseYearLevel &&
         String(courseYearLevel).trim() &&
-        userData.gender && 
+        userData.gender &&
         String(userData.gender).trim() &&
-        userData.student_type && 
+        userData.student_type &&
         String(userData.student_type).trim();
-      
+
       // If admin is creating student with all required fields, explicitly mark onboarding as completed
       // Only override if not explicitly set to false
-      const shouldMarkOnboardingComplete = hasRequiredFields && 
-        (userData.onboarding_completed !== false);
-      
+      const shouldMarkOnboardingComplete =
+        hasRequiredFields && userData.onboarding_completed !== false;
+
       // Explicitly set to boolean true or false (never null/undefined)
       const onboardingCompleted = shouldMarkOnboardingComplete ? true : false;
-      const onboardingCompletedAt = shouldMarkOnboardingComplete ? new Date().toISOString() : null;
+      const onboardingCompletedAt = shouldMarkOnboardingComplete
+        ? new Date().toISOString()
+        : null;
 
       // Insert into students table
       const studentRecord = {
@@ -443,7 +498,7 @@ async function createUser(userData, createdByUserId = null) {
           } catch (cleanupErr) {
             console.error(
               "Failed to cleanup Auth user after database error:",
-              cleanupErr
+              cleanupErr,
             );
           }
         }
@@ -477,7 +532,7 @@ async function createUser(userData, createdByUserId = null) {
           } catch (cleanupErr) {
             console.error(
               "Failed to cleanup Auth user after database error:",
-              cleanupErr
+              cleanupErr,
             );
           }
         }
@@ -496,7 +551,7 @@ async function createUser(userData, createdByUserId = null) {
         },
         {
           onConflict: "user_id,role",
-        }
+        },
       );
 
       if (roleError) {
@@ -522,19 +577,19 @@ async function createUser(userData, createdByUserId = null) {
           .select("id")
           .eq("user_id", createdByUserId)
           .maybeSingle();
-        
+
         const assignedByStaffId = creatorStaff?.id || createdByUserId;
-        
+
         await emailRoleAssignmentService.assignEmailRole(
           normalizedEmail,
           userData.role,
-          assignedByStaffId
+          assignedByStaffId,
         );
       } catch (assignmentError) {
         // Log but don't fail - email_role_assignments is for preventing role reversion
         console.warn(
           "Warning: Failed to create email_role_assignments:",
-          assignmentError.message
+          assignmentError.message,
         );
       }
     }
@@ -578,7 +633,7 @@ async function updateUser(userId, updates, updatedByUserId = null) {
         .select("id, user_id, email")
         .eq("user_id", userId)
         .maybeSingle();
-      
+
       if (studentByUserId) {
         studentRow = studentByUserId;
       }
@@ -608,14 +663,18 @@ async function updateUser(userId, updates, updatedByUserId = null) {
           .select("id, user_id, email, role, status")
           .eq("user_id", userId)
           .maybeSingle();
-        
+
         if (staffByUserId) {
           staffRow = staffByUserId;
         }
       }
 
       if (staffRow) {
-        currentUser = { ...staffRow, role: staffRow.role, is_active: staffRow.status === "active" };
+        currentUser = {
+          ...staffRow,
+          role: staffRow.role,
+          is_active: staffRow.status === "active",
+        };
         userTable = "staff";
         userRole = staffRow.role;
         // Use the actual id from the table for updates
@@ -625,7 +684,9 @@ async function updateUser(userId, updates, updatedByUserId = null) {
 
     // If user not found in students or staff tables, they don't exist
     if (!currentUser || !userTable) {
-      throw new Error(`User with ID ${userId} not found in students or staff tables`);
+      throw new Error(
+        `User with ID ${userId} not found in students or staff tables`,
+      );
     }
 
     // Check if trying to change role from system_admin to something else
@@ -647,7 +708,7 @@ async function updateUser(userId, updates, updatedByUserId = null) {
       } else if (staffCount === 1) {
         // This is the last system admin, prevent role change
         throw new Error(
-          "Cannot change role: This is the last remaining system admin. At least one system admin must exist."
+          "Cannot change role: This is the last remaining system admin. At least one system admin must exist.",
         );
       }
     }
@@ -659,7 +720,7 @@ async function updateUser(userId, updates, updatedByUserId = null) {
         // Keep the value if it's not undefined or null
         // Also keep 0, false, and empty strings as they might be intentional updates
         return value !== undefined && value !== null;
-      })
+      }),
     );
 
     // Log what we received for debugging
@@ -674,13 +735,15 @@ async function updateUser(userId, updates, updatedByUserId = null) {
       ...cleanUpdates,
       updated_at: new Date().toISOString(),
     };
-    
+
     // Remove fields that don't exist in students/staff tables
     if (userTable === "students" || userTable === "staff") {
       // Convert is_active to status for staff (staff uses "active"/"inactive", not boolean)
       if (cleanUpdates.is_active !== undefined && userTable === "staff") {
         updateData.status = cleanUpdates.is_active ? "active" : "inactive";
-        console.log(`Converting is_active=${cleanUpdates.is_active} to status="${updateData.status}" for staff user`);
+        console.log(
+          `Converting is_active=${cleanUpdates.is_active} to status="${updateData.status}" for staff user`,
+        );
       }
       // Remove is_active (students/staff don't have this - staff uses status)
       delete updateData.is_active;
@@ -692,19 +755,23 @@ async function updateUser(userId, updates, updatedByUserId = null) {
         delete updateData.role;
       }
     }
-    
+
     // When admin sets/updates total_item_limit, reset "used" and void strikes (support both column names for migration)
     // Only set these fields when limitValue is actually provided (not undefined/null/empty string)
-    const limitValue = cleanUpdates.total_item_limit !== undefined ? cleanUpdates.total_item_limit : cleanUpdates.max_items_per_order;
-    
+    const limitValue =
+      cleanUpdates.total_item_limit !== undefined
+        ? cleanUpdates.total_item_limit
+        : cleanUpdates.max_items_per_order;
+
     // Check if limitValue is a valid number (not undefined, null, empty string, or NaN)
     // Must be >= 1 (0 means blocked, but we require explicit setting)
-    const isValidLimit = limitValue !== undefined && 
-                         limitValue !== null && 
-                         limitValue !== '' && 
-                         !isNaN(limitValue) && 
-                         Number(limitValue) >= 1;
-    
+    const isValidLimit =
+      limitValue !== undefined &&
+      limitValue !== null &&
+      limitValue !== "" &&
+      !isNaN(limitValue) &&
+      Number(limitValue) >= 1;
+
     console.log(`Limit value check:`, {
       limitValue,
       isValidLimit,
@@ -712,20 +779,25 @@ async function updateUser(userId, updates, updatedByUserId = null) {
       cleanUpdates_total_item_limit: cleanUpdates.total_item_limit,
       cleanUpdates_max_items_per_order: cleanUpdates.max_items_per_order,
     });
-    
+
     if (isValidLimit) {
       const ts = new Date().toISOString();
       updateData.total_item_limit = Number(limitValue);
       updateData.total_item_limit_set_at = ts;
       updateData.unclaimed_void_count = 0;
-    } else if (cleanUpdates.total_item_limit !== undefined || cleanUpdates.max_items_per_order !== undefined) {
+    } else if (
+      cleanUpdates.total_item_limit !== undefined ||
+      cleanUpdates.max_items_per_order !== undefined
+    ) {
       // If limit was explicitly provided but is invalid, throw an error
       console.error(`Invalid total_item_limit value provided:`, {
         limitValue,
         type: typeof limitValue,
         cleanUpdates,
       });
-      throw new Error(`Invalid total_item_limit value: ${limitValue}. Must be a number >= 1.`);
+      throw new Error(
+        `Invalid total_item_limit value: ${limitValue}. Must be a number >= 1.`,
+      );
     } else {
       // Explicitly remove these fields if they were sent as null/undefined/empty
       delete updateData.total_item_limit;
@@ -734,38 +806,55 @@ async function updateUser(userId, updates, updatedByUserId = null) {
     }
 
     // Handle empty update data gracefully (only updated_at)
-    const fieldsToUpdate = Object.keys(updateData).filter(key => key !== 'updated_at');
+    const fieldsToUpdate = Object.keys(updateData).filter(
+      (key) => key !== "updated_at",
+    );
     if (fieldsToUpdate.length === 0) {
       // No meaningful fields to update, just return current user data
-      console.log(`No fields to update for user ${actualUserId} in ${userTable} table`);
+      console.log(
+        `No fields to update for user ${actualUserId} in ${userTable} table`,
+      );
       const { data: currentData, error: fetchError } = await supabase
         .from(userTable)
         .select("*")
         .eq("id", actualUserId)
         .single();
-      
+
       if (fetchError) {
         console.error(`Error fetching current user data:`, fetchError);
         throw new Error(`Failed to fetch user data: ${fetchError.message}`);
       }
-      
-      if (currentData && (currentData.max_items_per_order !== undefined || currentData.total_item_limit !== undefined)) {
-        currentData.total_item_limit = currentData.total_item_limit ?? currentData.max_items_per_order;
+
+      if (
+        currentData &&
+        (currentData.max_items_per_order !== undefined ||
+          currentData.total_item_limit !== undefined)
+      ) {
+        currentData.total_item_limit =
+          currentData.total_item_limit ?? currentData.max_items_per_order;
       }
       return currentData;
     }
 
     // Log update data for debugging
-    console.log(`Updating user ${actualUserId} in ${userTable} table with:`, JSON.stringify(updateData, null, 2));
-    console.log(`Fields to update: ${fieldsToUpdate.join(', ')}`);
+    console.log(
+      `Updating user ${actualUserId} in ${userTable} table with:`,
+      JSON.stringify(updateData, null, 2),
+    );
+    console.log(`Fields to update: ${fieldsToUpdate.join(", ")}`);
 
     // Validate that we have something meaningful to update
-    if (Object.keys(updateData).length === 0 || (Object.keys(updateData).length === 1 && updateData.updated_at)) {
+    if (
+      Object.keys(updateData).length === 0 ||
+      (Object.keys(updateData).length === 1 && updateData.updated_at)
+    ) {
       throw new Error("No valid fields to update");
     }
 
     // Update the correct table
-    console.log(`Attempting to update ${userTable} table for user ${actualUserId}`);
+    console.log(
+      `Attempting to update ${userTable} table for user ${actualUserId}`,
+    );
     let result = await supabase
       .from(userTable)
       .update(updateData)
@@ -783,7 +872,10 @@ async function updateUser(userId, updates, updatedByUserId = null) {
     // Only for students table (users table fallback handled above)
     if (result.error && isValidLimit && userTable === "students") {
       console.log(`Retrying with old column names (max_items_per_order)`);
-      const fallbackData = { ...cleanUpdates, updated_at: new Date().toISOString() };
+      const fallbackData = {
+        ...cleanUpdates,
+        updated_at: new Date().toISOString(),
+      };
       // Remove new column names
       delete fallbackData.total_item_limit;
       delete fallbackData.total_item_limit_set_at;
@@ -801,9 +893,13 @@ async function updateUser(userId, updates, updatedByUserId = null) {
         .select()
         .single();
     }
-    
+
     // Handle is_active to status conversion for staff in fallback path
-    if (result.error && cleanUpdates.is_active !== undefined && userTable === "staff") {
+    if (
+      result.error &&
+      cleanUpdates.is_active !== undefined &&
+      userTable === "staff"
+    ) {
       console.log(`Retrying update with status conversion for staff`);
       const fallbackData = { ...updateData };
       // Ensure status is set correctly
@@ -834,20 +930,27 @@ async function updateUser(userId, updates, updatedByUserId = null) {
       });
 
       // Provide more informative error messages
-      if (error.code === '23514' || error.message?.includes('check constraint')) {
+      if (
+        error.code === "23514" ||
+        error.message?.includes("check constraint")
+      ) {
         // Constraint violation - likely education_level
-        if (error.message?.includes('education_level')) {
+        if (error.message?.includes("education_level")) {
           throw new Error(
             `Invalid education level. Allowed values: Kindergarten, Elementary, Junior High School, Senior High School, College, Vocational. ` +
-            `If you're updating to "Junior High School", please run the migration: update_education_level_constraint_students.sql`
+              `If you're updating to "Junior High School", please run the migration: update_education_level_constraint_students.sql`,
           );
         }
         throw new Error(`Database constraint violation: ${error.message}`);
       }
-      if (error.code === '42703' || error.message?.includes('does not exist')) {
-        throw new Error(`Column does not exist in ${userTable} table: ${error.message}`);
+      if (error.code === "42703" || error.message?.includes("does not exist")) {
+        throw new Error(
+          `Column does not exist in ${userTable} table: ${error.message}`,
+        );
       }
-      throw new Error(`Failed to update user in ${userTable} table: ${error.message || 'Unknown error'}`);
+      throw new Error(
+        `Failed to update user in ${userTable} table: ${error.message || "Unknown error"}`,
+      );
     }
 
     // Update user_roles if role changed
@@ -875,7 +978,7 @@ async function updateUser(userId, updates, updatedByUserId = null) {
             // Check if assignment exists
             const existingAssignment =
               await emailRoleAssignmentService.getEmailRoleAssignment(
-                normalizedEmail
+                normalizedEmail,
               );
 
             if (existingAssignment) {
@@ -883,21 +986,21 @@ async function updateUser(userId, updates, updatedByUserId = null) {
               await emailRoleAssignmentService.updateEmailRole(
                 normalizedEmail,
                 updates.role,
-                updatedByUserId || userId
+                updatedByUserId || userId,
               );
             } else {
               // Create new assignment
               await emailRoleAssignmentService.assignEmailRole(
                 normalizedEmail,
                 updates.role,
-                updatedByUserId || userId
+                updatedByUserId || userId,
               );
             }
           } catch (assignmentError) {
             // Log but don't fail the update if email_role_assignments update fails
             console.warn(
               "Warning: Failed to sync email_role_assignments:",
-              assignmentError.message
+              assignmentError.message,
             );
           }
         } else if (updates.role === "student") {
@@ -906,11 +1009,11 @@ async function updateUser(userId, updates, updatedByUserId = null) {
             // Check if assignment exists before trying to remove
             const existingAssignment =
               await emailRoleAssignmentService.getEmailRoleAssignment(
-                normalizedEmail
+                normalizedEmail,
               );
             if (existingAssignment) {
               await emailRoleAssignmentService.removeEmailRoleAssignment(
-                normalizedEmail
+                normalizedEmail,
               );
             }
           } catch (assignmentError) {
@@ -918,7 +1021,7 @@ async function updateUser(userId, updates, updatedByUserId = null) {
             if (assignmentError.message !== "Email role assignment not found") {
               console.warn(
                 "Warning: Failed to remove email_role_assignments:",
-                assignmentError.message
+                assignmentError.message,
               );
             }
           }
@@ -927,15 +1030,19 @@ async function updateUser(userId, updates, updatedByUserId = null) {
     }
 
     // Ensure frontend always gets total_item_limit (DB may have old column name)
-    if (data && (data.max_items_per_order !== undefined || data.total_item_limit !== undefined)) {
+    if (
+      data &&
+      (data.max_items_per_order !== undefined ||
+        data.total_item_limit !== undefined)
+    ) {
       data.total_item_limit = data.total_item_limit ?? data.max_items_per_order;
     }
-    
+
     // Convert status to is_active for staff (frontend expects is_active boolean)
     if (data && userTable === "staff" && data.status !== undefined) {
       data.is_active = data.status === "active";
     }
-    
+
     return data;
   } catch (error) {
     console.error("Error updating user:", error);
@@ -947,10 +1054,10 @@ async function updateUser(userId, updates, updatedByUserId = null) {
       hint: error.hint,
       userId,
     });
-    
+
     // Re-throw with more context if it's a generic error
     // Note: userTable might not be defined if error occurred before table detection
-    const errorMessage = error.message || 'Unknown error';
+    const errorMessage = error.message || "Unknown error";
     if (errorMessage && !errorMessage.includes(userId)) {
       throw new Error(`Failed to update user ${userId}: ${errorMessage}`);
     }
@@ -989,7 +1096,7 @@ async function deleteUser(userId) {
         .select("id, user_id, email")
         .eq("user_id", userId)
         .maybeSingle();
-      
+
       if (studentByUserId) {
         studentRow = studentByUserId;
       }
@@ -1020,7 +1127,7 @@ async function deleteUser(userId) {
           .select("id, user_id, email, role, status")
           .eq("user_id", userId)
           .maybeSingle();
-        
+
         if (staffByUserId) {
           staffRow = staffByUserId;
         }
@@ -1038,7 +1145,9 @@ async function deleteUser(userId) {
 
     // If user not found in students or staff tables, they don't exist
     if (!currentUser || !userTable) {
-      throw new Error(`User with ID ${userId} not found in students or staff tables`);
+      throw new Error(
+        `User with ID ${userId} not found in students or staff tables`,
+      );
     }
 
     // Prevent deletion of the last system admin
@@ -1054,7 +1163,7 @@ async function deleteUser(userId) {
       } else if (staffCount === 1) {
         // This is the last system admin, prevent deletion
         throw new Error(
-          "Cannot delete user: This is the last remaining system admin. At least one system admin must exist."
+          "Cannot delete user: This is the last remaining system admin. At least one system admin must exist.",
         );
       }
     }
@@ -1068,9 +1177,12 @@ async function deleteUser(userId) {
         .from("user_roles")
         .delete()
         .eq("user_id", authUserId);
-      
+
       if (roleError) {
-        console.warn("Error deleting user_roles (may not exist):", roleError.message);
+        console.warn(
+          "Error deleting user_roles (may not exist):",
+          roleError.message,
+        );
         // Don't fail the deletion if user_roles doesn't exist
       }
     }
@@ -1082,9 +1194,12 @@ async function deleteUser(userId) {
         .from("email_role_assignments")
         .delete()
         .eq("email", normalizedEmail);
-      
+
       if (emailRoleError) {
-        console.warn("Error deleting email_role_assignments (may not exist):", emailRoleError.message);
+        console.warn(
+          "Error deleting email_role_assignments (may not exist):",
+          emailRoleError.message,
+        );
         // Don't fail the deletion if email_role_assignments doesn't exist
       }
     }
@@ -1126,7 +1241,10 @@ async function deleteUser(userId) {
       try {
         await supabase.auth.admin.deleteUser(authUserId);
       } catch (authError) {
-        console.warn("Error deleting user from Auth (may not exist):", authError.message);
+        console.warn(
+          "Error deleting user from Auth (may not exist):",
+          authError.message,
+        );
         // Don't fail the deletion if Auth user doesn't exist or deletion fails
       }
     }
@@ -1162,7 +1280,10 @@ async function bulkUpdateUsers(userIds, updateData) {
       throw new Error("Update data is required");
     }
 
-    const limitValue = updateData.total_item_limit !== undefined ? updateData.total_item_limit : updateData.max_items_per_order;
+    const limitValue =
+      updateData.total_item_limit !== undefined
+        ? updateData.total_item_limit
+        : updateData.max_items_per_order;
     const updateObject = {
       ...updateData,
       updated_at: new Date().toISOString(),
