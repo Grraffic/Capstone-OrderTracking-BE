@@ -328,11 +328,8 @@ class InventoryService {
       if (filters.educationLevel) {
         query = query.eq("education_level", filters.educationLevel);
       }
-      if (filters.search) {
-        query = query.or(
-          `name.ilike.%${filters.search}%,education_level.ilike.%${filters.search}%,category.ilike.%${filters.search}%`
-        );
-      }
+      // Do NOT chain a second .or() for search — PostgREST/Supabase can drop or
+      // mis-apply the first .or() (is_archived), so search is applied after fetch.
 
       // Order by created_at DESC so newest items appear first
       query = query.order("created_at", { ascending: false });
@@ -340,10 +337,33 @@ class InventoryService {
       const { data: items, error, count } = await query;
       if (error) throw error;
 
+      const searchTerm =
+        filters.search != null && String(filters.search).trim() !== ""
+          ? String(filters.search).trim().toLowerCase()
+          : "";
+
+      const itemsFiltered = searchTerm
+        ? (items || []).filter((item) => {
+            const blob = [
+              item.name,
+              item.education_level,
+              item.category,
+              item.size,
+              item.item_type,
+              item.for_gender,
+              item.note,
+            ]
+              .filter(Boolean)
+              .join(" ")
+              .toLowerCase();
+            return blob.includes(searchTerm);
+          })
+        : items || [];
+
       // Log all items with purchases > 0 to verify data is being read correctly (dev only)
       if (!isProduction) {
         const itemsWithPurchases =
-          items?.filter((i) => (i.purchases || 0) > 0) || [];
+          itemsFiltered.filter((i) => (i.purchases || 0) > 0) || [];
         if (itemsWithPurchases.length > 0) {
           console.log(
             `[getInventoryReport] ✅ Found ${itemsWithPurchases.length} items with purchases > 0`
@@ -356,14 +376,16 @@ class InventoryService {
         console.log(
           `[getInventoryReport] Fetched ${
             items?.length || 0
-          } items from database`
+          } items from database, ${itemsFiltered.length} after search${
+            searchTerm ? ` ("${searchTerm}")` : ""
+          }`
         );
       }
 
       // Split items by size - each size becomes a separate row
       const reportData = [];
 
-      for (const item of items || []) {
+      for (const item of itemsFiltered) {
         // Check if item has JSON size variations or accessory entries
         let hasJsonVariations = false;
         let sizeVariations = [];
