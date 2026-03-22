@@ -409,7 +409,10 @@ router.get("/profile", verifyToken, async (req, res) => {
 
     const { type, row: data, role: userRole } = resolved;
     const isStaff = type === "staff";
-    const isInactive = type === "staff" ? data.status === "inactive" : (type === "user" && data.is_active === false);
+    const isInactive =
+      (type === "staff" && data.status === "inactive") ||
+      (type === "student" && (data.status === "inactive" || data.is_active === false)) ||
+      (type === "user" && data.is_active === false);
     if (isInactive) {
       return res.status(403).json({
         message: "Account is inactive",
@@ -430,7 +433,12 @@ router.get("/profile", verifyToken, async (req, res) => {
       role: userRole,
       name: data?.name || null,
       photoURL: data?.photo_url || data?.avatar_url || null,
-      is_active: type === "staff" ? data?.status !== "inactive" : (data?.is_active !== false),
+      is_active:
+        type === "staff"
+          ? data?.status !== "inactive"
+          : type === "student"
+            ? !(data?.status === "inactive" || data?.is_active === false)
+            : (data?.is_active !== false),
       courseYearLevel: isStaff ? null : (data?.course_year_level || null),
       studentNumber: isStaff ? null : (data?.student_number || null),
       educationLevel: isStaff ? null : (data?.education_level || null),

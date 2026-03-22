@@ -39,11 +39,17 @@ exports.oauthCallback = async (req, res) => {
     try {
       const { data: studentRow } = await supabase
         .from("students")
-        .select("id, user_id, email, role")
+        .select("id, user_id, email, status, is_active")
         .ilike("email", normalizedEmail)
         .limit(1)
         .maybeSingle();
       if (studentRow) {
+        const isStudentInactive = studentRow.status === "inactive" || studentRow.is_active === false;
+        if (isStudentInactive) {
+          const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+          const redirectUrl = `${FRONTEND_URL.replace(/\/$/, "")}/auth/callback?error=account_inactive&email=${encodeURIComponent(email)}`;
+          return res.redirect(302, redirectUrl);
+        }
         existingUser = { id: studentRow.user_id, email: studentRow.email, role: "student" };
         role = "student";
         console.log("✅ Found existing student in database");
