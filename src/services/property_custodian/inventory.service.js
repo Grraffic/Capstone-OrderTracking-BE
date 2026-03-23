@@ -1366,7 +1366,17 @@ class InventoryService {
   /**
    * Record a return (student returned item). Increases stock only (not purchases) and logs "RETURN RECORDED" so it appears in the Returns table.
    */
-  async recordReturn(itemId, quantity, size = null, unitPrice = null, io = null, userId = null, userEmail = null) {
+  async recordReturn(
+    itemId,
+    quantity,
+    size = null,
+    unitPrice = null,
+    remarks = null,
+    legacyReturn = false,
+    io = null,
+    userId = null,
+    userEmail = null
+  ) {
     try {
       if (!isProduction) {
         console.log(
@@ -1471,7 +1481,7 @@ class InventoryService {
           const TransactionService = require("../../services/transaction.service");
           const itemName = data.name;
           const variantSize = variant.size || "N/A";
-          const details = `Return recorded: ${quantity} unit(s) of ${itemName} (Size: ${variantSize})${unitPrice ? ` at ₱${unitPrice} per unit` : ""}`;
+          const details = `Return recorded: ${quantity} unit(s) of ${itemName} (Size: ${variantSize})${unitPrice ? ` at ₱${unitPrice} per unit` : ""}${remarks ? ` | Remarks: ${remarks}` : ""}`;
           await TransactionService.logTransaction(
             "Inventory",
             "RETURN RECORDED",
@@ -1483,6 +1493,8 @@ class InventoryService {
               size: variantSize,
               quantity: quantity,
               unit_price: unitPrice,
+              remarks: remarks || null,
+              legacy_return: Boolean(legacyReturn),
               previous_stock: currentVariantStock,
               new_stock: newVariantStock,
             },
@@ -1522,7 +1534,7 @@ class InventoryService {
         const TransactionService = require("../../services/transaction.service");
         const itemName = data.name;
         const itemSize = size || data.size || "N/A";
-        const details = `Return recorded: ${quantity} unit(s) of ${itemName}${itemSize !== "N/A" ? ` (Size: ${itemSize})` : ""}${unitPrice ? ` at ₱${unitPrice} per unit` : ""}`;
+        const details = `Return recorded: ${quantity} unit(s) of ${itemName}${itemSize !== "N/A" ? ` (Size: ${itemSize})` : ""}${unitPrice ? ` at ₱${unitPrice} per unit` : ""}${remarks ? ` | Remarks: ${remarks}` : ""}`;
         await TransactionService.logTransaction(
           "Inventory",
           "RETURN RECORDED",
@@ -1534,6 +1546,8 @@ class InventoryService {
             size: itemSize,
             quantity: quantity,
             unit_price: unitPrice,
+            remarks: remarks || null,
+            legacy_return: Boolean(legacyReturn),
             previous_stock: currentStock,
             new_stock: newStock,
           },
@@ -1555,6 +1569,143 @@ class InventoryService {
     } catch (error) {
       console.error(`[recordReturn] ❌ Error:`, error);
       throw new Error(`Failed to record return: ${error.message}`);
+    }
+  }
+
+  /**
+   * Strictly checks historical release transactions for a specific item/variant.
+   * Uses transaction logs (ORDER CLAIMED / ITEM RELEASED) as audit source.
+   */
+  async checkReturnReleaseHistory(itemId, size = null) {
+    try {
+      const normalizeSize = (value) =>
+        String(value || "")
+          .toLowerCase()
+          .trim()
+          .replace(/\s*\([^)]*\)/g, "")
+          .replace(/\s+/g, " ")
+          .trim();
+
+      const normalizedTargetSize = normalizeSize(size);
+
+      const { data: item, error: itemError } = await supabase
+        .from("items")
+        .select("id,name,size")
+        .eq("id", itemId)
+        .single();
+      if (itemError || !item) throw new Error("Item not found");
+
+      const normalizedItemName = String(item.name || "")
+        .toLowerCase()
+        .trim();
+
+      const { data: txList, error: txError } = await supabase
+        .from("transactions")
+        .select("action,metadata")
+        .in("action", ["ORDER CLAIMED", "ITEM RELEASED"]);
+      if (txError) throw txError;
+
+      let releasedQty = 0;
+
+      for (const tx of txList || []) {
+        const meta = tx?.metadata || {};
+        const action = String(tx?.action || "").toUpperCase();
+
+        // Inventory release logs where metadata carries direct item references.
+        if (action === "ITEM RELEASED") {
+          const metaItemId = meta.item_id || meta.itemId;
+          const metaItemName = String(meta.item_name || meta.itemName || "")
+            .toLowerCase()
+            .trim();
+          const metaSize = normalizeSize(meta.size || meta.variant || "");
+          const itemMatch =
+            String(metaItemId || "") === String(itemId) ||
+            (!!normalizedItemName && metaItemName === normalizedItemName);
+          if (!itemMatch) continue;
+          if (normalizedTargetSize && metaSize && metaSize !== normalizedTargetSize)
+            continue;
+          releasedQty += Number(meta.quantity) || 1;
+          continue;
+        }
+
+        // Order claimed logs where metadata MAY have items[].
+        if (action === "ORDER CLAIMED") {
+          let items = [];
+          if (Array.isArray(meta.items)) {
+            items = meta.items;
+          } else if (typeof meta.items === "string") {
+            try {
+              items = JSON.parse(meta.items);
+            } catch {
+              items = [];
+            }
+          }
+
+          for (const orderItem of items) {
+            const itemName = String(orderItem?.name || "")
+              .toLowerCase()
+              .trim();
+            const itemSize = normalizeSize(orderItem?.size || "");
+            if (!itemName || itemName !== normalizedItemName) continue;
+            if (
+              normalizedTargetSize &&
+              itemSize &&
+              itemSize !== normalizedTargetSize
+            )
+              continue;
+            releasedQty += Number(orderItem?.quantity) || 0;
+          }
+        }
+      }
+
+      // Fallback/authoritative source: claimed/completed orders table items payload.
+      // Some ORDER CLAIMED transactions only store order identifiers without items array.
+      const { data: releasedOrders, error: releasedOrdersError } = await supabase
+        .from("orders")
+        .select("items,status")
+        .eq("is_active", true)
+        .in("status", ["claimed", "completed"]);
+      if (releasedOrdersError) throw releasedOrdersError;
+
+      for (const order of releasedOrders || []) {
+        let orderItems = [];
+        if (Array.isArray(order?.items)) {
+          orderItems = order.items;
+        } else if (typeof order?.items === "string") {
+          try {
+            orderItems = JSON.parse(order.items);
+          } catch {
+            orderItems = [];
+          }
+        }
+
+        for (const orderItem of orderItems) {
+          const itemName = String(orderItem?.name || "")
+            .toLowerCase()
+            .trim();
+          const itemSize = normalizeSize(orderItem?.size || "");
+          if (!itemName || itemName !== normalizedItemName) continue;
+          if (
+            normalizedTargetSize &&
+            itemSize &&
+            itemSize !== normalizedTargetSize
+          ) {
+            continue;
+          }
+          releasedQty += Number(orderItem?.quantity) || 0;
+        }
+      }
+
+      return {
+        success: true,
+        hasRecordedRelease: releasedQty > 0,
+        releasedQty,
+      };
+    } catch (error) {
+      console.error("Check return release history error:", error);
+      throw new Error(
+        `Failed to check return release history: ${error.message}`
+      );
     }
   }
 

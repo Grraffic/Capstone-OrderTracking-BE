@@ -154,6 +154,17 @@ router.post(
 );
 
 /**
+ * POST /api/items/:id/return-release-check
+ * Strict precheck for return validation (staff only)
+ */
+router.post(
+  "/:id/return-release-check",
+  verifyToken,
+  requireAdminOrPropertyCustodian,
+  itemsController.checkReturnReleaseHistory
+);
+
+/**
  * POST /api/items/:id/reset-beginning-inventory
  * Manually reset beginning inventory (staff only)
  */

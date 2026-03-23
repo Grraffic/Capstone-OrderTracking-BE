@@ -524,7 +524,7 @@ class ItemsController {
   async recordReturn(req, res) {
     try {
       const { id } = req.params;
-      const { quantity, size, unitPrice } = req.body;
+      const { quantity, size, unitPrice, remarks, legacyReturn } = req.body;
       const io = req.app.get("io");
       const userId = req.user?.id || null;
       const userEmail = req.user?.email || null;
@@ -537,13 +537,44 @@ class ItemsController {
       }
 
       const InventoryService = require("../../services/property_custodian/inventory.service");
-      const result = await InventoryService.recordReturn(id, quantity, size, unitPrice, io, userId, userEmail);
+      const result = await InventoryService.recordReturn(
+        id,
+        quantity,
+        size,
+        unitPrice,
+        remarks,
+        legacyReturn,
+        io,
+        userId,
+        userEmail
+      );
       res.json(result);
     } catch (error) {
       console.error("Record return error:", error);
       res.status(400).json({
         success: false,
         message: error.message || "Failed to record return",
+      });
+    }
+  }
+
+  /**
+   * Strict return precheck: verifies if item/variant has historical release records.
+   * POST /api/items/:id/return-release-check
+   * Body: { size? }
+   */
+  async checkReturnReleaseHistory(req, res) {
+    try {
+      const { id } = req.params;
+      const { size } = req.body || {};
+      const InventoryService = require("../../services/property_custodian/inventory.service");
+      const result = await InventoryService.checkReturnReleaseHistory(id, size || null);
+      return res.json(result);
+    } catch (error) {
+      console.error("Check return release history error:", error);
+      return res.status(400).json({
+        success: false,
+        message: error.message || "Failed to check return release history",
       });
     }
   }
