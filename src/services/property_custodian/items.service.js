@@ -1375,7 +1375,7 @@ class ItemsService {
         currentItem.stock === 0 || currentItem.status === "Out of Stock";
       const newStock =
         updates.stock !== undefined ? updates.stock : currentItem.stock;
-      const isRestocked = wasOutOfStock && newStock > 0;
+      let isRestocked = wasOutOfStock && newStock > 0;
 
       // Handle beginning inventory and purchases logic
       const InventoryService = require("./inventory.service");
