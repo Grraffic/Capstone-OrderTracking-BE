@@ -1193,9 +1193,99 @@ class ItemsService {
       // When reorder_point is sent and item has sizeVariations, update the matching variant (or the only variant) in note
       // Use incoming updates.note if it has sizeVariations so we don't overwrite new variants (e.g. XSmall) with old DB note
       const sizeOrVariant = updates.size ?? updates.variant;
+      const noteSource = updates.note || currentItem.note;
+      const getSingleVariant = (raw) => {
+        if (raw == null) return null;
+        const value = String(raw).trim();
+        if (!value || value === "N/A") return null;
+        // Ignore aggregated payloads like "Small, Medium, Large" - not a specific edited variant.
+        if (value.includes(",")) return null;
+        return value;
+      };
+      const variantFromPayload =
+        getSingleVariant(updates.variant) || getSingleVariant(updates.size);
+      let variantFromIndex = null;
+      if (
+        updates.variant_json_index !== undefined &&
+        updates.variant_json_index !== null &&
+        String(updates.variant_json_index).trim() !== "" &&
+        noteSource
+      ) {
+        try {
+          const parsedForVariant = JSON.parse(noteSource);
+          const idx = Number(updates.variant_json_index);
+          if (
+            parsedForVariant &&
+            parsedForVariant._type === "sizeVariations" &&
+            Array.isArray(parsedForVariant.sizeVariations) &&
+            Number.isInteger(idx) &&
+            idx >= 0 &&
+            idx < parsedForVariant.sizeVariations.length
+          ) {
+            const indexedVariant = parsedForVariant.sizeVariations[idx]?.size;
+            if (indexedVariant != null && String(indexedVariant).trim() !== "") {
+              variantFromIndex = String(indexedVariant).trim();
+            }
+          }
+        } catch (e) {
+          // Ignore parse errors; variant resolution will fall back to other sources.
+        }
+      }
+      let variantFromNoteDiff = null;
+      if (currentItem.note && updates.note) {
+        try {
+          const before = JSON.parse(currentItem.note);
+          const after = JSON.parse(updates.note);
+          if (
+            before?._type === "sizeVariations" &&
+            after?._type === "sizeVariations" &&
+            Array.isArray(before.sizeVariations) &&
+            Array.isArray(after.sizeVariations)
+          ) {
+            const normalizeVariantKey = (value) =>
+              String(value || "")
+                .replace(/\([^)]*\)/g, "")
+                .trim()
+                .toLowerCase();
+            const beforeBySize = new Map(
+              before.sizeVariations.map((v) => [normalizeVariantKey(v?.size), v])
+            );
+            const changedVariants = [];
+            for (const v of after.sizeVariations) {
+              const key = normalizeVariantKey(v?.size);
+              if (!key) continue;
+              const prev = beforeBySize.get(key);
+              if (!prev) {
+                changedVariants.push(v?.size);
+                continue;
+              }
+              if (JSON.stringify(prev) !== JSON.stringify(v)) {
+                changedVariants.push(v?.size);
+              }
+            }
+            if (changedVariants.length === 1) {
+              const onlyChanged = changedVariants[0];
+              if (onlyChanged != null && String(onlyChanged).trim() !== "") {
+                variantFromNoteDiff = String(onlyChanged).trim();
+              }
+            }
+          }
+        } catch (e) {
+          // Ignore parse errors; this is only a best-effort variant detector.
+        }
+      }
+      const updatedVariant =
+        variantFromPayload ||
+        variantFromIndex ||
+        variantFromNoteDiff ||
+        (currentItem.size != null &&
+        String(currentItem.size).trim() !== "" &&
+        String(currentItem.size).trim() !== "N/A" &&
+        !String(currentItem.size).includes(",")
+          ? String(currentItem.size).trim()
+          : null);
       const reorderValue = Number(updates.reorder_point);
       const isValidReorder = updates.reorder_point !== undefined && !Number.isNaN(reorderValue) && reorderValue >= 0;
-      const noteSource = updates.note || currentItem.note;
       const sizeLooselyMatches = (stored, incoming) => {
         const s = String(stored || "").trim();
         const t = String(incoming || "").trim();
@@ -1464,8 +1554,12 @@ class ItemsService {
         const updatedFields = Object.keys(allowedUpdates).filter(key => key !== 'updated_at');
         const finalData = updatedItemData || data;
         // Create concise message: "Updated [Item Name] item details"
+        const variantText =
+          updatedVariant && String(updatedVariant).trim() !== ""
+            ? ` ${updatedVariant}`
+            : "";
         const educationLevelText = finalData.education_level ? ` (${finalData.education_level})` : '';
-        const details = `Updated ${finalData.name}${educationLevelText} item details`;
+        const details = `Updated ${finalData.name}${variantText}${educationLevelText} item details`;
         await TransactionService.logTransaction(
           "Item",
           `ITEM DETAILS UPDATED ${finalData.name}`,
@@ -1475,6 +1569,7 @@ class ItemsService {
             item_id: finalData.id,
             item_name: finalData.name,
             education_level: finalData.education_level,
+            updated_variant: updatedVariant,
             updated_fields: updatedFields,
             previous_data: currentItem,
             new_data: finalData,
