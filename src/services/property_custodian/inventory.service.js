@@ -319,6 +319,20 @@ class InventoryService {
 
       // Force fresh data by not using any caching
       // Exclude archived items from inventory report
+      const parsedStartDate = filters.startDate ? new Date(filters.startDate) : null;
+      const parsedEndDate = filters.endDate ? new Date(filters.endDate) : null;
+      const hasDateRange =
+        parsedStartDate instanceof Date &&
+        !Number.isNaN(parsedStartDate.getTime()) &&
+        parsedEndDate instanceof Date &&
+        !Number.isNaN(parsedEndDate.getTime());
+      const startDateTime = hasDateRange
+        ? new Date(parsedStartDate.getFullYear(), parsedStartDate.getMonth(), parsedStartDate.getDate(), 0, 0, 0, 0).toISOString()
+        : null;
+      const endDateTime = hasDateRange
+        ? new Date(parsedEndDate.getFullYear(), parsedEndDate.getMonth(), parsedEndDate.getDate(), 23, 59, 59, 999).toISOString()
+        : null;
+
       let query = supabase
         .from("items")
         .select("*", { count: "exact" })
@@ -327,6 +341,9 @@ class InventoryService {
 
       if (filters.educationLevel) {
         query = query.eq("education_level", filters.educationLevel);
+      }
+      if (hasDateRange) {
+        query = query.gte("created_at", startDateTime).lte("created_at", endDateTime);
       }
       // Do NOT chain a second .or() for search — PostgREST/Supabase can drop or
       // mis-apply the first .or() (is_archived), so search is applied after fetch.
@@ -770,7 +787,7 @@ class InventoryService {
         }
       }
 
-      // Fetch return quantities from transactions (RETURN RECORDED) and merge into report
+      // Fetch purchase/return quantities from transactions and merge into report
       const normalizeSizeForKey = (s) =>
         (s || "N/A")
           .toString()
@@ -778,13 +795,43 @@ class InventoryService {
           .trim()
           .replace(/\s*\([^)]*\)/g, "")
           .trim() || "N/A";
+      const purchaseSumsByItemSize = new Map();
       const returnSumsByItemSize = new Map();
       try {
-        const { data: returnTxList, error: txError } = await supabase
+        let purchaseTxQuery = supabase
           .from("transactions")
-          .select("metadata")
+          .select("metadata,created_at")
+          .eq("type", "Inventory")
+          .eq("action", "PURCHASE RECORDED");
+        let returnTxQuery = supabase
+          .from("transactions")
+          .select("metadata,created_at")
           .eq("type", "Inventory")
           .eq("action", "RETURN RECORDED");
+        if (hasDateRange) {
+          purchaseTxQuery = purchaseTxQuery
+            .gte("created_at", startDateTime)
+            .lte("created_at", endDateTime);
+          returnTxQuery = returnTxQuery
+            .gte("created_at", startDateTime)
+            .lte("created_at", endDateTime);
+        }
+        const [{ data: purchaseTxList, error: purchaseTxError }, { data: returnTxList, error: txError }] = await Promise.all([
+          purchaseTxQuery,
+          returnTxQuery,
+        ]);
+
+        if (!purchaseTxError && purchaseTxList && purchaseTxList.length > 0) {
+          for (const tx of purchaseTxList) {
+            const meta = tx.metadata || {};
+            const itemId = meta.item_id || null;
+            const size = meta.size != null ? meta.size : "N/A";
+            const qty = Number(meta.quantity) || 0;
+            if (!itemId || qty <= 0) continue;
+            const key = `${itemId}|${normalizeSizeForKey(size)}`;
+            purchaseSumsByItemSize.set(key, (purchaseSumsByItemSize.get(key) || 0) + qty);
+          }
+        }
 
         if (!txError && returnTxList && returnTxList.length > 0) {
           for (const tx of returnTxList) {
@@ -805,6 +852,9 @@ class InventoryService {
 
       for (const row of reportData) {
         const key = `${row.item_id}|${normalizeSizeForKey(row.size)}`;
+        if (hasDateRange) {
+          row.purchases = purchaseSumsByItemSize.get(key) || 0;
+        }
         row.returns = returnSumsByItemSize.get(key) || 0;
       }
 
