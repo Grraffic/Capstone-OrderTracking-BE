@@ -485,6 +485,7 @@ class InventoryService {
             available: endingInventory,
             ending_inventory: endingInventory,
             unit_price: purchUnitPrice,
+            purchase_unit_price: purchUnitPrice,
             unit_price_beginning: begUnitPrice,
             price: Number(item.price) || 0,
             total_amount: totalAmount,
@@ -614,6 +615,7 @@ class InventoryService {
               available,
               ending_inventory: endingInventory,
               unit_price: variantPurchasePrice || Number(item.price) || 0,
+              purchase_unit_price: variantPurchasePrice || Number(item.price) || 0,
               unit_price_beginning: variantBeginningUnitPrice || Number(item.price) || 0,
               price: Number(variant.price) || Number(item.price) || 0,
               total_amount: totalAmount,
@@ -704,6 +706,7 @@ class InventoryService {
                 available,
                 ending_inventory: endingInventory,
                 unit_price: purchUnitPrice || Number(item.price) || 0,
+                purchase_unit_price: purchUnitPrice || Number(item.price) || 0,
                 unit_price_beginning: begUnitPrice || Number(item.price) || 0,
                 price: Number(item.price) || 0,
                 total_amount: totalAmount,
@@ -773,6 +776,7 @@ class InventoryService {
               available,
               ending_inventory: endingInventory,
               unit_price: purchUnitPrice || Number(item.price) || 0,
+              purchase_unit_price: purchUnitPrice || Number(item.price) || 0,
               unit_price_beginning: begUnitPrice || Number(item.price) || 0,
               price: Number(item.price) || 0,
               total_amount: totalAmount,
@@ -853,7 +857,24 @@ class InventoryService {
       for (const row of reportData) {
         const key = `${row.item_id}|${normalizeSizeForKey(row.size)}`;
         if (hasDateRange) {
-          row.purchases = purchaseSumsByItemSize.get(key) || 0;
+          const txPurchasesInRange = purchaseSumsByItemSize.get(key) || 0;
+          const rowCreatedAtMs = row.created_at ? new Date(row.created_at).getTime() : NaN;
+          const startMs = new Date(startDateTime).getTime();
+          const endMs = new Date(endDateTime).getTime();
+          const isRowCreatedInRange =
+            Number.isFinite(rowCreatedAtMs) &&
+            Number.isFinite(startMs) &&
+            Number.isFinite(endMs) &&
+            rowCreatedAtMs >= startMs &&
+            rowCreatedAtMs <= endMs;
+
+          // Keep purchases coming from item creation data (e.g. accessoryEntries)
+          // when the row itself was created in the selected period.
+          const createdPurchasesInRange = isRowCreatedInRange
+            ? Number(row.purchases) || 0
+            : 0;
+
+          row.purchases = txPurchasesInRange + createdPurchasesInRange;
         }
         row.returns = returnSumsByItemSize.get(key) || 0;
       }
