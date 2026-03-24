@@ -272,11 +272,14 @@ async function getUserById(userId) {
     let error = null;
 
     // Try to fetch by ID from students table first
-    const { data: studentRow } = await supabase
+    const { data: studentRow, error: studentError } = await supabase
       .from("students")
       .select("*")
       .eq("id", userId)
       .maybeSingle();
+    if (studentError) {
+      console.warn(`[getUserById] students lookup error for ID ${userId}:`, studentError.message);
+    }
     if (studentRow) {
       data = {
         ...studentRow,
@@ -286,11 +289,17 @@ async function getUserById(userId) {
       return data;
     }
     // Try legacy_user_id for backward compatibility with pre-migration references
-    const { data: studentByLegacyUserId } = await supabase
+    const { data: studentByLegacyUserId, error: legacyStudentError } = await supabase
       .from("students")
       .select("*")
       .eq("legacy_user_id", userId)
       .maybeSingle();
+    if (legacyStudentError) {
+      console.warn(
+        `[getUserById] students legacy_user_id lookup error for ID ${userId}:`,
+        legacyStudentError.message,
+      );
+    }
     if (studentByLegacyUserId) {
       data = {
         ...studentByLegacyUserId,
@@ -301,11 +310,14 @@ async function getUserById(userId) {
     }
 
     // Try to fetch by ID from staff table
-    const { data: staffRow } = await supabase
+    const { data: staffRow, error: staffError } = await supabase
       .from("staff")
       .select("*")
       .eq("id", userId)
       .maybeSingle();
+    if (staffError) {
+      console.warn(`[getUserById] staff lookup error for ID ${userId}:`, staffError.message);
+    }
     if (staffRow) {
       data = { ...staffRow, is_active: staffRow.status === "active" };
       return data;
@@ -389,7 +401,12 @@ async function getUserById(userId) {
     }
 
     // If we got here, user was not found
-    if (error) throw error;
+    if (error) {
+      // Avoid surfacing user-lookup failures as 500 to callers that can fall back
+      // to transaction payload fields (e.g., user_name/user_role).
+      console.warn(`[getUserById] users lookup error for ID ${userId}:`, error.message);
+      return null;
+    }
     return null;
   } catch (error) {
     console.error("Error fetching user:", error);
