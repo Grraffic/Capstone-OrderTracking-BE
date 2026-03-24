@@ -8,6 +8,22 @@ const isProduction = process.env.NODE_ENV === "production";
  */
 class InventoryService {
   /**
+   * Compute weighted average cost (WAC) after adding stock.
+   * Formula: ((existingQty * existingWac) + (newQty * newUnitCost)) / (existingQty + newQty)
+   */
+  calculateWeightedAverageCost(existingQty, existingWac, newQty, newUnitCost) {
+    const safeExistingQty = Number(existingQty) || 0;
+    const safeExistingWac = Number(existingWac) || 0;
+    const safeNewQty = Number(newQty) || 0;
+    const safeNewUnitCost = Number(newUnitCost) || 0;
+    const totalQty = safeExistingQty + safeNewQty;
+    if (totalQty <= 0) return 0;
+    return (
+      (safeExistingQty * safeExistingWac + safeNewQty * safeNewUnitCost) /
+      totalQty
+    );
+  }
+  /**
    * Calculate ending inventory for an item
    * Ending Inventory = Beginning Inventory + Purchases - Released + Returns
    */
@@ -433,7 +449,7 @@ class InventoryService {
         }
 
         if (hasAccessoryEntries && accessoryEntries.length > 0) {
-          // Accessories: one row per item; FIFO from per-entry prices
+          // Accessories: one row per item; valuation uses weighted-average cost (WAC)
           const totalStock = accessoryEntries.reduce(
             (sum, e) => sum + (Number(e.stock) || 0),
             0
@@ -444,12 +460,12 @@ class InventoryService {
             0
           );
           const begUnitPrice = Number(accessoryEntries[0]?.price) ?? Number(item.price) ?? 0;
-          // FIFO total: entry[0].beginning_inventory * entry[0].price + Σ(entry[i].purchases * entry[i].price) for i >= 1
-          let totalAmount = totalBeginningInventory * begUnitPrice;
+          // Build valuation basis from beginning + purchases layers, then convert to WAC.
+          let valuationBasis = totalBeginningInventory * begUnitPrice;
           for (let i = 1; i < accessoryEntries.length; i++) {
             const entryPurchases = Number(accessoryEntries[i].purchases) || 0;
             const entryPrice = Number(accessoryEntries[i].price) ?? Number(item.price) ?? 0;
-            totalAmount += entryPurchases * entryPrice;
+            valuationBasis += entryPurchases * entryPrice;
           }
           // Display purchase unit price: last entry with purchases, or weighted fallback
           let purchUnitPrice = Number(item.price) || 0;
@@ -460,6 +476,9 @@ class InventoryService {
             }
           }
           const endingInventory = totalBeginningInventory + totalPurchases;
+          const weightedUnitPrice =
+            endingInventory > 0 ? valuationBasis / endingInventory : 0;
+          const totalAmount = endingInventory * weightedUnitPrice;
           const unreleased = 0;
           const released = 0;
           const returns = 0;
@@ -484,8 +503,8 @@ class InventoryService {
             unreleased,
             available: endingInventory,
             ending_inventory: endingInventory,
-            unit_price: purchUnitPrice,
-            purchase_unit_price: purchUnitPrice,
+            unit_price: weightedUnitPrice,
+            purchase_unit_price: weightedUnitPrice,
             unit_price_beginning: begUnitPrice,
             price: Number(item.price) || 0,
             total_amount: totalAmount,
@@ -583,20 +602,25 @@ class InventoryService {
               variantStatus = "At Reorder Point";
             }
 
-            // FIFO total: when purchase_batches present use each batch's unit price; else single purchase price
-            let totalAmount;
+            // Build valuation basis (beginning + purchase layers), then normalize to WAC.
+            let valuationBasis;
             if (hasPurchaseBatches) {
-              totalAmount =
+              valuationBasis =
                 variantBeginningInventory * variantBeginningUnitPrice +
                 variant.purchase_batches.reduce(
                   (sum, b) => sum + (Number(b.qty) || 0) * (Number(b.unit_price) || 0),
                   0
                 );
             } else {
-              totalAmount =
+              valuationBasis =
                 variantBeginningInventory * variantBeginningUnitPrice +
                 variantPurchases * variantPurchasePrice;
             }
+            const weightedUnitPrice =
+              endingInventory > 0
+                ? valuationBasis / endingInventory
+                : (variantPurchasePrice || 0);
+            const totalAmount = endingInventory * weightedUnitPrice;
 
             reportData.push({
               id: `${item.id}-${variantSize}-${item.created_at || Date.now()}`, // Ensure uniqueness even for duplicates
@@ -614,8 +638,8 @@ class InventoryService {
               unreleased,
               available,
               ending_inventory: endingInventory,
-              unit_price: variantPurchasePrice || Number(item.price) || 0,
-              purchase_unit_price: variantPurchasePrice || Number(item.price) || 0,
+              unit_price: weightedUnitPrice || Number(item.price) || 0,
+              purchase_unit_price: weightedUnitPrice || Number(item.price) || 0,
               unit_price_beginning: variantBeginningUnitPrice || Number(item.price) || 0,
               price: Number(variant.price) || Number(item.price) || 0,
               total_amount: totalAmount,
@@ -684,10 +708,8 @@ class InventoryService {
                 sizeStatus = "At Reorder Point";
               }
 
-              // FIFO: beginning uses beginning_inventory_unit_price, purchases use price
-              const begUnitPrice = Number(item.beginning_inventory_unit_price) ?? Number(item.price) ?? 0;
-              const purchUnitPrice = Number(item.price) ?? 0;
-              const totalAmount = sizeBeginningInventory * begUnitPrice + sizePurchases * purchUnitPrice;
+              const weightedUnitPrice = Number(item.price) ?? 0;
+              const totalAmount = endingInventory * weightedUnitPrice;
 
               reportData.push({
                 id: `${item.id}-${size}-${item.created_at || Date.now()}`, // Ensure uniqueness even for duplicates
@@ -705,9 +727,9 @@ class InventoryService {
                 unreleased,
                 available,
                 ending_inventory: endingInventory,
-                unit_price: purchUnitPrice || Number(item.price) || 0,
-                purchase_unit_price: purchUnitPrice || Number(item.price) || 0,
-                unit_price_beginning: begUnitPrice || Number(item.price) || 0,
+                unit_price: weightedUnitPrice || Number(item.price) || 0,
+                purchase_unit_price: weightedUnitPrice || Number(item.price) || 0,
+                unit_price_beginning: weightedUnitPrice || Number(item.price) || 0,
                 price: Number(item.price) || 0,
                 total_amount: totalAmount,
                 status: sizeStatus,
@@ -743,12 +765,8 @@ class InventoryService {
               );
             }
 
-            // FIFO: first units = beginning_inventory * beginning_inventory_unit_price; next = purchases * price
-            const begUnitPrice = Number(item.beginning_inventory_unit_price) ?? Number(item.price) ?? 0;
-            const purchUnitPrice = Number(item.price) ?? 0;
-            const totalAmount =
-              (item.beginning_inventory || 0) * begUnitPrice +
-              (item.purchases || 0) * purchUnitPrice;
+            const weightedUnitPrice = Number(item.price) ?? 0;
+            const totalAmount = endingInventory * weightedUnitPrice;
 
             // Determine status based on ending inventory vs reorder_point (matches At Reorder Point table)
             const singleReorderPoint = Number(item.reorder_point) || 0;
@@ -775,9 +793,9 @@ class InventoryService {
               unreleased,
               available,
               ending_inventory: endingInventory,
-              unit_price: purchUnitPrice || Number(item.price) || 0,
-              purchase_unit_price: purchUnitPrice || Number(item.price) || 0,
-              unit_price_beginning: begUnitPrice || Number(item.price) || 0,
+              unit_price: weightedUnitPrice || Number(item.price) || 0,
+              purchase_unit_price: weightedUnitPrice || Number(item.price) || 0,
+              unit_price_beginning: weightedUnitPrice || Number(item.price) || 0,
               price: Number(item.price) || 0,
               total_amount: totalAmount,
               status: singleStatus,
@@ -1064,8 +1082,19 @@ class InventoryService {
         parsedNote.sizeVariations[variantIndex].purchases = purchaseBatches.reduce((s, b) => s + (Number(b.qty) || 0), 0);
 
         if (unitPrice != null) {
-          parsedNote.sizeVariations[variantIndex].price = unitPrice;
-          parsedNote.sizeVariations[variantIndex].purchase_unit_price = unitPrice;
+          const existingVariantWac =
+            Number(variant.purchase_unit_price) ||
+            Number(variant.price) ||
+            Number(item.price) ||
+            0;
+          const newVariantWac = this.calculateWeightedAverageCost(
+            currentVariantStock,
+            existingVariantWac,
+            quantity,
+            unitPrice
+          );
+          parsedNote.sizeVariations[variantIndex].price = newVariantWac;
+          parsedNote.sizeVariations[variantIndex].purchase_unit_price = newVariantWac;
         }
 
         // Also update item-level purchases for backward compatibility
@@ -1212,7 +1241,14 @@ class InventoryService {
 
         // Update price if provided
         if (unitPrice !== null) {
-          updateData.price = unitPrice;
+          const existingWac = Number(item.price) || 0;
+          const newWac = this.calculateWeightedAverageCost(
+            currentStock,
+            existingWac,
+            quantity,
+            unitPrice
+          );
+          updateData.price = newWac;
         }
 
         const { data, error } = await supabase
