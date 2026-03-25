@@ -92,7 +92,10 @@ class InventoryService {
       if (!item.beginning_inventory_date) {
         // No beginning inventory date set, initialize it (FIFO: beginning unit price = current price)
         const endingInventory = await this.calculateEndingInventory(itemId);
-        const beginningUnitPrice = Number(item.beginning_inventory_unit_price) ?? Number(item.price) ?? 0;
+        const beginningUnitPrice =
+          Number(item.beginning_inventory_unit_price) ??
+          Number(item.price) ??
+          0;
         const { data, error } = await supabase
           .from("items")
           .update({
@@ -113,7 +116,7 @@ class InventoryService {
       // Check if expired (>365 days)
       const daysSinceStart = Math.floor(
         (new Date() - new Date(item.beginning_inventory_date)) /
-          (1000 * 60 * 60 * 24)
+          (1000 * 60 * 60 * 24),
       );
 
       if (daysSinceStart > 365) {
@@ -148,21 +151,23 @@ class InventoryService {
    * Perform fiscal year rollover for all items
    * Carries forward ending inventory from prior year as beginning inventory for new fiscal year
    * Any items added after rollover date will be classified as purchases
-   * 
+   *
    * @param {Date|string} rolloverDate - The date when fiscal year rolls over (defaults to today)
    * @returns {Promise<Object>} Rollover results with counts and details
    */
   async performFiscalYearRollover(rolloverDate = null) {
     try {
-      const rolloverDateObj = rolloverDate 
-        ? new Date(rolloverDate) 
+      const rolloverDateObj = rolloverDate
+        ? new Date(rolloverDate)
         : new Date();
-      
+
       const rolloverDateStr = rolloverDateObj.toISOString().split("T")[0];
       const rolloverDateTime = rolloverDateObj.toISOString();
 
       if (!isProduction) {
-        console.log(`[Fiscal Year Rollover] 🗓️ Starting rollover for date: ${rolloverDateStr}`);
+        console.log(
+          `[Fiscal Year Rollover] 🗓️ Starting rollover for date: ${rolloverDateStr}`,
+        );
       }
 
       // Fetch all active items
@@ -189,7 +194,7 @@ class InventoryService {
         try {
           // Calculate ending inventory for this item
           const endingInventory = await this.calculateEndingInventory(item.id);
-          
+
           // Check if this item already has a fiscal year start date after the rollover date
           // If so, it's already been rolled over, skip it
           if (item.fiscal_year_start) {
@@ -222,12 +227,14 @@ class InventoryService {
                 parsedNote.sizeVariations.forEach((variant) => {
                   // Calculate ending inventory for this variant
                   const variantStock = Number(variant.stock) || 0;
-                  const variantBeginningInventory = Number(variant.beginning_inventory) || 0;
+                  const variantBeginningInventory =
+                    Number(variant.beginning_inventory) || 0;
                   const variantPurchases = Number(variant.purchases) || 0;
-                  
+
                   // Ending inventory = beginning + purchases (released/returns handled separately)
-                  const variantEndingInventory = variantBeginningInventory + variantPurchases;
-                  
+                  const variantEndingInventory =
+                    variantBeginningInventory + variantPurchases;
+
                   // Carry forward ending as new beginning
                   variant.beginning_inventory = variantEndingInventory;
                   variant.purchases = 0;
@@ -246,21 +253,27 @@ class InventoryService {
             .eq("id", item.id)
             .then(({ error: updateError }) => {
               if (updateError) {
-                console.error(`[Fiscal Year Rollover] ❌ Error updating item ${item.id}:`, updateError);
+                console.error(
+                  `[Fiscal Year Rollover] ❌ Error updating item ${item.id}:`,
+                  updateError,
+                );
                 throw updateError;
               }
               itemsUpdated++;
               if (!isProduction) {
                 console.log(
                   `[Fiscal Year Rollover] ✅ Item "${item.name}" (${item.size || "N/A"}): ` +
-                  `Ending=${endingInventory} → Beginning=${endingInventory}, Purchases reset to 0`
+                    `Ending=${endingInventory} → Beginning=${endingInventory}, Purchases reset to 0`,
                 );
               }
             });
 
           updatePromises.push(updatePromise);
         } catch (itemError) {
-          console.error(`[Fiscal Year Rollover] ❌ Error processing item ${item.id}:`, itemError);
+          console.error(
+            `[Fiscal Year Rollover] ❌ Error processing item ${item.id}:`,
+            itemError,
+          );
           // Continue with other items
         }
       }
@@ -270,7 +283,7 @@ class InventoryService {
 
       if (!isProduction) {
         console.log(
-          `[Fiscal Year Rollover] ✅ Completed: ${itemsUpdated} items updated, ${itemsSkipped} items skipped`
+          `[Fiscal Year Rollover] ✅ Completed: ${itemsUpdated} items updated, ${itemsSkipped} items skipped`,
         );
       }
 
@@ -284,14 +297,16 @@ class InventoryService {
       };
     } catch (error) {
       console.error("[Fiscal Year Rollover] ❌ Error:", error);
-      throw new Error(`Failed to perform fiscal year rollover: ${error.message}`);
+      throw new Error(
+        `Failed to perform fiscal year rollover: ${error.message}`,
+      );
     }
   }
 
   /**
    * Check if an item addition should be classified as a purchase
    * Items added after the fiscal year start date are purchases
-   * 
+   *
    * @param {string} itemId - Item ID
    * @param {Date|string} additionDate - Date when stock is being added (defaults to now)
    * @returns {Promise<boolean>} True if should be classified as purchase
@@ -306,10 +321,14 @@ class InventoryService {
 
       if (error || !item) return true; // Default to purchase if can't determine
 
-      const additionDateObj = additionDate ? new Date(additionDate) : new Date();
-      const fiscalYearStart = item.fiscal_year_start 
-        ? new Date(item.fiscal_year_start) 
-        : (item.beginning_inventory_date ? new Date(item.beginning_inventory_date) : null);
+      const additionDateObj = additionDate
+        ? new Date(additionDate)
+        : new Date();
+      const fiscalYearStart = item.fiscal_year_start
+        ? new Date(item.fiscal_year_start)
+        : item.beginning_inventory_date
+          ? new Date(item.beginning_inventory_date)
+          : null;
 
       // If no fiscal year start date, classify as purchase
       if (!fiscalYearStart) return true;
@@ -329,13 +348,15 @@ class InventoryService {
     try {
       if (!isProduction) {
         console.log(
-          `[getInventoryReport] 🔄 Starting inventory report generation at ${new Date().toISOString()}`
+          `[getInventoryReport] 🔄 Starting inventory report generation at ${new Date().toISOString()}`,
         );
       }
 
       // Force fresh data by not using any caching
       // Exclude archived items from inventory report
-      const parsedStartDate = filters.startDate ? new Date(filters.startDate) : null;
+      const parsedStartDate = filters.startDate
+        ? new Date(filters.startDate)
+        : null;
       const parsedEndDate = filters.endDate ? new Date(filters.endDate) : null;
       const hasDateRange =
         parsedStartDate instanceof Date &&
@@ -343,10 +364,26 @@ class InventoryService {
         parsedEndDate instanceof Date &&
         !Number.isNaN(parsedEndDate.getTime());
       const startDateTime = hasDateRange
-        ? new Date(parsedStartDate.getFullYear(), parsedStartDate.getMonth(), parsedStartDate.getDate(), 0, 0, 0, 0).toISOString()
+        ? new Date(
+            parsedStartDate.getFullYear(),
+            parsedStartDate.getMonth(),
+            parsedStartDate.getDate(),
+            0,
+            0,
+            0,
+            0,
+          ).toISOString()
         : null;
       const endDateTime = hasDateRange
-        ? new Date(parsedEndDate.getFullYear(), parsedEndDate.getMonth(), parsedEndDate.getDate(), 23, 59, 59, 999).toISOString()
+        ? new Date(
+            parsedEndDate.getFullYear(),
+            parsedEndDate.getMonth(),
+            parsedEndDate.getDate(),
+            23,
+            59,
+            59,
+            999,
+          ).toISOString()
         : null;
 
       let query = supabase
@@ -359,7 +396,9 @@ class InventoryService {
         query = query.eq("education_level", filters.educationLevel);
       }
       if (hasDateRange) {
-        query = query.gte("created_at", startDateTime).lte("created_at", endDateTime);
+        query = query
+          .gte("created_at", startDateTime)
+          .lte("created_at", endDateTime);
       }
       // Do NOT chain a second .or() for search — PostgREST/Supabase can drop or
       // mis-apply the first .or() (is_archived), so search is applied after fetch.
@@ -399,11 +438,11 @@ class InventoryService {
           itemsFiltered.filter((i) => (i.purchases || 0) > 0) || [];
         if (itemsWithPurchases.length > 0) {
           console.log(
-            `[getInventoryReport] ✅ Found ${itemsWithPurchases.length} items with purchases > 0`
+            `[getInventoryReport] ✅ Found ${itemsWithPurchases.length} items with purchases > 0`,
           );
         } else {
           console.log(
-            `[getInventoryReport] ⚠️ WARNING: No items found with purchases > 0! This might indicate a data issue.`
+            `[getInventoryReport] ⚠️ WARNING: No items found with purchases > 0! This might indicate a data issue.`,
           );
         }
         console.log(
@@ -411,7 +450,7 @@ class InventoryService {
             items?.length || 0
           } items from database, ${itemsFiltered.length} after search${
             searchTerm ? ` ("${searchTerm}")` : ""
-          }`
+          }`,
         );
       }
 
@@ -452,26 +491,29 @@ class InventoryService {
           // Accessories: one row per item; valuation uses weighted-average cost (WAC)
           const totalStock = accessoryEntries.reduce(
             (sum, e) => sum + (Number(e.stock) || 0),
-            0
+            0,
           );
-          const totalBeginningInventory = Number(accessoryEntries[0]?.beginning_inventory) || 0;
-          const totalPurchases = accessoryEntries.slice(1).reduce(
-            (sum, e) => sum + (Number(e.purchases) || 0),
-            0
-          );
-          const begUnitPrice = Number(accessoryEntries[0]?.price) ?? Number(item.price) ?? 0;
+          const totalBeginningInventory =
+            Number(accessoryEntries[0]?.beginning_inventory) || 0;
+          const totalPurchases = accessoryEntries
+            .slice(1)
+            .reduce((sum, e) => sum + (Number(e.purchases) || 0), 0);
+          const begUnitPrice =
+            Number(accessoryEntries[0]?.price) ?? Number(item.price) ?? 0;
           // Build valuation basis from beginning + purchases layers, then convert to WAC.
           let valuationBasis = totalBeginningInventory * begUnitPrice;
           for (let i = 1; i < accessoryEntries.length; i++) {
             const entryPurchases = Number(accessoryEntries[i].purchases) || 0;
-            const entryPrice = Number(accessoryEntries[i].price) ?? Number(item.price) ?? 0;
+            const entryPrice =
+              Number(accessoryEntries[i].price) ?? Number(item.price) ?? 0;
             valuationBasis += entryPurchases * entryPrice;
           }
           // Display purchase unit price: last entry with purchases, or weighted fallback
           let purchUnitPrice = Number(item.price) || 0;
           for (let i = accessoryEntries.length - 1; i >= 1; i--) {
             if ((Number(accessoryEntries[i].purchases) || 0) > 0) {
-              purchUnitPrice = Number(accessoryEntries[i].price) ?? purchUnitPrice;
+              purchUnitPrice =
+                Number(accessoryEntries[i].price) ?? purchUnitPrice;
               break;
             }
           }
@@ -485,7 +527,8 @@ class InventoryService {
           const reorderPoint = Number(item.reorder_point) || 0;
           let status = "Above Threshold";
           if (endingInventory === 0) status = "Out of Stock";
-          else if (reorderPoint > 0 && endingInventory <= reorderPoint) status = "At Reorder Point";
+          else if (reorderPoint > 0 && endingInventory <= reorderPoint)
+            status = "At Reorder Point";
 
           reportData.push({
             id: `${item.id}-accessory-${item.created_at || Date.now()}`,
@@ -522,11 +565,14 @@ class InventoryService {
             const variantStock = Number(variant.stock) || 0;
             // Per-variant purchase unit price when present; else variant.price (for display / backward compat)
             let variantPurchasePrice =
-              variant.purchase_unit_price != null && !isNaN(Number(variant.purchase_unit_price))
+              variant.purchase_unit_price != null &&
+              !isNaN(Number(variant.purchase_unit_price))
                 ? Number(variant.purchase_unit_price)
-                : (Number(variant.price) || item.price || 0);
+                : Number(variant.price) || item.price || 0;
             // FIFO: first units use beginning-inventory unit price; next units use purchase (variant) price
-            const variantBeginningUnitPrice = Number(variant.beginning_inventory_unit_price) ?? variantPurchasePrice;
+            const variantBeginningUnitPrice =
+              Number(variant.beginning_inventory_unit_price) ??
+              variantPurchasePrice;
 
             // Read beginning_inventory from variant JSON field if available (needed before deriving purchases)
             let variantBeginningInventory;
@@ -540,27 +586,35 @@ class InventoryService {
               variantBeginningInventory = item.beginning_inventory || 0;
             }
 
-            // Per-size purchases: use variant.purchases or derive; when purchase_batches present, use sum of batch qty
+            // Per-size purchases: prefer variant.purchases (authoritative from addStock); batches for WAC layers only
             let variantPurchases;
-            const hasPurchaseBatches = Array.isArray(variant.purchase_batches) && variant.purchase_batches.length > 0;
-            if (hasPurchaseBatches) {
+            const hasPurchaseBatches =
+              Array.isArray(variant.purchase_batches) &&
+              variant.purchase_batches.length > 0;
+            if (
+              variant.purchases !== undefined &&
+              variant.purchases !== null &&
+              variant.purchases !== ""
+            ) {
+              variantPurchases = Number(variant.purchases) || 0;
+            } else if (hasPurchaseBatches) {
               variantPurchases = variant.purchase_batches.reduce(
                 (sum, b) => sum + (Number(b.qty) || 0),
-                0
+                0,
               );
-              const lastBatch = variant.purchase_batches[variant.purchase_batches.length - 1];
-              if (lastBatch && (lastBatch.unit_price != null && !isNaN(Number(lastBatch.unit_price)))) {
+              const lastBatch =
+                variant.purchase_batches[variant.purchase_batches.length - 1];
+              if (
+                lastBatch &&
+                lastBatch.unit_price != null &&
+                !isNaN(Number(lastBatch.unit_price))
+              ) {
                 variantPurchasePrice = Number(lastBatch.unit_price);
               }
-            } else if (variant.purchases !== undefined && variant.purchases !== null) {
-              variantPurchases = Number(variant.purchases) || 0;
-            } else if (
-              variant.stock !== undefined &&
-              variant.stock !== null
-            ) {
+            } else if (variant.stock !== undefined && variant.stock !== null) {
               variantPurchases = Math.max(
                 0,
-                variantStock - variantBeginningInventory
+                variantStock - variantBeginningInventory,
               );
             } else {
               variantPurchases = 0;
@@ -594,11 +648,15 @@ class InventoryService {
             const released = 0; // Calculated in frontend from orders
             const returns = 0;
 
-            // Determine status based on ending inventory vs reorder_point (matches At Reorder Point table)
+            // Determine status from actual on-hand stock to avoid
+            // reporting Out of Stock when variant stock is still positive.
             let variantStatus = "Above Threshold";
-            if (endingInventory === 0) {
+            if (variantStock === 0) {
               variantStatus = "Out of Stock";
-            } else if (variantReorderPoint > 0 && endingInventory <= variantReorderPoint) {
+            } else if (
+              variantReorderPoint > 0 &&
+              variantStock <= variantReorderPoint
+            ) {
               variantStatus = "At Reorder Point";
             }
 
@@ -608,8 +666,9 @@ class InventoryService {
               valuationBasis =
                 variantBeginningInventory * variantBeginningUnitPrice +
                 variant.purchase_batches.reduce(
-                  (sum, b) => sum + (Number(b.qty) || 0) * (Number(b.unit_price) || 0),
-                  0
+                  (sum, b) =>
+                    sum + (Number(b.qty) || 0) * (Number(b.unit_price) || 0),
+                  0,
                 );
             } else {
               valuationBasis =
@@ -619,7 +678,7 @@ class InventoryService {
             const weightedUnitPrice =
               endingInventory > 0
                 ? valuationBasis / endingInventory
-                : (variantPurchasePrice || 0);
+                : variantPurchasePrice || 0;
             const totalAmount = endingInventory * weightedUnitPrice;
 
             reportData.push({
@@ -640,7 +699,8 @@ class InventoryService {
               ending_inventory: endingInventory,
               unit_price: weightedUnitPrice || Number(item.price) || 0,
               purchase_unit_price: weightedUnitPrice || Number(item.price) || 0,
-              unit_price_beginning: variantBeginningUnitPrice || Number(item.price) || 0,
+              unit_price_beginning:
+                variantBeginningUnitPrice || Number(item.price) || 0,
               price: Number(variant.price) || Number(item.price) || 0,
               total_amount: totalAmount,
               status: variantStatus,
@@ -669,10 +729,10 @@ class InventoryService {
             // TODO: Track per-size values in the future
             const stockPerSize = Math.floor((item.stock || 0) / sizes.length);
             const beginningInventoryPerSize = Math.floor(
-              (item.beginning_inventory || 0) / sizes.length
+              (item.beginning_inventory || 0) / sizes.length,
             );
             const purchasesPerSize = Math.floor(
-              (item.purchases || 0) / sizes.length
+              (item.purchases || 0) / sizes.length,
             );
 
             sizes.forEach((size, index) => {
@@ -704,7 +764,10 @@ class InventoryService {
               let sizeStatus = "Above Threshold";
               if (endingInventory === 0) {
                 sizeStatus = "Out of Stock";
-              } else if (sizeReorderPoint > 0 && endingInventory <= sizeReorderPoint) {
+              } else if (
+                sizeReorderPoint > 0 &&
+                endingInventory <= sizeReorderPoint
+              ) {
                 sizeStatus = "At Reorder Point";
               }
 
@@ -728,8 +791,10 @@ class InventoryService {
                 available,
                 ending_inventory: endingInventory,
                 unit_price: weightedUnitPrice || Number(item.price) || 0,
-                purchase_unit_price: weightedUnitPrice || Number(item.price) || 0,
-                unit_price_beginning: weightedUnitPrice || Number(item.price) || 0,
+                purchase_unit_price:
+                  weightedUnitPrice || Number(item.price) || 0,
+                unit_price_beginning:
+                  weightedUnitPrice || Number(item.price) || 0,
                 price: Number(item.price) || 0,
                 total_amount: totalAmount,
                 status: sizeStatus,
@@ -761,7 +826,7 @@ class InventoryService {
                   item.id
                 }, name="${item.name}", size="${itemSize}", purchases=${
                   item.purchases || 0
-                }`
+                }`,
               );
             }
 
@@ -773,7 +838,10 @@ class InventoryService {
             let singleStatus = "Above Threshold";
             if (endingInventory === 0) {
               singleStatus = "Out of Stock";
-            } else if (singleReorderPoint > 0 && endingInventory <= singleReorderPoint) {
+            } else if (
+              singleReorderPoint > 0 &&
+              endingInventory <= singleReorderPoint
+            ) {
               singleStatus = "At Reorder Point";
             }
 
@@ -787,7 +855,7 @@ class InventoryService {
               size: itemSize,
               stock: item.stock,
               beginning_inventory: item.beginning_inventory || 0,
-              purchases: item.purchases || 0, // Verify this is reading correctly from database
+              purchases: item.purchases || 0,
               released,
               returns,
               unreleased,
@@ -795,7 +863,8 @@ class InventoryService {
               ending_inventory: endingInventory,
               unit_price: weightedUnitPrice || Number(item.price) || 0,
               purchase_unit_price: weightedUnitPrice || Number(item.price) || 0,
-              unit_price_beginning: weightedUnitPrice || Number(item.price) || 0,
+              unit_price_beginning:
+                weightedUnitPrice || Number(item.price) || 0,
               price: Number(item.price) || 0,
               total_amount: totalAmount,
               status: singleStatus,
@@ -818,13 +887,15 @@ class InventoryService {
           .replace(/\s*\([^)]*\)/g, "")
           .trim() || "N/A";
       const purchaseSumsByItemSize = new Map();
+      const firstUnitPriceByItemSize = new Map();
       const returnSumsByItemSize = new Map();
       try {
         let purchaseTxQuery = supabase
           .from("transactions")
           .select("metadata,created_at")
           .eq("type", "Inventory")
-          .eq("action", "PURCHASE RECORDED");
+          .eq("action", "PURCHASE RECORDED")
+          .order("created_at", { ascending: true });
         let returnTxQuery = supabase
           .from("transactions")
           .select("metadata,created_at")
@@ -838,10 +909,10 @@ class InventoryService {
             .gte("created_at", startDateTime)
             .lte("created_at", endDateTime);
         }
-        const [{ data: purchaseTxList, error: purchaseTxError }, { data: returnTxList, error: txError }] = await Promise.all([
-          purchaseTxQuery,
-          returnTxQuery,
-        ]);
+        const [
+          { data: purchaseTxList, error: purchaseTxError },
+          { data: returnTxList, error: txError },
+        ] = await Promise.all([purchaseTxQuery, returnTxQuery]);
 
         if (!purchaseTxError && purchaseTxList && purchaseTxList.length > 0) {
           for (const tx of purchaseTxList) {
@@ -851,7 +922,20 @@ class InventoryService {
             const qty = Number(meta.quantity) || 0;
             if (!itemId || qty <= 0) continue;
             const key = `${itemId}|${normalizeSizeForKey(size)}`;
-            purchaseSumsByItemSize.set(key, (purchaseSumsByItemSize.get(key) || 0) + qty);
+            purchaseSumsByItemSize.set(
+              key,
+              (purchaseSumsByItemSize.get(key) || 0) + qty,
+            );
+            // Track the FIRST entered unit price per item/size (ascending order
+            // means the first iteration for a key is the earliest transaction).
+            // Only set once so subsequent purchases do not overwrite the original price.
+            if (
+              meta.unit_price != null &&
+              !isNaN(Number(meta.unit_price)) &&
+              !firstUnitPriceByItemSize.has(key)
+            ) {
+              firstUnitPriceByItemSize.set(key, Number(meta.unit_price));
+            }
           }
         }
 
@@ -863,56 +947,60 @@ class InventoryService {
             const qty = Number(meta.quantity) || 0;
             if (!itemId || qty <= 0) continue;
             const key = `${itemId}|${normalizeSizeForKey(size)}`;
-            returnSumsByItemSize.set(key, (returnSumsByItemSize.get(key) || 0) + qty);
+            returnSumsByItemSize.set(
+              key,
+              (returnSumsByItemSize.get(key) || 0) + qty,
+            );
           }
         }
       } catch (e) {
         if (!isProduction) {
-          console.warn("[getInventoryReport] Could not load return transactions:", e);
+          console.warn(
+            "[getInventoryReport] Could not load return transactions:",
+            e,
+          );
         }
       }
 
       for (const row of reportData) {
         const key = `${row.item_id}|${normalizeSizeForKey(row.size)}`;
         if (hasDateRange) {
-          const txPurchasesInRange = purchaseSumsByItemSize.get(key) || 0;
-          const rowCreatedAtMs = row.created_at ? new Date(row.created_at).getTime() : NaN;
-          const startMs = new Date(startDateTime).getTime();
-          const endMs = new Date(endDateTime).getTime();
-          const isRowCreatedInRange =
-            Number.isFinite(rowCreatedAtMs) &&
-            Number.isFinite(startMs) &&
-            Number.isFinite(endMs) &&
-            rowCreatedAtMs >= startMs &&
-            rowCreatedAtMs <= endMs;
-
-          // Keep purchases coming from item creation data (e.g. accessoryEntries)
-          // when the row itself was created in the selected period.
-          const createdPurchasesInRange = isRowCreatedInRange
-            ? Number(row.purchases) || 0
-            : 0;
-
-          row.purchases = txPurchasesInRange + createdPurchasesInRange;
+          // Use only transaction-based purchases to avoid double-counting.
+          // Items are always created with purchases = 0; every addStock call both
+          // increments item.purchases in the DB AND logs a transaction. Adding
+          // item.purchases (row.purchases) on top of txPurchasesInRange would count
+          // the same purchases twice.
+          row.purchases = purchaseSumsByItemSize.get(key) || 0;
         }
         row.returns = returnSumsByItemSize.get(key) || 0;
+
+        // Override purchase_unit_price with the FIRST entered price from transaction
+        // metadata. The first purchase price is the original reference price;
+        // subsequent purchases change the WAC (stored in item.price) but the display
+        // should reflect the original price the item was first purchased at.
+        const firstTxUnitPrice = firstUnitPriceByItemSize.get(key);
+        if (firstTxUnitPrice != null) {
+          row.purchase_unit_price = firstTxUnitPrice;
+          row.unit_price = firstTxUnitPrice;
+        }
       }
 
       // Comprehensive logging to track purchases values through report generation (dev only)
       if (!isProduction) {
         console.log(
-          `[getInventoryReport] ✅ Generated ${reportData.length} rows`
+          `[getInventoryReport] ✅ Generated ${reportData.length} rows`,
         );
 
         const rowsWithPurchases = reportData.filter(
-          (row) => (row.purchases || 0) > 0
+          (row) => (row.purchases || 0) > 0,
         );
         if (rowsWithPurchases.length > 0) {
           console.log(
-            `[getInventoryReport] ✅ Found ${rowsWithPurchases.length} rows with purchases > 0`
+            `[getInventoryReport] ✅ Found ${rowsWithPurchases.length} rows with purchases > 0`,
           );
         } else {
           console.log(
-            `[getInventoryReport] ⚠️ WARNING: No rows with purchases > 0 in report!`
+            `[getInventoryReport] ⚠️ WARNING: No rows with purchases > 0 in report!`,
           );
         }
       }
@@ -937,17 +1025,25 @@ class InventoryService {
    * @param {object} io - Optional Socket.IO instance for real-time updates
    * @param {string} userId - Optional user ID who performed the action
    */
-  async addStock(itemId, quantity, size = null, unitPrice = null, io = null, userId = null, userEmail = null) {
+  async addStock(
+    itemId,
+    quantity,
+    size = null,
+    unitPrice = null,
+    io = null,
+    userId = null,
+    userEmail = null,
+  ) {
     try {
       if (!isProduction) {
         console.log(
-          `[addStock] 🚀 Starting addStock: itemId=${itemId}, quantity=${quantity}, size="${size}", unitPrice=${unitPrice}`
+          `[addStock] 🚀 Starting addStock: itemId=${itemId}, quantity=${quantity}, size="${size}", unitPrice=${unitPrice}`,
         );
       }
 
       // Check and reset beginning inventory if expired (legacy 365-day check)
       await this.checkAndResetBeginningInventory(itemId);
-      
+
       // Check if this addition should be classified as a purchase (after fiscal year rollover)
       const isPurchase = await this.isPurchaseAfterRollover(itemId);
 
@@ -972,78 +1068,78 @@ class InventoryService {
             item.purchases || 0
           }, beginning_inventory=${item.beginning_inventory || 0}, size="${
             item.size
-          }"`
+          }"`,
         );
       }
 
-      // Check if this is a size-specific item with JSON variations
+      // JSON sizeVariations: must update variant in note. Without a size, single-variant items
+      // auto-target the only row; multi-variant requires an explicit variant (otherwise regular
+      // branch only updates item.purchases/stock and variant purchases stay 0 in the report).
       let isJsonVariant = false;
       let variantIndex = -1;
       let parsedNote = null;
 
-      if (item.note && size) {
+      if (item.note) {
         try {
           parsedNote = JSON.parse(item.note);
-          if (
-            parsedNote &&
-            parsedNote._type === "sizeVariations" &&
-            Array.isArray(parsedNote.sizeVariations)
-          ) {
-            // Normalize for comparison: lowercase, trim, collapse spaces, strip parentheses content
-            const normalizeForMatch = (s) =>
-              (s || "")
-                .toLowerCase()
-                .trim()
-                .replace(/\s+/g, " ")
-                .replace(/\([^)]*\)/g, "")
-                .trim();
-            const targetNormalized = normalizeForMatch(size);
-
-            // Find matching variant (exact or without parentheses)
-            variantIndex = parsedNote.sizeVariations.findIndex((v) => {
-              const vSize = (v.size || "").toLowerCase().trim();
-              const targetSize = size.toLowerCase().trim();
-              const vSizeNoParens = vSize.replace(/\([^)]*\)/g, "").trim();
-              const targetSizeNoParens = targetSize.replace(/\([^)]*\)/g, "").trim();
-              return (
-                vSize === targetSize ||
-                vSizeNoParens === targetSizeNoParens ||
-                normalizeForMatch(v.size) === targetNormalized
-              );
-            });
-
-            // Fallback: match by core size name only (e.g. "Small (S)" and "Small" both -> "small")
-            if (variantIndex === -1 && parsedNote.sizeVariations.length > 0) {
-              variantIndex = parsedNote.sizeVariations.findIndex((v) => {
-                return normalizeForMatch(v.size) === targetNormalized;
-              });
-            }
-
-            if (variantIndex !== -1) {
-              isJsonVariant = true;
-            }
-          }
         } catch (e) {
-          // Not JSON or parse error, treat as regular item
+          parsedNote = null;
         }
       }
 
-      // If item has sizeVariations and size was provided but no variant matched,
-      // do NOT update row stock (that would leave note out of sync and modal would show old stock).
+      const normalizeForMatch = (s) =>
+        (s || "")
+          .toLowerCase()
+          .trim()
+          .replace(/\s+/g, " ")
+          .replace(/\([^)]*\)/g, "")
+          .trim();
+
       if (
         parsedNote &&
         parsedNote._type === "sizeVariations" &&
         Array.isArray(parsedNote.sizeVariations) &&
-        parsedNote.sizeVariations.length > 0 &&
-        size &&
-        variantIndex === -1
+        parsedNote.sizeVariations.length > 0
       ) {
-        const availableSizes = parsedNote.sizeVariations
-          .map((v) => v.size)
-          .join(", ");
-        throw new Error(
-          `Size "${size}" not found in this item's size variations. Available: ${availableSizes}. Add stock only to one of these sizes.`
-        );
+        const sv = parsedNote.sizeVariations;
+        const sizeTrim = size != null ? String(size).trim() : "";
+
+        if (sv.length === 1 && !sizeTrim) {
+          variantIndex = 0;
+          isJsonVariant = true;
+        } else if (sizeTrim) {
+          const targetNormalized = normalizeForMatch(size);
+          variantIndex = sv.findIndex((v) => {
+            const vSize = (v.size || "").toLowerCase().trim();
+            const targetSize = size.toLowerCase().trim();
+            const vSizeNoParens = vSize.replace(/\([^)]*\)/g, "").trim();
+            const targetSizeNoParens = targetSize
+              .replace(/\([^)]*\)/g, "")
+              .trim();
+            return (
+              vSize === targetSize ||
+              vSizeNoParens === targetSizeNoParens ||
+              normalizeForMatch(v.size) === targetNormalized
+            );
+          });
+          if (variantIndex === -1) {
+            variantIndex = sv.findIndex((v) => {
+              return normalizeForMatch(v.size) === targetNormalized;
+            });
+          }
+          if (variantIndex !== -1) {
+            isJsonVariant = true;
+          } else {
+            const availableSizes = sv.map((v) => v.size).join(", ");
+            throw new Error(
+              `Size "${size}" not found in this item's size variations. Available: ${availableSizes}. Add stock only to one of these sizes.`,
+            );
+          }
+        } else {
+          throw new Error(
+            "This item has multiple size variants. Select a variant in Add Inventory before saving.",
+          );
+        }
       }
 
       // Handle JSON variant stock update
@@ -1058,28 +1154,31 @@ class InventoryService {
         // Recalculate total stock from all variants
         const newTotalStock = parsedNote.sizeVariations.reduce(
           (sum, v) => sum + (Number(v.stock) || 0),
-          0
+          0,
         );
 
-        // Add to purchases: append to purchase_batches so each add has its own unit price
+        // Add to purchases: append one batch for this add only. Do not backfill legacy
+        // variant.purchases into a synthetic batch — that doubled qty (e.g. 5 legacy + 5 new → 10).
         const currentVariantPurchases =
           Number(parsedNote.sizeVariations[variantIndex].purchases) || 0;
-        const newVariantPurchases = currentVariantPurchases + quantity;
 
-        let purchaseBatches = Array.isArray(parsedNote.sizeVariations[variantIndex].purchase_batches)
-          ? parsedNote.sizeVariations[variantIndex].purchase_batches
+        let purchaseBatches = Array.isArray(
+          parsedNote.sizeVariations[variantIndex].purchase_batches,
+        )
+          ? [...parsedNote.sizeVariations[variantIndex].purchase_batches]
           : [];
-        if (purchaseBatches.length === 0 && currentVariantPurchases > 0) {
-          const up = parsedNote.sizeVariations[variantIndex].purchase_unit_price ?? parsedNote.sizeVariations[variantIndex].price;
-          purchaseBatches = [{ qty: currentVariantPurchases, unit_price: Number(up) || 0 }];
-        }
         const newBatch = {
           qty: quantity,
-          unit_price: unitPrice != null && !isNaN(Number(unitPrice)) ? Number(unitPrice) : (Number(variant.price) || 0),
+          unit_price:
+            unitPrice != null && !isNaN(Number(unitPrice))
+              ? Number(unitPrice)
+              : Number(variant.price) || 0,
         };
-        purchaseBatches = [...purchaseBatches, newBatch];
-        parsedNote.sizeVariations[variantIndex].purchase_batches = purchaseBatches;
-        parsedNote.sizeVariations[variantIndex].purchases = purchaseBatches.reduce((s, b) => s + (Number(b.qty) || 0), 0);
+        purchaseBatches.push(newBatch);
+        parsedNote.sizeVariations[variantIndex].purchase_batches =
+          purchaseBatches;
+        const newVariantPurchases = currentVariantPurchases + quantity;
+        parsedNote.sizeVariations[variantIndex].purchases = newVariantPurchases;
 
         if (unitPrice != null) {
           const existingVariantWac =
@@ -1091,10 +1190,12 @@ class InventoryService {
             currentVariantStock,
             existingVariantWac,
             quantity,
-            unitPrice
+            unitPrice,
           );
+          // Weighted average for valuation layers; keep last entered price for display
           parsedNote.sizeVariations[variantIndex].price = newVariantWac;
-          parsedNote.sizeVariations[variantIndex].purchase_unit_price = newVariantWac;
+          parsedNote.sizeVariations[variantIndex].purchase_unit_price =
+            Number(unitPrice);
         }
 
         // Also update item-level purchases for backward compatibility
@@ -1103,7 +1204,7 @@ class InventoryService {
 
         if (!isProduction) {
           console.log(
-            `[addStock] 📊 Variant purchases update (JSON variant): variant="${variant.size}", current=${currentVariantPurchases}, adding=${quantity}, new=${parsedNote.sizeVariations[variantIndex].purchases}`
+            `[addStock] 📊 Variant purchases update (JSON variant): variant="${variant.size}", current=${currentVariantPurchases}, adding=${quantity}, new=${parsedNote.sizeVariations[variantIndex].purchases}`,
           );
         }
 
@@ -1124,25 +1225,25 @@ class InventoryService {
         if (error) {
           console.error(
             `[addStock] ❌ Database update error (JSON variant):`,
-            error
+            error,
           );
           throw error;
         }
 
         if (!isProduction) {
           console.log(
-            `[addStock] ✅ Update successful (JSON variant): updated_stock=${data?.stock}, updated_purchases=${data?.purchases}, beginning_inventory=${data?.beginning_inventory}`
+            `[addStock] ✅ Update successful (JSON variant): updated_stock=${data?.stock}, updated_purchases=${data?.purchases}, beginning_inventory=${data?.beginning_inventory}`,
           );
         }
 
         // Verify purchases was actually updated (always check, but only log errors)
         if (data.purchases === undefined || data.purchases === null) {
           console.error(
-            `[addStock] ⚠️ WARNING: Updated item (JSON variant) does not have purchases field!`
+            `[addStock] ⚠️ WARNING: Updated item (JSON variant) does not have purchases field!`,
           );
         } else if (data.purchases !== newPurchases) {
           console.error(
-            `[addStock] ⚠️ WARNING: Purchases mismatch (JSON variant)! Expected ${newPurchases}, got ${data.purchases}`
+            `[addStock] ⚠️ WARNING: Purchases mismatch (JSON variant)! Expected ${newPurchases}, got ${data.purchases}`,
           );
         }
 
@@ -1158,11 +1259,11 @@ class InventoryService {
           if (verifyError) {
             console.error(
               `[addStock] ❌ Error verifying update (JSON variant):`,
-              verifyError
+              verifyError,
             );
           } else if (verifyData.purchases !== newPurchases) {
             console.error(
-              `[addStock] ❌ CRITICAL: Database verification failed (JSON variant)! Purchases not persisted correctly. Expected ${newPurchases}, got ${verifyData.purchases}`
+              `[addStock] ❌ CRITICAL: Database verification failed (JSON variant)! Purchases not persisted correctly. Expected ${newPurchases}, got ${verifyData.purchases}`,
             );
             // Use verified data if it's different
             data.purchases = verifyData.purchases;
@@ -1192,10 +1293,13 @@ class InventoryService {
               new_stock: newVariantStock,
               previous_purchases: currentVariantPurchases,
               new_purchases: newVariantPurchases,
-            }
+            },
           );
         } catch (txError) {
-          console.error("Failed to log transaction for stock addition:", txError);
+          console.error(
+            "Failed to log transaction for stock addition:",
+            txError,
+          );
         }
 
         // Emit socket event to notify clients of updated purchases/stock for JSON variants too
@@ -1229,7 +1333,7 @@ class InventoryService {
 
         if (!isProduction) {
           console.log(
-            `[addStock] Updating item ${itemId}: current_stock=${currentStock}, current_purchases=${currentPurchases}, adding=${quantity}, new_stock=${newStock}, new_purchases=${newPurchases}, beginning_inventory=${currentBeginningInventory} (unchanged)`
+            `[addStock] Updating item ${itemId}: current_stock=${currentStock}, current_purchases=${currentPurchases}, adding=${quantity}, new_stock=${newStock}, new_purchases=${newPurchases}, beginning_inventory=${currentBeginningInventory} (unchanged)`,
           );
         }
 
@@ -1246,7 +1350,7 @@ class InventoryService {
             currentStock,
             existingWac,
             quantity,
-            unitPrice
+            unitPrice,
           );
           updateData.price = newWac;
         }
@@ -1265,18 +1369,18 @@ class InventoryService {
 
         if (!isProduction) {
           console.log(
-            `[addStock] ✅ Update successful: updated_stock=${data?.stock}, updated_purchases=${data?.purchases}, beginning_inventory=${data?.beginning_inventory}`
+            `[addStock] ✅ Update successful: updated_stock=${data?.stock}, updated_purchases=${data?.purchases}, beginning_inventory=${data?.beginning_inventory}`,
           );
         }
 
         // Verify purchases was actually updated (always check, but only log errors)
         if (data.purchases === undefined || data.purchases === null) {
           console.error(
-            `[addStock] ⚠️ WARNING: Updated item does not have purchases field!`
+            `[addStock] ⚠️ WARNING: Updated item does not have purchases field!`,
           );
         } else if (data.purchases !== newPurchases) {
           console.error(
-            `[addStock] ⚠️ WARNING: Purchases mismatch! Expected ${newPurchases}, got ${data.purchases}`
+            `[addStock] ⚠️ WARNING: Purchases mismatch! Expected ${newPurchases}, got ${data.purchases}`,
           );
         }
 
@@ -1293,10 +1397,10 @@ class InventoryService {
             console.error(`[addStock] ❌ Error verifying update:`, verifyError);
           } else if (verifyData.purchases !== newPurchases) {
             console.error(
-              `[addStock] ❌ CRITICAL: Database verification failed! Purchases not persisted correctly. Expected ${newPurchases}, got ${verifyData.purchases}`
+              `[addStock] ❌ CRITICAL: Database verification failed! Purchases not persisted correctly. Expected ${newPurchases}, got ${verifyData.purchases}`,
             );
             console.error(
-              `[addStock] This suggests a trigger or transaction issue. Check database triggers.`
+              `[addStock] This suggests a trigger or transaction issue. Check database triggers.`,
             );
             // Use verified data if it's different
             data.purchases = verifyData.purchases;
@@ -1317,45 +1421,15 @@ class InventoryService {
             updated_at: data.updated_at,
           });
           console.log(
-            `[addStock] Emitted item:updated event for item ${data.id}`
+            `[addStock] Emitted item:updated event for item ${data.id}`,
           );
         }
 
         // Verify response includes purchases (always check, but only log errors)
         if (!data.purchases && data.purchases !== 0) {
           console.error(
-            `[addStock] ⚠️ WARNING: Response data missing purchases field!`
+            `[addStock] ⚠️ WARNING: Response data missing purchases field!`,
           );
-        }
-
-        // Log transaction for stock addition (purchase)
-        try {
-          const TransactionService = require("../../services/transaction.service");
-          const itemName = data.name;
-          const itemSize = size || data.size || "N/A";
-          const details = `Purchase recorded: ${quantity} unit(s) of ${itemName}${itemSize !== "N/A" ? ` (Size: ${itemSize})` : ""}${unitPrice ? ` at ₱${unitPrice} per unit` : ""}`;
-          // Note: userId will be passed from controller if available
-          await TransactionService.logTransaction(
-            "Inventory",
-            `PURCHASE RECORDED ${itemName}`,
-            userId, // Use userId passed from controller
-            details,
-            {
-              item_id: data.id,
-              item_name: itemName,
-              size: itemSize,
-              quantity: quantity,
-              unit_price: unitPrice,
-              previous_stock: currentVariantStock || item.stock,
-              new_stock: newVariantStock || newStock,
-              previous_purchases: currentVariantPurchases || item.purchases || 0,
-              new_purchases: newVariantPurchases || newPurchases,
-            },
-            userEmail // Pass userEmail as fallback for user lookup
-          );
-        } catch (txError) {
-          // Don't fail stock addition if transaction logging fails
-          console.error("Failed to log transaction for stock addition:", txError);
         }
 
         // Log transaction for stock addition (purchase) - regular item
@@ -1380,10 +1454,13 @@ class InventoryService {
               previous_purchases: currentPurchases,
               new_purchases: newPurchases,
             },
-            userEmail // Pass userEmail as fallback for user lookup
+            userEmail, // Pass userEmail as fallback for user lookup
           );
         } catch (txError) {
-          console.error("Failed to log transaction for stock addition:", txError);
+          console.error(
+            "Failed to log transaction for stock addition:",
+            txError,
+          );
         }
 
         return {
@@ -1411,12 +1488,12 @@ class InventoryService {
     legacyReturn = false,
     io = null,
     userId = null,
-    userEmail = null
+    userEmail = null,
   ) {
     try {
       if (!isProduction) {
         console.log(
-          `[recordReturn] 🚀 Starting recordReturn: itemId=${itemId}, quantity=${quantity}, size="${size}"`
+          `[recordReturn] 🚀 Starting recordReturn: itemId=${itemId}, quantity=${quantity}, size="${size}"`,
         );
       }
 
@@ -1455,7 +1532,9 @@ class InventoryService {
               const vSize = (v.size || "").toLowerCase().trim();
               const targetSize = size.toLowerCase().trim();
               const vSizeNoParens = vSize.replace(/\([^)]*\)/g, "").trim();
-              const targetSizeNoParens = targetSize.replace(/\([^)]*\)/g, "").trim();
+              const targetSizeNoParens = targetSize
+                .replace(/\([^)]*\)/g, "")
+                .trim();
               return (
                 vSize === targetSize ||
                 vSizeNoParens === targetSizeNoParens ||
@@ -1463,8 +1542,8 @@ class InventoryService {
               );
             });
             if (variantIndex === -1 && parsedNote.sizeVariations.length > 0) {
-              variantIndex = parsedNote.sizeVariations.findIndex((v) =>
-                normalizeForMatch(v.size) === targetNormalized
+              variantIndex = parsedNote.sizeVariations.findIndex(
+                (v) => normalizeForMatch(v.size) === targetNormalized,
               );
             }
             if (variantIndex !== -1) isJsonVariant = true;
@@ -1482,8 +1561,12 @@ class InventoryService {
         size &&
         variantIndex === -1
       ) {
-        const availableSizes = parsedNote.sizeVariations.map((v) => v.size).join(", ");
-        throw new Error(`Size "${size}" not found. Available: ${availableSizes}`);
+        const availableSizes = parsedNote.sizeVariations
+          .map((v) => v.size)
+          .join(", ");
+        throw new Error(
+          `Size "${size}" not found. Available: ${availableSizes}`,
+        );
       }
 
       if (isJsonVariant && parsedNote && variantIndex !== -1) {
@@ -1493,7 +1576,7 @@ class InventoryService {
         parsedNote.sizeVariations[variantIndex].stock = newVariantStock;
         const newTotalStock = parsedNote.sizeVariations.reduce(
           (sum, v) => sum + (Number(v.stock) || 0),
-          0
+          0,
         );
         const updateData = {
           stock: newTotalStock,
@@ -1534,7 +1617,7 @@ class InventoryService {
               previous_stock: currentVariantStock,
               new_stock: newVariantStock,
             },
-            userEmail
+            userEmail,
           );
         } catch (txError) {
           console.error("Failed to log return transaction:", txError);
@@ -1587,7 +1670,7 @@ class InventoryService {
             previous_stock: currentStock,
             new_stock: newStock,
           },
-          userEmail
+          userEmail,
         );
       } catch (txError) {
         console.error("Failed to log return transaction:", txError);
@@ -1658,7 +1741,11 @@ class InventoryService {
             String(metaItemId || "") === String(itemId) ||
             (!!normalizedItemName && metaItemName === normalizedItemName);
           if (!itemMatch) continue;
-          if (normalizedTargetSize && metaSize && metaSize !== normalizedTargetSize)
+          if (
+            normalizedTargetSize &&
+            metaSize &&
+            metaSize !== normalizedTargetSize
+          )
             continue;
           releasedQty += Number(meta.quantity) || 1;
           continue;
@@ -1696,11 +1783,12 @@ class InventoryService {
 
       // Fallback/authoritative source: claimed/completed orders table items payload.
       // Some ORDER CLAIMED transactions only store order identifiers without items array.
-      const { data: releasedOrders, error: releasedOrdersError } = await supabase
-        .from("orders")
-        .select("items,status")
-        .eq("is_active", true)
-        .in("status", ["claimed", "completed"]);
+      const { data: releasedOrders, error: releasedOrdersError } =
+        await supabase
+          .from("orders")
+          .select("items,status")
+          .eq("is_active", true)
+          .in("status", ["claimed", "completed"]);
       if (releasedOrdersError) throw releasedOrdersError;
 
       for (const order of releasedOrders || []) {
@@ -1740,7 +1828,7 @@ class InventoryService {
     } catch (error) {
       console.error("Check return release history error:", error);
       throw new Error(
-        `Failed to check return release history: ${error.message}`
+        `Failed to check return release history: ${error.message}`,
       );
     }
   }

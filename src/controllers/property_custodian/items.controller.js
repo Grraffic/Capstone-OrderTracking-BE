@@ -18,12 +18,10 @@ class ItemsController {
       const { image, fileName } = req.body || {};
 
       if (!image || typeof image !== "string") {
-        return res
-          .status(400)
-          .json({
-            success: false,
-            message: "Image payload is required and must be a string",
-          });
+        return res.status(400).json({
+          success: false,
+          message: "Image payload is required and must be a string",
+        });
       }
 
       console.log("📤 Uploading item image to Cloudinary...", {
@@ -40,23 +38,19 @@ class ItemsController {
       });
 
       if (!result?.success || !result?.url) {
-        return res
-          .status(500)
-          .json({
-            success: false,
-            message: "Failed to upload item image to Cloudinary",
-          });
+        return res.status(500).json({
+          success: false,
+          message: "Failed to upload item image to Cloudinary",
+        });
       }
 
       return res.json({ success: true, url: result.url });
     } catch (error) {
       console.error("Upload item image error:", error);
-      return res
-        .status(500)
-        .json({
-          success: false,
-          message: error.message || "Failed to upload item image",
-        });
+      return res.status(500).json({
+        success: false,
+        message: error.message || "Failed to upload item image",
+      });
     }
   }
 
@@ -66,8 +60,15 @@ class ItemsController {
    */
   async getItems(req, res) {
     try {
-      const { page, limit, userEducationLevel, studentType, userGradeLevel, ...filters } = req.query;
-      
+      const {
+        page,
+        limit,
+        userEducationLevel,
+        studentType,
+        userGradeLevel,
+        ...filters
+      } = req.query;
+
       // If userEducationLevel is provided, use it for eligibility filtering
       // This is typically sent by students to see only items they're eligible for
       // studentType is used to determine if old students should see all items
@@ -77,11 +78,11 @@ class ItemsController {
         ...(studentType ? { studentType } : {}),
         ...(userGradeLevel ? { userGradeLevel } : {}),
       };
-      
+
       const result = await ItemsService.getItems(
         filtersWithEligibility,
         parseInt(page) || 1,
-        parseInt(limit) || 10
+        parseInt(limit) || 10,
       );
       res.json(result);
     } catch (error) {
@@ -134,7 +135,7 @@ class ItemsController {
         await NotificationService.findStudentsWithPendingPreOrders(
           item.name,
           item.education_level,
-          item.size || null
+          item.size || null,
         );
 
       res.json({
@@ -144,12 +145,10 @@ class ItemsController {
       });
     } catch (error) {
       console.error("Get pre-order count error:", error);
-      res
-        .status(400)
-        .json({
-          success: false,
-          message: error.message || "Failed to get pre-order count",
-        });
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to get pre-order count",
+      });
     }
   }
 
@@ -164,17 +163,15 @@ class ItemsController {
       const decodedEducationLevel = decodeURIComponent(educationLevel);
       const result = await ItemsService.getAvailableSizes(
         decodedName,
-        decodedEducationLevel
+        decodedEducationLevel,
       );
       res.json(result);
     } catch (error) {
       console.error("Get available sizes error:", error);
-      res
-        .status(400)
-        .json({
-          success: false,
-          message: error.message || "Failed to get available sizes",
-        });
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to get available sizes",
+      });
     }
   }
 
@@ -211,9 +208,9 @@ class ItemsController {
         name: req.body.name,
         size: req.body.size,
         stock: req.body.stock,
-        education_level: req.body.education_level
+        education_level: req.body.education_level,
       });
-      
+
       const userId = req.user?.id || null;
       const userEmail = req.user?.email || null;
       console.log(`[ItemsController] 👤 User info from request:`, {
@@ -224,14 +221,19 @@ class ItemsController {
         allUserKeys: Object.keys(req.user || {}),
       });
       // Pass both userId and userEmail to service for better user lookup
-      const result = await ItemsService.createItem(req.body, io, userId, userEmail);
+      const result = await ItemsService.createItem(
+        req.body,
+        io,
+        userId,
+        userEmail,
+      );
 
       console.log(`[ItemsController] 📤 Sending response:`, {
         success: result.success,
         isExisting: result.isExisting,
         purchases: result.data?.purchases,
         beginning_inventory: result.data?.beginning_inventory,
-        stock: result.data?.stock
+        stock: result.data?.stock,
       });
 
       // Emit socket event for item creation to trigger transaction refresh
@@ -241,24 +243,24 @@ class ItemsController {
           itemName: result.data?.name,
           isExisting: result.isExisting || false,
         });
-        console.log(`📡 Socket.IO: Emitted item:created for item ${result.data?.name}`);
+        console.log(
+          `📡 Socket.IO: Emitted item:created for item ${result.data?.name}`,
+        );
       }
 
       if (result.notificationInfo && result.notificationInfo.notified > 0) {
         console.log(
-          `✅ Notified ${result.notificationInfo.notified} students about new item availability`
+          `✅ Notified ${result.notificationInfo.notified} students about new item availability`,
         );
       }
 
       res.status(201).json(result);
     } catch (error) {
       console.error("[ItemsController] ❌ Create item error:", error);
-      res
-        .status(400)
-        .json({
-          success: false,
-          message: error.message || "Failed to create item",
-        });
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to create item",
+      });
     }
   }
 
@@ -270,11 +272,17 @@ class ItemsController {
     try {
       const { id } = req.params;
       const io = req.app.get("io");
-      const result = await ItemsService.updateItem(id, req.body, io, req.user?.id, req.user?.email);
+      const result = await ItemsService.updateItem(
+        id,
+        req.body,
+        io,
+        req.user?.id,
+        req.user?.email,
+      );
 
       if (result.notificationInfo && result.notificationInfo.notified > 0) {
         console.log(
-          `✅ Notified ${result.notificationInfo.notified} students about restock`
+          `✅ Notified ${result.notificationInfo.notified} students about restock`,
         );
       }
 
@@ -282,12 +290,17 @@ class ItemsController {
       if (result.success && req.user?.id) {
         try {
           const TransactionService = require("../../services/transaction.service");
-          const { data: transactions } = await TransactionService.getTransactions({
-            type: "Item",
-            action: "ITEM DETAILS UPDATED",
-            limit: 1,
-          });
-          if (transactions && transactions.length > 0 && transactions[0].metadata?.item_id === result.data.id) {
+          const { data: transactions } =
+            await TransactionService.getTransactions({
+              type: "Item",
+              action: "ITEM DETAILS UPDATED",
+              limit: 1,
+            });
+          if (
+            transactions &&
+            transactions.length > 0 &&
+            transactions[0].metadata?.item_id === result.data.id
+          ) {
             const supabase = require("../../config/supabase");
             await supabase
               .from("transactions")
@@ -306,12 +319,10 @@ class ItemsController {
       res.json(result);
     } catch (error) {
       console.error("Update item error:", error);
-      res
-        .status(400)
-        .json({
-          success: false,
-          message: error.message || "Failed to update item",
-        });
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to update item",
+      });
     }
   }
 
@@ -330,17 +341,17 @@ class ItemsController {
           itemId: result.data.id,
           itemName: result.data.name,
         });
-        console.log(`📡 Socket.IO: Emitted item:archived for item ${result.data.name} (${id})`);
+        console.log(
+          `📡 Socket.IO: Emitted item:archived for item ${result.data.name} (${id})`,
+        );
       }
       res.json(result);
     } catch (error) {
       console.error("Archive item error:", error);
-      res
-        .status(error.message?.includes("not found") ? 404 : 400)
-        .json({
-          success: false,
-          message: error.message || "Failed to archive item",
-        });
+      res.status(error.message?.includes("not found") ? 404 : 400).json({
+        success: false,
+        message: error.message || "Failed to archive item",
+      });
     }
   }
 
@@ -355,12 +366,10 @@ class ItemsController {
       res.json(result);
     } catch (error) {
       console.error("Delete item error:", error);
-      res
-        .status(404)
-        .json({
-          success: false,
-          message: error.message || "Failed to delete item",
-        });
+      res.status(404).json({
+        success: false,
+        message: error.message || "Failed to delete item",
+      });
     }
   }
 
@@ -374,32 +383,34 @@ class ItemsController {
       const { adjustment, reason, size } = req.body;
 
       if (typeof adjustment !== "number") {
-        return res
-          .status(400)
-          .json({
-            success: false,
-            message: "Adjustment value is required and must be a number",
-          });
+        return res.status(400).json({
+          success: false,
+          message: "Adjustment value is required and must be a number",
+        });
       }
 
       const io = req.app.get("io");
-      const result = await ItemsService.adjustStock(id, adjustment, reason, io, size);
+      const result = await ItemsService.adjustStock(
+        id,
+        adjustment,
+        reason,
+        io,
+        size,
+      );
 
       if (result.notificationInfo && result.notificationInfo.notified > 0) {
         console.log(
-          `✅ Notified ${result.notificationInfo.notified} students about restock`
+          `✅ Notified ${result.notificationInfo.notified} students about restock`,
         );
       }
 
       res.json(result);
     } catch (error) {
       console.error("Adjust item stock error:", error);
-      res
-        .status(400)
-        .json({
-          success: false,
-          message: error.message || "Failed to adjust item stock",
-        });
+      res.status(400).json({
+        success: false,
+        message: error.message || "Failed to adjust item stock",
+      });
     }
   }
 
@@ -413,12 +424,10 @@ class ItemsController {
       res.json(result);
     } catch (error) {
       console.error("Get items stats error:", error);
-      res
-        .status(500)
-        .json({
-          success: false,
-          message: error.message || "Failed to fetch items statistics",
-        });
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to fetch items statistics",
+      });
     }
   }
 
@@ -432,12 +441,10 @@ class ItemsController {
       res.json(result);
     } catch (error) {
       console.error("Get low stock items error:", error);
-      res
-        .status(500)
-        .json({
-          success: false,
-          message: error.message || "Failed to fetch low stock items",
-        });
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to fetch low stock items",
+      });
     }
   }
 
@@ -480,7 +487,15 @@ class ItemsController {
       const InventoryService = require("../../services/property_custodian/inventory.service");
       const userId = req.user?.id || null;
       const userEmail = req.user?.email || null;
-      const result = await InventoryService.addStock(id, quantity, size, unitPrice, io, userId, userEmail);
+      const result = await InventoryService.addStock(
+        id,
+        quantity,
+        size,
+        unitPrice,
+        io,
+        userId,
+        userEmail,
+      );
       res.json(result);
     } catch (error) {
       console.error("Add stock error:", error);
@@ -500,9 +515,10 @@ class ItemsController {
     try {
       const { rolloverDate } = req.body;
       const InventoryService = require("../../services/property_custodian/inventory.service");
-      
-      const result = await InventoryService.performFiscalYearRollover(rolloverDate);
-      
+
+      const result =
+        await InventoryService.performFiscalYearRollover(rolloverDate);
+
       res.json({
         success: true,
         ...result,
@@ -546,7 +562,7 @@ class ItemsController {
         legacyReturn,
         io,
         userId,
-        userEmail
+        userEmail,
       );
       res.json(result);
     } catch (error) {
@@ -568,7 +584,10 @@ class ItemsController {
       const { id } = req.params;
       const { size } = req.body || {};
       const InventoryService = require("../../services/property_custodian/inventory.service");
-      const result = await InventoryService.checkReturnReleaseHistory(id, size || null);
+      const result = await InventoryService.checkReturnReleaseHistory(
+        id,
+        size || null,
+      );
       return res.json(result);
     } catch (error) {
       console.error("Check return release history error:", error);
