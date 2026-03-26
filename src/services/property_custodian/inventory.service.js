@@ -1440,7 +1440,7 @@ class InventoryService {
           const details = `Purchase recorded: ${quantity} unit(s) of ${itemName}${itemSize !== "N/A" ? ` (Size: ${itemSize})` : ""}${unitPrice ? ` at ₱${unitPrice} per unit` : ""}`;
           await TransactionService.logTransaction(
             "Inventory",
-            `PURCHASE RECORDED ${itemName}`,
+            "PURCHASE RECORDED",
             userId,
             details,
             {
