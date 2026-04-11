@@ -3,6 +3,228 @@ const NotificationService = require("../notification.service");
 const OrderService = require("./order.service");
 const isProduction = process.env.NODE_ENV === "production";
 
+function parseItemNoteJson(note) {
+  if (!note || typeof note !== "string") return null;
+  try {
+    return JSON.parse(note);
+  } catch {
+    return null;
+  }
+}
+
+/** Legacy notes may omit _type; treat non-empty accessoryEntries as accessory (same order as sizeVariations check). */
+function hasAccessoryEntriesNote(parsed) {
+  return (
+    parsed &&
+    Array.isArray(parsed.accessoryEntries) &&
+    parsed.accessoryEntries.length > 0
+  );
+}
+
+function hasSizeVariationsNote(parsed) {
+  if (!parsed || hasAccessoryEntriesNote(parsed)) return false;
+  return (
+    Array.isArray(parsed.sizeVariations) && parsed.sizeVariations.length > 0
+  );
+}
+
+/** Align with getInventoryReport accessory row: max(sum of purchase layers, item.purchases). */
+function accessoryPurchaseDisplayTotal(entries, rowPurchases) {
+  if (!entries || entries.length === 0) {
+    return Math.max(0, Number(rowPurchases) || 0);
+  }
+  const sumLayers = entries
+    .slice(1)
+    .reduce((sum, e) => sum + (Number(e.purchases) || 0), 0);
+  return Math.max(sumLayers, Number(rowPurchases) || 0);
+}
+
+function variantPurchasesQty(v) {
+  if (!v) return 0;
+  const batches = v.purchase_batches;
+  if (Array.isArray(batches) && batches.length > 0) {
+    return batches.reduce((s, b) => s + (Number(b.qty) || 0), 0);
+  }
+  if (
+    v.purchases !== undefined &&
+    v.purchases !== null &&
+    v.purchases !== ""
+  ) {
+    return Math.max(0, Number(v.purchases) || 0);
+  }
+  const stock = Number(v.stock) || 0;
+  const beg = Number(v.beginning_inventory) ?? 0;
+  return Math.max(0, stock - beg);
+}
+
+function normalizeSizeForPurchaseKey(s) {
+  const raw = (s != null ? String(s) : "N/A").trim() || "N/A";
+  const stripped = raw
+    .toLowerCase()
+    .replace(/\s*\([^)]*\)/g, "")
+    .trim();
+  return stripped || "N/A";
+}
+
+/**
+ * When Items updateItem changes purchase totals without going through addStock,
+ * log PURCHASE RECORDED so getInventoryReport (date range) stays in sync.
+ */
+async function logInventoryPurchaseDeltasFromItemEdit(
+  currentItem,
+  finalData,
+  userId,
+  userEmail,
+) {
+  if (!currentItem || !finalData) return;
+  const TransactionService = require("../../services/transaction.service");
+  const itemName = finalData.name;
+  const itemId = finalData.id;
+  const oldNote = parseItemNoteJson(currentItem.note);
+  const newNote = parseItemNoteJson(finalData.note);
+
+  const accessoryOld = hasAccessoryEntriesNote(oldNote);
+  const accessoryNew = hasAccessoryEntriesNote(newNote);
+  if (accessoryOld || accessoryNew) {
+    const oldEntries = accessoryOld ? oldNote.accessoryEntries : [];
+    const newEntries = accessoryNew ? newNote.accessoryEntries : [];
+    const oldTotal = accessoryPurchaseDisplayTotal(
+      oldEntries,
+      currentItem.purchases,
+    );
+    const newTotal = accessoryPurchaseDisplayTotal(
+      newEntries,
+      finalData.purchases,
+    );
+    const delta = newTotal - oldTotal;
+    if (delta > 0) {
+      let unitPrice = null;
+      for (let i = (newEntries.length || 1) - 1; i >= 1; i--) {
+        const e = newEntries[i];
+        if ((Number(e?.purchases) || 0) > 0 && e?.price != null) {
+          const p = Number(e.price);
+          if (!Number.isNaN(p)) unitPrice = p;
+          break;
+        }
+      }
+      if (unitPrice == null || Number.isNaN(unitPrice)) {
+        unitPrice = Number(finalData.price) || null;
+      }
+      const sizeForMeta =
+        finalData.size != null && String(finalData.size).trim() !== ""
+          ? String(finalData.size).trim()
+          : "N/A";
+      const details = `Purchase recorded: ${delta} unit(s) of ${itemName} (Size: ${sizeForMeta})${unitPrice ? ` at ₱${unitPrice} per unit` : ""}`;
+      await TransactionService.logTransaction(
+        "Inventory",
+        "PURCHASE RECORDED",
+        userId,
+        details,
+        {
+          item_id: itemId,
+          item_name: itemName,
+          size: sizeForMeta,
+          quantity: delta,
+          unit_price: unitPrice,
+          previous_stock: currentItem.stock,
+          new_stock: finalData.stock,
+          previous_purchases: oldTotal,
+          new_purchases: newTotal,
+          source: "items_updateItem",
+        },
+        userEmail,
+      );
+    }
+    return;
+  }
+
+  const sizeOld = hasSizeVariationsNote(oldNote);
+  const sizeNew = hasSizeVariationsNote(newNote);
+  if (sizeOld || sizeNew) {
+    const oldSv = sizeOld ? oldNote.sizeVariations : [];
+    const newSv = sizeNew ? newNote.sizeVariations : [];
+    const oldMap = new Map();
+    for (const v of oldSv) {
+      const k = normalizeSizeForPurchaseKey(v.size);
+      oldMap.set(k, variantPurchasesQty(v));
+    }
+    for (const v of newSv) {
+      const k = normalizeSizeForPurchaseKey(v.size);
+      const newQty = variantPurchasesQty(v);
+      const oldQty = oldMap.get(k) || 0;
+      const delta = newQty - oldQty;
+      if (delta <= 0) continue;
+      const variantSize = v.size || "N/A";
+      let unitPrice = null;
+      const batches = v.purchase_batches;
+      if (Array.isArray(batches) && batches.length > 0) {
+        const last = batches[batches.length - 1];
+        if (last?.unit_price != null && !Number.isNaN(Number(last.unit_price))) {
+          unitPrice = Number(last.unit_price);
+        }
+      }
+      if (unitPrice == null || Number.isNaN(unitPrice)) {
+        if (v.purchase_unit_price != null && !Number.isNaN(Number(v.purchase_unit_price))) {
+          unitPrice = Number(v.purchase_unit_price);
+        }
+      }
+      if (unitPrice == null || Number.isNaN(unitPrice)) {
+        unitPrice = Number(v.price) || Number(finalData.price) || null;
+      }
+      const details = `Purchase recorded: ${delta} unit(s) of ${itemName} (Size: ${variantSize})${unitPrice ? ` at ₱${unitPrice} per unit` : ""}`;
+      await TransactionService.logTransaction(
+        "Inventory",
+        "PURCHASE RECORDED",
+        userId,
+        details,
+        {
+          item_id: itemId,
+          item_name: itemName,
+          size: variantSize,
+          quantity: delta,
+          unit_price: unitPrice,
+          previous_purchases: oldQty,
+          new_purchases: newQty,
+          source: "items_updateItem",
+        },
+        userEmail,
+      );
+    }
+    return;
+  }
+
+  const oldPurch = Number(currentItem.purchases) || 0;
+  const newPurch = Number(finalData.purchases) || 0;
+  const delta = newPurch - oldPurch;
+  if (delta <= 0) return;
+  const sizeForMeta =
+    finalData.size != null && String(finalData.size).trim() !== ""
+      ? String(finalData.size).trim()
+      : "N/A";
+  let unitPrice = Number(finalData.price) || null;
+  if (Number.isNaN(unitPrice)) unitPrice = null;
+  const details = `Purchase recorded: ${delta} unit(s) of ${itemName}${sizeForMeta !== "N/A" ? ` (Size: ${sizeForMeta})` : ""}${unitPrice ? ` at ₱${unitPrice} per unit` : ""}`;
+  await TransactionService.logTransaction(
+    "Inventory",
+    "PURCHASE RECORDED",
+    userId,
+    details,
+    {
+      item_id: itemId,
+      item_name: itemName,
+      size: sizeForMeta,
+      quantity: delta,
+      unit_price: unitPrice,
+      previous_stock: currentItem.stock,
+      new_stock: finalData.stock,
+      previous_purchases: oldPurch,
+      new_purchases: newPurch,
+      source: "items_updateItem",
+    },
+    userEmail,
+  );
+}
+
 /** Item name pattern (ilike) for items applicable to ALL education levels (e.g. Logo Patch, New Logo Patch). */
 const ALL_LEVEL_ITEM_NAME_PATTERN = "%logo patch%";
 
@@ -50,11 +272,15 @@ class ItemsService {
    * - If the curated table doesn't exist yet, returns an empty list (and a message)
    *   so the frontend can safely fall back to static lists.
    */
-  async getNameSuggestions({ educationLevel = null, search = null, limit } = {}) {
+  async getNameSuggestions({
+    educationLevel = null,
+    search = null,
+    limit,
+  } = {}) {
     try {
       const safeLimit = Math.max(
         1,
-        Math.min(Number.isFinite(limit) ? Number(limit) : 100, 500)
+        Math.min(Number.isFinite(limit) ? Number(limit) : 100, 500),
       );
 
       const buildQuery = () => {
@@ -171,29 +397,35 @@ class ItemsService {
         // Note: If is_approved column doesn't exist (migration not run), error will be caught below
         // and query will be retried without approval filter for backward compatibility
         query = query.eq("is_approved", true);
-        
+
         // Check if this is an old student - if so, show ALL items for their education level
-        const isOldStudent = filters.studentType && String(filters.studentType).toLowerCase() === "old";
-        
+        const isOldStudent =
+          filters.studentType &&
+          String(filters.studentType).toLowerCase() === "old";
+
         if (isOldStudent) {
           // For old students: Show ALL items for their education level (not just eligible ones)
           // They can see everything but only order allowed items (logo patch, etc.)
           // Map user education level to items table format
           const educationLevelMap = {
-            "Preschool": "Kindergarten",
-            "Kindergarten": "Kindergarten",
-            "Elementary": "Elementary",
+            Preschool: "Kindergarten",
+            Kindergarten: "Kindergarten",
+            Elementary: "Elementary",
             "High School": "Junior High School",
             "Senior High School": "Senior High School",
-            "College": "College",
-            "Vocational": "College",
+            College: "College",
+            Vocational: "College",
           };
-          
-          const itemEducationLevel = educationLevelMap[filters.userEducationLevel] || filters.userEducationLevel;
-          
+
+          const itemEducationLevel =
+            educationLevelMap[filters.userEducationLevel] ||
+            filters.userEducationLevel;
+
           // Get all items for this education level OR "All Education Levels" OR "General"
           // Use .or() with proper format for Supabase
-          query = query.or(`education_level.eq.${itemEducationLevel},education_level.eq.All Education Levels,education_level.eq.General`);
+          query = query.or(
+            `education_level.eq.${itemEducationLevel},education_level.eq.All Education Levels,education_level.eq.General`,
+          );
         } else {
           // For new students: Filter by eligibility table (existing logic)
           // Map user education level to eligibility table format
@@ -204,35 +436,49 @@ class ItemsService {
           // Users table: "Senior High School" -> Eligibility: "Senior High School" (SHS checkbox)
           // Users table: "College" -> Eligibility: "College"
           const educationLevelMap = {
-            "Preschool": "Kindergarten",
-            "Kindergarten": "Kindergarten",
-            "Elementary": "Elementary",
+            Preschool: "Kindergarten",
+            Kindergarten: "Kindergarten",
+            Elementary: "Elementary",
             "High School": "Junior High School",
             "Senior High School": "Senior High School",
-            "College": "College",
+            College: "College",
           };
-          
-          const eligibilityLevel = educationLevelMap[filters.userEducationLevel] || filters.userEducationLevel;
-          
+
+          const eligibilityLevel =
+            educationLevelMap[filters.userEducationLevel] ||
+            filters.userEducationLevel;
+
           // Get all item IDs that are eligible for this education level
-          const { data: eligibleItems, error: eligibilityError } = await supabase
-            .from("item_eligibility")
-            .select("item_id")
-            .eq("education_level", eligibilityLevel);
-          
+          const { data: eligibleItems, error: eligibilityError } =
+            await supabase
+              .from("item_eligibility")
+              .select("item_id")
+              .eq("education_level", eligibilityLevel);
+
           // Also get items with "All Education Levels" (e.g. Logo Patch, ID Lace) so every student can order
           const { data: allEducationLevelsItems } = await supabase
             .from("item_eligibility")
             .select("item_id")
             .eq("education_level", "All Education Levels");
-          const allEducationLevelsIds = (allEducationLevelsItems || []).map((e) => e.item_id);
-          
+          const allEducationLevelsIds = (allEducationLevelsItems || []).map(
+            (e) => e.item_id,
+          );
+
           if (eligibilityError) {
             // If table doesn't exist, log warning and show all items (backward compatibility)
-            console.warn("Eligibility filtering error (table may not exist):", eligibilityError.message);
-          } else if ((eligibleItems && eligibleItems.length > 0) || allEducationLevelsIds.length > 0) {
+            console.warn(
+              "Eligibility filtering error (table may not exist):",
+              eligibilityError.message,
+            );
+          } else if (
+            (eligibleItems && eligibleItems.length > 0) ||
+            allEducationLevelsIds.length > 0
+          ) {
             // Filter to only show eligible items (user's level + All Education Levels)
-            let eligibleItemIds = [...(eligibleItems || []).map((e) => e.item_id), ...allEducationLevelsIds];
+            let eligibleItemIds = [
+              ...(eligibleItems || []).map((e) => e.item_id),
+              ...allEducationLevelsIds,
+            ];
             // Include items applicable to ALL education levels by name (e.g. Logo Patch, New Logo Patch)
             const { data: allLevelItems } = await supabase
               .from("items")
@@ -242,30 +488,35 @@ class ItemsService {
               .or("is_archived.eq.false,is_archived.is.null")
               .ilike("name", ALL_LEVEL_ITEM_NAME_PATTERN);
             const allLevelIds = (allLevelItems || []).map((i) => i.id);
-            eligibleItemIds = [...new Set([...eligibleItemIds, ...allLevelIds])];
+            eligibleItemIds = [
+              ...new Set([...eligibleItemIds, ...allLevelIds]),
+            ];
             query = query.in("id", eligibleItemIds);
           } else {
             // No eligible items found - check if there are items without eligibility records
             // (backward compatibility: items without eligibility records are shown to all)
-            const { data: allEligibilityRecords, error: allEligibilityError } = await supabase
-              .from("item_eligibility")
-              .select("item_id");
-            
+            const { data: allEligibilityRecords, error: allEligibilityError } =
+              await supabase.from("item_eligibility").select("item_id");
+
             if (!allEligibilityError && allEligibilityRecords) {
-              const itemsWithEligibilityIds = new Set(allEligibilityRecords.map(e => e.item_id));
-              
+              const itemsWithEligibilityIds = new Set(
+                allEligibilityRecords.map((e) => e.item_id),
+              );
+
               // Get all active, non-archived item IDs
               const { data: allItems, error: allItemsError } = await supabase
                 .from("items")
                 .select("id")
                 .eq("is_active", true)
                 .or("is_archived.eq.false,is_archived.is.null");
-              
+
               if (!allItemsError && allItems) {
-                const allItemIds = allItems.map(i => i.id);
+                const allItemIds = allItems.map((i) => i.id);
                 // Items without eligibility records should be shown to all
-                const itemsWithoutEligibility = allItemIds.filter(id => !itemsWithEligibilityIds.has(id));
-                
+                const itemsWithoutEligibility = allItemIds.filter(
+                  (id) => !itemsWithEligibilityIds.has(id),
+                );
+
                 if (itemsWithoutEligibility.length > 0) {
                   query = query.in("id", itemsWithoutEligibility);
                 } else {
@@ -274,7 +525,9 @@ class ItemsService {
                     .from("item_eligibility")
                     .select("item_id")
                     .eq("education_level", "All Education Levels");
-                  const allEduLevelIds = (allEduLevelRows || []).map((e) => e.item_id);
+                  const allEduLevelIds = (allEduLevelRows || []).map(
+                    (e) => e.item_id,
+                  );
                   const { data: allLevelItems } = await supabase
                     .from("items")
                     .select("id")
@@ -282,11 +535,19 @@ class ItemsService {
                     .eq("is_approved", true)
                     .or("is_archived.eq.false,is_archived.is.null")
                     .ilike("name", ALL_LEVEL_ITEM_NAME_PATTERN);
-                  const allLevelIds = [...new Set([...allEduLevelIds, ...(allLevelItems || []).map((i) => i.id)])];
+                  const allLevelIds = [
+                    ...new Set([
+                      ...allEduLevelIds,
+                      ...(allLevelItems || []).map((i) => i.id),
+                    ]),
+                  ];
                   if (allLevelIds.length > 0) {
                     query = query.in("id", allLevelIds);
                   } else {
-                    query = query.eq("id", "00000000-0000-0000-0000-000000000000");
+                    query = query.eq(
+                      "id",
+                      "00000000-0000-0000-0000-000000000000",
+                    );
                   }
                 }
               }
@@ -297,30 +558,33 @@ class ItemsService {
         // Direct education level filter (for admin/property custodian)
         query = query.eq("education_level", filters.educationLevel);
       }
-      
+
       if (filters.category) query = query.eq("category", filters.category);
       if (filters.itemType) query = query.eq("item_type", filters.itemType);
       if (filters.status) query = query.eq("status", filters.status);
       if (filters.search) {
         query = query.or(
-          `name.ilike.%${filters.search}%,category.ilike.%${filters.search}%,description.ilike.%${filters.search}%`
+          `name.ilike.%${filters.search}%,category.ilike.%${filters.search}%,description.ilike.%${filters.search}%`,
         );
       }
 
       // Date range filter: [startDate, endDate] (inclusive). Use received bounds as-is so
       // client's local-day boundaries (sent as UTC via toISOString) are preserved; no setUTCHours.
       // For archived/deleted, use updated_at (when it was archived/updated); for active, use created_at.
-      const dateColumn = itemStatus === "archived" || itemStatus === "deleted" ? "updated_at" : "created_at";
+      const dateColumn =
+        itemStatus === "archived" || itemStatus === "deleted"
+          ? "updated_at"
+          : "created_at";
       if (filters.startDate || filters.endDate) {
         const start = filters.startDate
-          ? (typeof filters.startDate === "string"
-              ? new Date(filters.startDate)
-              : filters.startDate)
+          ? typeof filters.startDate === "string"
+            ? new Date(filters.startDate)
+            : filters.startDate
           : null;
         const end = filters.endDate
-          ? (typeof filters.endDate === "string"
-              ? new Date(filters.endDate)
-              : filters.endDate)
+          ? typeof filters.endDate === "string"
+            ? new Date(filters.endDate)
+            : filters.endDate
           : null;
         if (start && !isNaN(start.getTime())) {
           query = query.gte(dateColumn, start.toISOString());
@@ -336,88 +600,113 @@ class ItemsService {
         .order("created_at", { ascending: false });
 
       let { data, error, count } = await query;
-      
+
       // If error is due to missing is_approved column, retry without approval filter
-      if (error && error.message && (
-        error.message.includes("is_approved") || 
-        error.message.includes("column") ||
-        error.code === "42703" // PostgreSQL undefined column error code
-      )) {
-        console.warn("Approval column may not exist, retrying without approval filter:", error.message);
+      if (
+        error &&
+        error.message &&
+        (error.message.includes("is_approved") ||
+          error.message.includes("column") ||
+          error.code === "42703") // PostgreSQL undefined column error code
+      ) {
+        console.warn(
+          "Approval column may not exist, retrying without approval filter:",
+          error.message,
+        );
         // Rebuild query without approval filter for backward compatibility
         let fallbackQuery = supabase
           .from("items")
           .select("*", { count: "exact" })
           .eq("is_active", true)
           .or("is_archived.eq.false,is_archived.is.null");
-        
+
         // Reapply all filters except approval
         if (filters.userEducationLevel) {
           // Reapply eligibility filter (without approval)
           const educationLevelMap = {
-            "Preschool": "Kindergarten",
-            "Kindergarten": "Kindergarten",
-            "Elementary": "Elementary",
+            Preschool: "Kindergarten",
+            Kindergarten: "Kindergarten",
+            Elementary: "Elementary",
             "High School": "Junior High School",
             "Senior High School": "Senior High School",
-            "College": "College",
+            College: "College",
           };
-          
-          const eligibilityLevel = educationLevelMap[filters.userEducationLevel] || filters.userEducationLevel;
-          
-          const { data: eligibleItems, error: eligibilityError } = await supabase
-            .from("item_eligibility")
-            .select("item_id")
-            .eq("education_level", eligibilityLevel);
-          
+
+          const eligibilityLevel =
+            educationLevelMap[filters.userEducationLevel] ||
+            filters.userEducationLevel;
+
+          const { data: eligibleItems, error: eligibilityError } =
+            await supabase
+              .from("item_eligibility")
+              .select("item_id")
+              .eq("education_level", eligibilityLevel);
+
           const { data: allEducationLevelsItems } = await supabase
             .from("item_eligibility")
             .select("item_id")
             .eq("education_level", "All Education Levels");
-          const allEducationLevelsIds = (allEducationLevelsItems || []).map((e) => e.item_id);
-          
-          if (!eligibilityError && ((eligibleItems && eligibleItems.length > 0) || allEducationLevelsIds.length > 0)) {
-            let eligibleItemIds = [...(eligibleItems || []).map((e) => e.item_id), ...allEducationLevelsIds];
-          const { data: allLevelItems } = await supabase
-            .from("items")
-            .select("id")
-            .eq("is_active", true)
-            .or("is_archived.eq.false,is_archived.is.null")
-            .ilike("name", ALL_LEVEL_ITEM_NAME_PATTERN);
+          const allEducationLevelsIds = (allEducationLevelsItems || []).map(
+            (e) => e.item_id,
+          );
+
+          if (
+            !eligibilityError &&
+            ((eligibleItems && eligibleItems.length > 0) ||
+              allEducationLevelsIds.length > 0)
+          ) {
+            let eligibleItemIds = [
+              ...(eligibleItems || []).map((e) => e.item_id),
+              ...allEducationLevelsIds,
+            ];
+            const { data: allLevelItems } = await supabase
+              .from("items")
+              .select("id")
+              .eq("is_active", true)
+              .or("is_archived.eq.false,is_archived.is.null")
+              .ilike("name", ALL_LEVEL_ITEM_NAME_PATTERN);
             const allLevelIds = (allLevelItems || []).map((i) => i.id);
-            eligibleItemIds = [...new Set([...eligibleItemIds, ...allLevelIds])];
+            eligibleItemIds = [
+              ...new Set([...eligibleItemIds, ...allLevelIds]),
+            ];
             fallbackQuery = fallbackQuery.in("id", eligibleItemIds);
           }
         } else if (filters.educationLevel) {
-          fallbackQuery = fallbackQuery.eq("education_level", filters.educationLevel);
-        }
-        
-        if (filters.category) fallbackQuery = fallbackQuery.eq("category", filters.category);
-        if (filters.itemType) fallbackQuery = fallbackQuery.eq("item_type", filters.itemType);
-        if (filters.status) fallbackQuery = fallbackQuery.eq("status", filters.status);
-        if (filters.search) {
-          fallbackQuery = fallbackQuery.or(
-            `name.ilike.%${filters.search}%,category.ilike.%${filters.search}%,description.ilike.%${filters.search}%`
+          fallbackQuery = fallbackQuery.eq(
+            "education_level",
+            filters.educationLevel,
           );
         }
-        
+
+        if (filters.category)
+          fallbackQuery = fallbackQuery.eq("category", filters.category);
+        if (filters.itemType)
+          fallbackQuery = fallbackQuery.eq("item_type", filters.itemType);
+        if (filters.status)
+          fallbackQuery = fallbackQuery.eq("status", filters.status);
+        if (filters.search) {
+          fallbackQuery = fallbackQuery.or(
+            `name.ilike.%${filters.search}%,category.ilike.%${filters.search}%,description.ilike.%${filters.search}%`,
+          );
+        }
+
         fallbackQuery = fallbackQuery
           .range(from, from + limit - 1)
           .order("created_at", { ascending: false });
-        
+
         const fallbackResult = await fallbackQuery;
         data = fallbackResult.data;
         error = fallbackResult.error;
         count = fallbackResult.count;
       }
-      
+
       if (error) throw error;
 
       // Optional student grade-level restriction (currently used for accessories).
       // If item note contains grade_level/gradeLevel, only matching students can see it.
       if (filters.userEducationLevel && filters.userGradeLevel) {
         data = (data || []).filter((item) =>
-          this.itemMatchesStudentGradeLevel(item, filters.userGradeLevel)
+          this.itemMatchesStudentGradeLevel(item, filters.userGradeLevel),
         );
         count = data.length;
       }
@@ -479,12 +768,22 @@ class ItemsService {
   async createItem(itemData, io = null, userId = null, userEmail = null) {
     try {
       // Normalize gender (accept snake_case or camelCase from client)
-      itemData.for_gender = itemData.for_gender || itemData.forGender || "Unisex";
+      itemData.for_gender =
+        itemData.for_gender || itemData.forGender || "Unisex";
       // Add item only requires: education level, item name, item type, gender; variants optional (in note/size)
-      const requiredFields = ["name", "education_level", "item_type", "for_gender"];
+      const requiredFields = [
+        "name",
+        "education_level",
+        "item_type",
+        "for_gender",
+      ];
       for (const field of requiredFields) {
         const val = itemData[field];
-        if (val === undefined || val === null || (typeof val === "string" && val.trim() === ""))
+        if (
+          val === undefined ||
+          val === null ||
+          (typeof val === "string" && val.trim() === "")
+        )
           throw new Error(`Missing required field: ${field}`);
       }
       // Category is always derived from education level / name (no Grade Level Category in UI)
@@ -493,8 +792,10 @@ class ItemsService {
           ? "All Levels"
           : (itemData.name || "All Levels").trim() || "All Levels";
       // Default stock and price if not provided
-      if (itemData.stock === undefined || itemData.stock === null) itemData.stock = 0;
-      if (itemData.price === undefined || itemData.price === null) itemData.price = 0;
+      if (itemData.stock === undefined || itemData.stock === null)
+        itemData.stock = 0;
+      if (itemData.price === undefined || itemData.price === null)
+        itemData.price = 0;
 
       if (
         itemData.image &&
@@ -502,7 +803,7 @@ class ItemsService {
         itemData.image.startsWith("data:")
       ) {
         console.warn(
-          "Received base64 image. Expected a URL. Using default image."
+          "Received base64 image. Expected a URL. Using default image.",
         );
         itemData.image = "/assets/image/card1.png";
       }
@@ -513,7 +814,7 @@ class ItemsService {
       const itemSize = itemData.size || "N/A";
 
       console.log(
-        `[createItem] Checking for duplicates: name="${itemData.name}", education_level="${itemData.education_level}", size="${itemSize}"`
+        `[createItem] Checking for duplicates: name="${itemData.name}", education_level="${itemData.education_level}", size="${itemSize}"`,
       );
 
       // Optimized: Only fetch items matching name and education_level (case-insensitive)
@@ -530,7 +831,7 @@ class ItemsService {
       if (queryError) {
         console.error(
           "[createItem] Error querying existing items:",
-          queryError
+          queryError,
         );
         // Don't throw - continue with creation if query fails
         // This prevents blocking item creation due to query issues
@@ -558,7 +859,7 @@ class ItemsService {
             potentialItems?.length || 0
           } potential items, ${
             finalExistingItems.length
-          } with exact matching name+education_level`
+          } with exact matching name+education_level`,
         );
       }
 
@@ -574,7 +875,7 @@ class ItemsService {
             purchases: item.purchases || 0,
             beginning_inventory: item.beginning_inventory || 0,
             created_at: item.created_at,
-          }))
+          })),
         );
       }
 
@@ -585,21 +886,21 @@ class ItemsService {
       // Normalize sizes before comparison
       const normalizedItemSize = this._normalizeSize(itemSize);
       console.log(
-        `[createItem] Normalized item size: "${normalizedItemSize}" (original: "${itemSize}")`
+        `[createItem] Normalized item size: "${normalizedItemSize}" (original: "${itemSize}")`,
       );
 
       if (finalExistingItems && finalExistingItems.length > 0) {
         // First, check for exact size match in size column (using normalized comparison)
         // If item exists with same size, it's a duplicate - add to purchases
         console.log(
-          `[createItem] Checking ${finalExistingItems.length} existing items for size match...`
+          `[createItem] Checking ${finalExistingItems.length} existing items for size match...`,
         );
         existingItem = finalExistingItems.find((item) => {
           const itemNormalizedSize = this._normalizeSize(item.size);
           const matches = itemNormalizedSize === normalizedItemSize;
           if (matches) {
             console.log(
-              `[createItem] ✅ Size match found! Item ID: ${item.id}, normalized sizes: "${itemNormalizedSize}" === "${normalizedItemSize}"`
+              `[createItem] ✅ Size match found! Item ID: ${item.id}, normalized sizes: "${itemNormalizedSize}" === "${normalizedItemSize}"`,
             );
           }
           return matches;
@@ -610,11 +911,11 @@ class ItemsService {
           isExistingSize = true;
           const existingNormalizedSize = this._normalizeSize(existingItem.size);
           console.log(
-            `[createItem] ✅ DUPLICATE DETECTED: Found existing item ID: ${existingItem.id}, name: "${existingItem.name}", size: "${existingItem.size}" (normalized: "${existingNormalizedSize}"). Will add stock to purchases.`
+            `[createItem] ✅ DUPLICATE DETECTED: Found existing item ID: ${existingItem.id}, name: "${existingItem.name}", size: "${existingItem.size}" (normalized: "${existingNormalizedSize}"). Will add stock to purchases.`,
           );
         } else {
           console.log(
-            `[createItem] No exact size match found. Checking JSON variations and comma-separated sizes...`
+            `[createItem] No exact size match found. Checking JSON variations and comma-separated sizes...`,
           );
           // Check for JSON variations if no exact match
           if (itemData.note) {
@@ -638,19 +939,19 @@ class ItemsService {
                         // Check if any new variant matches any existing variant
                         for (const newVariant of newParsedNote.sizeVariations) {
                           const newVariantSize = this._normalizeSize(
-                            newVariant.size
+                            newVariant.size,
                           );
                           const matchingVariant =
                             existingParsed.sizeVariations.find(
                               (existingVariant) => {
                                 const existingVariantSize = this._normalizeSize(
-                                  existingVariant.size
+                                  existingVariant.size,
                                 );
                                 // Match exact only - don't use includes() as it causes false matches
                                 // (e.g., "Small" would incorrectly match "XSmall")
                                 // Only match if normalized sizes are exactly equal
                                 return newVariantSize === existingVariantSize;
-                              }
+                              },
                             );
 
                           if (matchingVariant) {
@@ -659,7 +960,7 @@ class ItemsService {
                             matchingSize = newVariant.size;
                             isExistingSize = true;
                             console.log(
-                              `[createItem] ✅ DUPLICATE DETECTED (JSON variant): Found existing item ID: ${existing.id}, name: "${itemData.name}" with JSON variant size "${newVariant.size}". Will add stock to purchases.`
+                              `[createItem] ✅ DUPLICATE DETECTED (JSON variant): Found existing item ID: ${existing.id}, name: "${itemData.name}" with JSON variant size "${newVariant.size}". Will add stock to purchases.`,
                             );
                             break;
                           }
@@ -688,16 +989,12 @@ class ItemsService {
                 const targetSizeNormalized = this._normalizeSize(itemSize);
                 // Only match exact - don't use includes() as it causes false matches
                 // (e.g., "Small" would incorrectly match "XSmall")
-                if (
-                  normalizedSizes.some(
-                    (s) => s === targetSizeNormalized
-                  )
-                ) {
+                if (normalizedSizes.some((s) => s === targetSizeNormalized)) {
                   // Item+size already exists in comma-separated sizes - add to purchases
                   existingItem = existing;
                   isExistingSize = true;
                   console.log(
-                    `[createItem] ✅ DUPLICATE DETECTED (comma-separated): Found existing item ID: ${existing.id}, name: "${existing.name}", with comma-separated size containing "${itemSize}". Will add stock to purchases.`
+                    `[createItem] ✅ DUPLICATE DETECTED (comma-separated): Found existing item ID: ${existing.id}, name: "${existing.name}", with comma-separated size containing "${itemSize}". Will add stock to purchases.`,
                   );
                   break;
                 }
@@ -712,13 +1009,13 @@ class ItemsService {
       console.log(
         `[createItem] Duplicate check result: isExistingSize=${isExistingSize}, existingItem=${
           existingItem ? existingItem.id : "null"
-        }`
+        }`,
       );
 
       // Safety check: if isExistingSize is true but existingItem is null, log error
       if (isExistingSize && !existingItem) {
         console.error(
-          `[createItem] ⚠️ ERROR: isExistingSize=true but existingItem is null! This should not happen.`
+          `[createItem] ⚠️ ERROR: isExistingSize=true but existingItem is null! This should not happen.`,
         );
         console.error(`[createItem] Debug info:`, {
           itemSize,
@@ -736,7 +1033,7 @@ class ItemsService {
         // but this provides an extra layer of protection
         if (existingItem.is_archived === true) {
           console.warn(
-            `[createItem] ⚠️ WARNING: Found archived item in duplicate check (should not happen). Creating new item instead.`
+            `[createItem] ⚠️ WARNING: Found archived item in duplicate check (should not happen). Creating new item instead.`,
           );
           // Fall through to create new item instead of updating archived one
           isExistingSize = false;
@@ -751,7 +1048,7 @@ class ItemsService {
         console.log(
           `[createItem] Item "${itemData.name}" with size "${
             matchingSize || itemSize
-          }" already exists. Adding ${stockToAdd} to purchases of original entry.`
+          }" already exists. Adding ${stockToAdd} to purchases of original entry.`,
         );
         console.log(
           `[createItem] Existing item details: ID=${
@@ -760,7 +1057,7 @@ class ItemsService {
             existingItem.purchases || 0
           }, current_beginning_inventory=${
             existingItem.beginning_inventory || 0
-          }`
+          }`,
         );
 
         // Use addStock method to add to purchases of the ORIGINAL entry
@@ -770,7 +1067,7 @@ class ItemsService {
             existingItem.id
           }, quantity=${stockToAdd}, size="${
             matchingSize || itemSize
-          }", price=${itemData.price}`
+          }", price=${itemData.price}`,
         );
 
         const result = await InventoryService.addStock(
@@ -780,22 +1077,22 @@ class ItemsService {
           itemData.price,
           io, // Pass socket.io instance for real-time updates
           userId, // Pass userId for transaction logging
-          userEmail // Pass userEmail for transaction logging
+          userEmail, // Pass userEmail for transaction logging
         );
 
         console.log(
-          `[createItem] ✅ After addStock: new_stock=${result.data?.stock}, new_purchases=${result.data?.purchases}, beginning_inventory=${result.data?.beginning_inventory}`
+          `[createItem] ✅ After addStock: new_stock=${result.data?.stock}, new_purchases=${result.data?.purchases}, beginning_inventory=${result.data?.beginning_inventory}`,
         );
 
         // Verify the response includes purchases
         if (!result.data || result.data.purchases === undefined) {
           console.error(
             `[createItem] ⚠️ WARNING: addStock response does not include purchases! Response:`,
-            JSON.stringify(result, null, 2)
+            JSON.stringify(result, null, 2),
           );
         } else {
           console.log(
-            `[createItem] ✅ Verified: purchases=${result.data.purchases} in response`
+            `[createItem] ✅ Verified: purchases=${result.data.purchases} in response`,
           );
         }
 
@@ -813,7 +1110,7 @@ class ItemsService {
           responseData.purchases === null
         ) {
           console.error(
-            `[createItem] ⚠️ WARNING: Response data missing purchases! Using calculated value.`
+            `[createItem] ⚠️ WARNING: Response data missing purchases! Using calculated value.`,
           );
           responseData.purchases = (existingItem.purchases || 0) + stockToAdd;
         }
@@ -834,31 +1131,37 @@ class ItemsService {
             .from("items")
             .select("is_approved")
             .limit(0);
-          
+
           // If column exists, try to update approval
-          if (!testError || testError.code !== '42703') {
+          if (!testError || testError.code !== "42703") {
             if (!responseData.is_approved) {
               const updateData = {
                 is_approved: true,
               };
-              
+
               // Only add approved_at if column exists
               const { error: approvedAtTestError } = await supabase
                 .from("items")
                 .select("approved_at")
                 .limit(0);
-              
-              if (!approvedAtTestError || approvedAtTestError.code !== '42703') {
+
+              if (
+                !approvedAtTestError ||
+                approvedAtTestError.code !== "42703"
+              ) {
                 updateData.approved_at = new Date().toISOString();
               }
-              
+
               const { error: approveError } = await supabase
                 .from("items")
                 .update(updateData)
                 .eq("id", existingItem.id);
-              
+
               if (approveError) {
-                console.warn("[createItem] Failed to auto-approve existing item:", approveError);
+                console.warn(
+                  "[createItem] Failed to auto-approve existing item:",
+                  approveError,
+                );
               } else {
                 responseData.is_approved = true;
                 if (updateData.approved_at) {
@@ -868,33 +1171,42 @@ class ItemsService {
             }
           }
         } catch (err) {
-          console.warn("[createItem] Could not update approval status:", err.message);
+          console.warn(
+            "[createItem] Could not update approval status:",
+            err.message,
+          );
         }
 
         // Ensure eligibility entry exists for existing items
         // This handles cases where items were created before eligibility system was implemented
         try {
           const educationLevelMap = {
-            "Kindergarten": "Kindergarten",
-            "Elementary": "Elementary",
+            Kindergarten: "Kindergarten",
+            Elementary: "Elementary",
             "Junior High School": "Junior High School",
             "Senior High School": "Senior High School",
-            "College": "College",
+            College: "College",
           };
 
-          const eligibilityLevel = educationLevelMap[existingItem.education_level] || existingItem.education_level;
+          const eligibilityLevel =
+            educationLevelMap[existingItem.education_level] ||
+            existingItem.education_level;
 
           // Check if eligibility entry already exists
-          const { data: existingEligibility, error: checkError } = await supabase
-            .from("item_eligibility")
-            .select("id")
-            .eq("item_id", existingItem.id)
-            .eq("education_level", eligibilityLevel)
-            .maybeSingle();
+          const { data: existingEligibility, error: checkError } =
+            await supabase
+              .from("item_eligibility")
+              .select("id")
+              .eq("item_id", existingItem.id)
+              .eq("education_level", eligibilityLevel)
+              .maybeSingle();
 
-          if (checkError && checkError.code !== '42P01') {
-            console.warn(`[createItem] Error checking eligibility for item ${existingItem.id}:`, checkError.message);
-          } else if (!existingEligibility && checkError?.code !== '42P01') {
+          if (checkError && checkError.code !== "42P01") {
+            console.warn(
+              `[createItem] Error checking eligibility for item ${existingItem.id}:`,
+              checkError.message,
+            );
+          } else if (!existingEligibility && checkError?.code !== "42P01") {
             // Eligibility entry doesn't exist, create it
             const { error: eligibilityError } = await supabase
               .from("item_eligibility")
@@ -904,13 +1216,21 @@ class ItemsService {
               });
 
             if (eligibilityError) {
-              console.warn(`[createItem] Failed to create eligibility entry for existing item ${existingItem.id}:`, eligibilityError.message);
+              console.warn(
+                `[createItem] Failed to create eligibility entry for existing item ${existingItem.id}:`,
+                eligibilityError.message,
+              );
             } else {
-              console.log(`[createItem] ✅ Created missing eligibility entry for existing item "${existingItem.name}" (${eligibilityLevel})`);
+              console.log(
+                `[createItem] ✅ Created missing eligibility entry for existing item "${existingItem.name}" (${eligibilityLevel})`,
+              );
             }
           }
         } catch (eligibilityErr) {
-          console.warn("[createItem] Error ensuring eligibility for existing item:", eligibilityErr.message);
+          console.warn(
+            "[createItem] Error ensuring eligibility for existing item:",
+            eligibilityErr.message,
+          );
         }
 
         return {
@@ -929,55 +1249,61 @@ class ItemsService {
           itemData.name
         }" with size "${itemSize}". Setting beginning_inventory = ${
           itemData.stock || 0
-        }.`
+        }.`,
       );
 
       // Only for truly NEW item+size combinations: Set beginning inventory
       // Beginning inventory is set ONLY on first creation and never changes
       // FIFO: unit price of beginning inventory = price at creation; purchases use price when added later
       // New items are NOT approved by default - require system admin approval
-      let beginningUnitPrice = itemData.beginning_inventory_unit_price != null
-        ? Number(itemData.beginning_inventory_unit_price)
-        : (Number(itemData.price) || 0);
-      
+      let beginningUnitPrice =
+        itemData.beginning_inventory_unit_price != null
+          ? Number(itemData.beginning_inventory_unit_price)
+          : Number(itemData.price) || 0;
+
       // Process accessoryEntries if present (for accessories with multiple entries)
       let totalBeginningInventory = itemData.stock || 0;
       let totalPurchases = 0;
-      
+
       if (itemData.note && typeof itemData.note === "string") {
         try {
           const parsedNote = JSON.parse(itemData.note);
-          if (parsedNote?._type === "accessoryEntries" && Array.isArray(parsedNote.accessoryEntries)) {
+          if (
+            parsedNote?._type === "accessoryEntries" &&
+            Array.isArray(parsedNote.accessoryEntries)
+          ) {
             // Calculate totals from accessory entries
             // Entry 1 (index 0) is beginning_inventory, Entry 2+ are purchases
             totalBeginningInventory = 0;
             totalPurchases = 0;
-            
+
             parsedNote.accessoryEntries.forEach((entry, index) => {
               const entryBeginningInv = Number(entry.beginning_inventory) || 0;
               const entryPurchases = Number(entry.purchases) || 0;
-              
+
               totalBeginningInventory += entryBeginningInv;
               totalPurchases += entryPurchases;
             });
-            
+
             // FIFO: use first entry's price as beginning-inventory unit price
             if (parsedNote.accessoryEntries.length > 0) {
-              const firstEntryPrice = Number(parsedNote.accessoryEntries[0].price);
+              const firstEntryPrice = Number(
+                parsedNote.accessoryEntries[0].price,
+              );
               if (firstEntryPrice != null && !isNaN(firstEntryPrice)) {
                 beginningUnitPrice = firstEntryPrice;
               }
             }
-            
+
             console.log(
-              `[createItem] Processed accessoryEntries: totalBeginningInventory=${totalBeginningInventory}, totalPurchases=${totalPurchases}, beginningUnitPrice=${beginningUnitPrice}`
+              `[createItem] Processed accessoryEntries: totalBeginningInventory=${totalBeginningInventory}, totalPurchases=${totalPurchases}, beginningUnitPrice=${beginningUnitPrice}`,
             );
           }
         } catch (_) {
           // Not JSON or parse error, use defaults
         }
       }
-      
+
       const itemToInsert = {
         ...itemData,
         beginning_inventory: totalBeginningInventory,
@@ -991,25 +1317,34 @@ class ItemsService {
       if (itemToInsert.note && typeof itemToInsert.note === "string") {
         try {
           const parsedNote = JSON.parse(itemToInsert.note);
-          if (parsedNote?._type === "sizeVariations" && Array.isArray(parsedNote.sizeVariations)) {
+          if (
+            parsedNote?._type === "sizeVariations" &&
+            Array.isArray(parsedNote.sizeVariations)
+          ) {
             for (const v of parsedNote.sizeVariations) {
-              if (v.beginning_inventory_unit_price == null && (v.price != null || v.stock > 0)) {
-                v.beginning_inventory_unit_price = Number(v.price) ?? beginningUnitPrice;
+              if (
+                v.beginning_inventory_unit_price == null &&
+                (v.price != null || v.stock > 0)
+              ) {
+                v.beginning_inventory_unit_price =
+                  Number(v.price) ?? beginningUnitPrice;
               }
             }
             itemToInsert.note = JSON.stringify(parsedNote);
           }
-        } catch (_) { /* not JSON, leave note as is */ }
+        } catch (_) {
+          /* not JSON, leave note as is */
+        }
       }
 
       // Only include for_gender if column exists (check first)
       // Default to Unisex if not provided, but don't include if column doesn't exist
-      const forGenderValue = itemData.for_gender || 'Unisex';
-      
+      const forGenderValue = itemData.for_gender || "Unisex";
+
       // Try to insert item
       // Handle case where approval columns or for_gender might not exist (migration not run)
       let data, error;
-      
+
       // First, try with approval fields and for_gender (if migrations have been run)
       const itemWithAllFields = {
         ...itemToInsert,
@@ -1024,29 +1359,33 @@ class ItemsService {
         .insert([itemWithAllFields])
         .select()
         .single();
-      
+
       data = result.data;
       error = result.error;
 
       // If error is due to missing columns, retry without them
-      if (error && (
-        error.message?.includes("approved_at") ||
-        error.message?.includes("approved_by") ||
-        error.message?.includes("is_approved") ||
-        error.message?.includes("for_gender") ||
-        error.message?.includes("beginning_inventory_unit_price") ||
-        error.message?.includes("Could not find") ||
-        error.code === '42703' || // PostgreSQL undefined_column
-        error.code === 'PGRST204' // PostgREST column not found
-      )) {
-        console.log("[createItem] Some columns don't exist, retrying without optional fields");
-        const { beginning_inventory_unit_price: _biup, ...itemWithoutBiup } = itemToInsert;
+      if (
+        error &&
+        (error.message?.includes("approved_at") ||
+          error.message?.includes("approved_by") ||
+          error.message?.includes("is_approved") ||
+          error.message?.includes("for_gender") ||
+          error.message?.includes("beginning_inventory_unit_price") ||
+          error.message?.includes("Could not find") ||
+          error.code === "42703" || // PostgreSQL undefined_column
+          error.code === "PGRST204") // PostgREST column not found
+      ) {
+        console.log(
+          "[createItem] Some columns don't exist, retrying without optional fields",
+        );
+        const { beginning_inventory_unit_price: _biup, ...itemWithoutBiup } =
+          itemToInsert;
         const result2 = await supabase
           .from("items")
           .insert([itemWithoutBiup])
           .select()
           .single();
-        
+
         data = result2.data;
         error = result2.error;
       }
@@ -1057,15 +1396,17 @@ class ItemsService {
       // This ensures items are visible to students in the correct education level
       try {
         const educationLevelMap = {
-          "Kindergarten": "Kindergarten",
-          "Elementary": "Elementary",
+          Kindergarten: "Kindergarten",
+          Elementary: "Elementary",
           "Junior High School": "Junior High School",
           "Senior High School": "Senior High School",
-          "College": "College",
+          College: "College",
         };
 
         // Map the item's education_level to the eligibility format
-        const eligibilityLevel = educationLevelMap[itemData.education_level] || itemData.education_level;
+        const eligibilityLevel =
+          educationLevelMap[itemData.education_level] ||
+          itemData.education_level;
 
         // Check if item_eligibility table exists before inserting
         const { error: tableCheck } = await supabase
@@ -1073,7 +1414,7 @@ class ItemsService {
           .select("id")
           .limit(1);
 
-        if (!tableCheck || tableCheck.code !== '42P01') {
+        if (!tableCheck || tableCheck.code !== "42P01") {
           // Table exists, create eligibility entry
           const { error: eligibilityError } = await supabase
             .from("item_eligibility")
@@ -1083,16 +1424,26 @@ class ItemsService {
             });
 
           if (eligibilityError) {
-            console.warn(`[createItem] Failed to create eligibility entry for item ${data.id}:`, eligibilityError.message);
+            console.warn(
+              `[createItem] Failed to create eligibility entry for item ${data.id}:`,
+              eligibilityError.message,
+            );
             // Don't throw - item creation should succeed even if eligibility creation fails
           } else {
-            console.log(`[createItem] ✅ Created eligibility entry for "${data.name}" (${eligibilityLevel})`);
+            console.log(
+              `[createItem] ✅ Created eligibility entry for "${data.name}" (${eligibilityLevel})`,
+            );
           }
         } else {
-          console.warn("[createItem] item_eligibility table does not exist. Skipping eligibility creation.");
+          console.warn(
+            "[createItem] item_eligibility table does not exist. Skipping eligibility creation.",
+          );
         }
       } catch (eligibilityErr) {
-        console.warn("[createItem] Error creating eligibility entry:", eligibilityErr.message);
+        console.warn(
+          "[createItem] Error creating eligibility entry:",
+          eligibilityErr.message,
+        );
         // Don't throw - item creation should succeed even if eligibility creation fails
       }
 
@@ -1104,15 +1455,19 @@ class ItemsService {
       try {
         const TransactionService = require("../../services/transaction.service");
         const itemSize = data.size || "N/A";
-        const variantCount = data.note ? (JSON.parse(data.note)?.sizeVariations?.length || 0) : 0;
-        const details = variantCount > 0 
-          ? `Item created: ${data.name} (${data.education_level}) with ${variantCount} variant(s)`
-          : `Item created: ${data.name} (${data.education_level})${itemSize !== "N/A" ? ` - Size: ${itemSize}` : ""}`;
+        const variantCount = data.note
+          ? JSON.parse(data.note)?.sizeVariations?.length || 0
+          : 0;
+        const details =
+          variantCount > 0
+            ? `Item created: ${data.name} (${data.education_level}) with ${variantCount} variant(s)`
+            : `Item created: ${data.name} (${data.education_level})${itemSize !== "N/A" ? ` - Size: ${itemSize}` : ""}`;
         // Format details to match reference: "Beginning inventory: 20 units at 100 pesos"
-        const formattedDetails = data.beginning_inventory > 0
-          ? `Beginning Inventory: ${data.beginning_inventory} units${data.price > 0 ? ` at P${data.price}` : ""}`
-          : details;
-        
+        const formattedDetails =
+          data.beginning_inventory > 0
+            ? `Beginning Inventory: ${data.beginning_inventory} units${data.price > 0 ? ` at P${data.price}` : ""}`
+            : details;
+
         console.log(`[createItem] 📝 Logging transaction for new item:`, {
           type: "Item",
           action: `ITEM CREATED ${data.name}`,
@@ -1121,7 +1476,7 @@ class ItemsService {
           beginning_inventory: data.beginning_inventory,
           price: data.price,
         });
-        
+
         // Pass both userId and userEmail to transaction service for better lookup
         const txResult = await TransactionService.logTransaction(
           "Item",
@@ -1134,19 +1489,25 @@ class ItemsService {
             education_level: data.education_level,
             category: data.category,
             item_type: data.item_type,
-            for_gender: data.for_gender || 'Unisex',
+            for_gender: data.for_gender || "Unisex",
             size: itemSize,
             stock: data.stock,
             price: data.price,
             beginning_inventory: data.beginning_inventory,
             variant_count: variantCount,
           },
-          userEmail // Pass userEmail as fallback for user lookup
+          userEmail, // Pass userEmail as fallback for user lookup
         );
-        
-        console.log(`[createItem] ✅ Transaction logged successfully:`, txResult);
+
+        console.log(
+          `[createItem] ✅ Transaction logged successfully:`,
+          txResult,
+        );
       } catch (txError) {
-        console.error("[createItem] ❌ Failed to log transaction for item creation:", txError);
+        console.error(
+          "[createItem] ❌ Failed to log transaction for item creation:",
+          txError,
+        );
         console.error("[createItem] Transaction error details:", {
           message: txError.message,
           stack: txError.stack,
@@ -1185,7 +1546,7 @@ class ItemsService {
         updates.image.startsWith("data:")
       ) {
         console.warn(
-          "Received base64 image. Expected a URL. Using default image."
+          "Received base64 image. Expected a URL. Using default image.",
         );
         updates.image = "/assets/image/card1.png";
       }
@@ -1223,7 +1584,10 @@ class ItemsService {
             idx < parsedForVariant.sizeVariations.length
           ) {
             const indexedVariant = parsedForVariant.sizeVariations[idx]?.size;
-            if (indexedVariant != null && String(indexedVariant).trim() !== "") {
+            if (
+              indexedVariant != null &&
+              String(indexedVariant).trim() !== ""
+            ) {
               variantFromIndex = String(indexedVariant).trim();
             }
           }
@@ -1248,7 +1612,10 @@ class ItemsService {
                 .trim()
                 .toLowerCase();
             const beforeBySize = new Map(
-              before.sizeVariations.map((v) => [normalizeVariantKey(v?.size), v])
+              before.sizeVariations.map((v) => [
+                normalizeVariantKey(v?.size),
+                v,
+              ]),
             );
             const changedVariants = [];
             for (const v of after.sizeVariations) {
@@ -1285,7 +1652,10 @@ class ItemsService {
           ? String(currentItem.size).trim()
           : null);
       const reorderValue = Number(updates.reorder_point);
-      const isValidReorder = updates.reorder_point !== undefined && !Number.isNaN(reorderValue) && reorderValue >= 0;
+      const isValidReorder =
+        updates.reorder_point !== undefined &&
+        !Number.isNaN(reorderValue) &&
+        reorderValue >= 0;
       const sizeLooselyMatches = (stored, incoming) => {
         const s = String(stored || "").trim();
         const t = String(incoming || "").trim();
@@ -1311,9 +1681,10 @@ class ItemsService {
             parsed.sizeVariations.length > 0
           ) {
             let idx = -1;
-            const target = (sizeOrVariant != null && String(sizeOrVariant).trim() !== "")
-              ? String(sizeOrVariant).trim()
-              : null;
+            const target =
+              sizeOrVariant != null && String(sizeOrVariant).trim() !== ""
+                ? String(sizeOrVariant).trim()
+                : null;
 
             const vIdxRaw = updates.variant_json_index;
             if (
@@ -1362,11 +1733,16 @@ class ItemsService {
             }
           }
         } catch (e) {
-          console.warn("Items.updateItem: could not patch note for reorder_point by variant", e);
+          console.warn(
+            "Items.updateItem: could not patch note for reorder_point by variant",
+            e,
+          );
         }
         delete updates.size;
         delete updates.variant;
-        if (Object.prototype.hasOwnProperty.call(updates, "variant_json_index")) {
+        if (
+          Object.prototype.hasOwnProperty.call(updates, "variant_json_index")
+        ) {
           delete updates.variant_json_index;
         }
       }
@@ -1391,36 +1767,36 @@ class ItemsService {
       if (updates.note) {
         try {
           const parsedNote = JSON.parse(updates.note);
-          // Process accessoryEntries
-          if (
-            parsedNote &&
-            parsedNote._type === "accessoryEntries" &&
-            Array.isArray(parsedNote.accessoryEntries) &&
-            parsedNote.accessoryEntries.length > 0
-          ) {
+          // Process accessoryEntries (legacy notes may omit _type)
+          if (hasAccessoryEntriesNote(parsedNote)) {
             noteHasAccessoryEntries = true;
+            if (!parsedNote._type) {
+              parsedNote._type = "accessoryEntries";
+            }
             // Calculate total beginning_inventory (from Entry 1) and total purchases (from Entry 2+)
-            const totalBeginningInventory = parsedNote.accessoryEntries[0]?.beginning_inventory || 0;
-            const totalPurchases = parsedNote.accessoryEntries.slice(1).reduce((sum, e) => {
-              return sum + (Number(e.purchases) || 0);
-            }, 0);
-            
+            const totalBeginningInventory =
+              parsedNote.accessoryEntries[0]?.beginning_inventory || 0;
+            const totalPurchases = parsedNote.accessoryEntries
+              .slice(1)
+              .reduce((sum, e) => {
+                return sum + (Number(e.purchases) || 0);
+              }, 0);
+
             // Update item-level fields
             updates.beginning_inventory = totalBeginningInventory;
             updates.purchases = totalPurchases;
-            
+            updates.note = JSON.stringify(parsedNote);
+
             console.log(
-              `[updateItem] Processed accessoryEntries: totalBeginningInventory=${totalBeginningInventory}, totalPurchases=${totalPurchases}`
+              `[updateItem] Processed accessoryEntries: totalBeginningInventory=${totalBeginningInventory}, totalPurchases=${totalPurchases}`,
             );
           }
           // Process sizeVariations
-          else if (
-            parsedNote &&
-            parsedNote._type === "sizeVariations" &&
-            Array.isArray(parsedNote.sizeVariations) &&
-            parsedNote.sizeVariations.length > 0
-          ) {
+          else if (hasSizeVariationsNote(parsedNote)) {
             noteHasSizeVariations = true;
+            if (!parsedNote._type) {
+              parsedNote._type = "sizeVariations";
+            }
             // Compute per-variant purchases if missing (stock - beginning_inventory)
             let totalPurchases = 0;
             for (const v of parsedNote.sizeVariations) {
@@ -1504,7 +1880,7 @@ class ItemsService {
               // Find all variants that have stock > 0
               // This allows us to notify specifically for the sizes that are now available
               const availableVariants = parsed.sizeVariations.filter(
-                (v) => (Number(v.stock) || 0) > 0
+                (v) => (Number(v.stock) || 0) > 0,
               );
 
               if (availableVariants.length > 0) {
@@ -1518,7 +1894,7 @@ class ItemsService {
                     size: variant.size, // Override size with variant size
                   };
                   console.log(
-                    `📦 JSON Variant restocked: ${updatedItemData.name} (${updatedItemData.education_level}) - Size: ${variant.size}`
+                    `📦 JSON Variant restocked: ${updatedItemData.name} (${updatedItemData.education_level}) - Size: ${variant.size}`,
                   );
                   // We don't await here to avoid blocking response, but in this context waiting is safer to ensure it runs
                   await this.handleRestockNotifications(variantItem, io);
@@ -1532,33 +1908,38 @@ class ItemsService {
           } catch (e) {
             console.warn(
               "Failed to parse/process item note for notifications:",
-              e
+              e,
             );
           }
         }
 
         if (effectivelyRestocked || isRestocked) {
           console.log(
-            `📦 Item restocked (Generic/Standard): ${updatedItemData.name} (${updatedItemData.education_level})`
+            `📦 Item restocked (Generic/Standard): ${updatedItemData.name} (${updatedItemData.education_level})`,
           );
           notificationInfo = await this.handleRestockNotifications(
             updatedItemData,
-            io
+            io,
           );
         }
       }
 
+      const finalData = updatedItemData || data;
+
       // Log transaction for item update
       try {
         const TransactionService = require("../../services/transaction.service");
-        const updatedFields = Object.keys(allowedUpdates).filter(key => key !== 'updated_at');
-        const finalData = updatedItemData || data;
+        const updatedFields = Object.keys(allowedUpdates).filter(
+          (key) => key !== "updated_at",
+        );
         // Create concise message: "Updated [Item Name] item details"
         const variantText =
           updatedVariant && String(updatedVariant).trim() !== ""
             ? ` ${updatedVariant}`
             : "";
-        const educationLevelText = finalData.education_level ? ` (${finalData.education_level})` : '';
+        const educationLevelText = finalData.education_level
+          ? ` (${finalData.education_level})`
+          : "";
         const details = `Updated ${finalData.name}${variantText}${educationLevelText} item details`;
         await TransactionService.logTransaction(
           "Item",
@@ -1574,15 +1955,41 @@ class ItemsService {
             previous_data: currentItem,
             new_data: finalData,
           },
-          userEmail
+          userEmail,
         );
       } catch (txError) {
         console.error("Failed to log transaction for item update:", txError);
       }
 
+      try {
+        await logInventoryPurchaseDeltasFromItemEdit(
+          currentItem,
+          finalData,
+          userId,
+          userEmail,
+        );
+      } catch (purchaseTxErr) {
+        console.error(
+          "Failed to log PURCHASE RECORDED from item update:",
+          purchaseTxErr,
+        );
+      }
+
+      if (io && finalData) {
+        io.emit("item:updated", {
+          id: finalData.id,
+          name: finalData.name,
+          stock: finalData.stock,
+          purchases: finalData.purchases,
+          beginning_inventory: finalData.beginning_inventory,
+          size: finalData.size,
+          updated_at: finalData.updated_at,
+        });
+      }
+
       return {
         success: true,
-        data: updatedItemData || data,
+        data: finalData,
         message: "Item updated successfully",
         notificationInfo,
       };
@@ -1649,7 +2056,7 @@ class ItemsService {
 
       const wasOutOfStock =
         currentItem.stock === 0 || currentItem.status === "Out of Stock";
-      
+
       let updatedItem;
       let newStock;
 
@@ -1683,10 +2090,10 @@ class ItemsService {
               if (baseSize === normalizedSize) return true;
               return false;
             });
-            
+
             if (variantIndex === -1) {
               console.warn(
-                `⚠️ Size "${size}" not found in JSON variations for item ${currentItem.name}. Available sizes: ${parsedNote.sizeVariations.map(v => v.size).join(", ")}`
+                `⚠️ Size "${size}" not found in JSON variations for item ${currentItem.name}. Available sizes: ${parsedNote.sizeVariations.map((v) => v.size).join(", ")}`,
               );
             }
           }
@@ -1707,7 +2114,7 @@ class ItemsService {
         // Recalculate total stock from all variants
         newStock = parsedNote.sizeVariations.reduce(
           (sum, v) => sum + (Number(v.stock) || 0),
-          0
+          0,
         );
 
         const { data, error } = await supabase
@@ -1723,7 +2130,7 @@ class ItemsService {
         updatedItem = data;
 
         console.log(
-          `📦 Adjusted JSON variant stock: ${currentItem.name} (${currentItem.education_level}) - Size: ${size}, Variant: ${currentVariantStock} -> ${newVariantStock}, Total: ${newStock}`
+          `📦 Adjusted JSON variant stock: ${currentItem.name} (${currentItem.education_level}) - Size: ${size}, Variant: ${currentVariantStock} -> ${newVariantStock}, Total: ${newStock}`,
         );
       } else {
         // Handle regular stock update (no size-specific variant)
@@ -1738,7 +2145,7 @@ class ItemsService {
         updatedItem = data;
 
         console.log(
-          `📦 Adjusted stock: ${currentItem.name} (${currentItem.education_level}) - ${currentItem.stock} -> ${newStock}`
+          `📦 Adjusted stock: ${currentItem.name} (${currentItem.education_level}) - ${currentItem.stock} -> ${newStock}`,
         );
       }
 
@@ -1757,9 +2164,12 @@ class ItemsService {
       let notificationInfo = null;
       if (isRestocked) {
         console.log(
-          `📦 Item restocked via adjustment: ${updatedItem.name} (${updatedItem.education_level})`
+          `📦 Item restocked via adjustment: ${updatedItem.name} (${updatedItem.education_level})`,
         );
-        notificationInfo = await this.handleRestockNotifications(updatedItem, io);
+        notificationInfo = await this.handleRestockNotifications(
+          updatedItem,
+          io,
+        );
       }
 
       return {
@@ -1814,8 +2224,42 @@ class ItemsService {
   }
 
   /**
-   * Get available sizes for a product by name and education level
+   * Student storefront strikethrough unit price for a JSON size variant.
+   * Prefer purchase_unit_price and purchase_batches (last batch) over variant.price,
+   * which is blended WAC and must not be shown as the list/reference price (custodian
+   * display uses explicit / item-level prices). After beginning-layer fields, use
+   * parent item.price (fallbackItemPrice) instead of variant.price.
    */
+  static _studentDisplayStrikePrice(variant, fallbackItemPrice) {
+    const fallback = Number(fallbackItemPrice) || 0;
+    if (!variant || typeof variant !== "object") return fallback;
+
+    const pup = variant.purchase_unit_price;
+    if (pup != null && !isNaN(Number(pup)) && Number(pup) > 0) {
+      return Number(pup);
+    }
+
+    const batches = variant.purchase_batches;
+    if (Array.isArray(batches) && batches.length > 0) {
+      for (let i = batches.length - 1; i >= 0; i--) {
+        const up = Number(batches[i]?.unit_price);
+        if (Number.isFinite(up) && up > 0) return up;
+      }
+    }
+
+    const beg = Number(variant.beginning_inventory) || 0;
+    if (beg > 0) {
+      const biup = variant.beginning_inventory_unit_price;
+      if (biup != null && !isNaN(Number(biup)) && Number(biup) > 0) {
+        return Number(biup);
+      }
+      if (fallback > 0) return fallback;
+    }
+
+    if (fallback > 0) return fallback;
+    return 0;
+  }
+
   /**
    * Get available sizes for a product by name and education level
    */
@@ -1831,10 +2275,15 @@ class ItemsService {
         .eq("is_active", true)
         .or("is_archived.eq.false,is_archived.is.null")
         .order("size", { ascending: true });
-      
-      console.log(`🔍 getAvailableSizes: Found ${data?.length || 0} items for "${name}" (${educationLevel})`);
+
+      console.log(
+        `🔍 getAvailableSizes: Found ${data?.length || 0} items for "${name}" (${educationLevel})`,
+      );
       if (data && data.length > 0) {
-        console.log(`📦 Sizes found:`, data.map(item => ({ size: item.size, stock: item.stock })));
+        console.log(
+          `📦 Sizes found:`,
+          data.map((item) => ({ size: item.size, stock: item.stock })),
+        );
       }
 
       if (error) throw error;
@@ -1869,26 +2318,47 @@ class ItemsService {
                   }
                 }
                 const variantStock = Number(variant.stock) || 0;
-                const variantReorderPoint = (variant.reorder_point != null && variant.reorder_point !== "")
-                  ? Number(variant.reorder_point) || 0
-                  : 0;
+                const variantReorderPoint =
+                  variant.reorder_point != null && variant.reorder_point !== ""
+                    ? Number(variant.reorder_point) || 0
+                    : 0;
 
                 // Determine status based on variant stock vs reorder_point (matches At Reorder Point table)
                 let variantStatus = "Above Threshold";
                 if (variantStock === 0) variantStatus = "Out of Stock";
-                else if (variantReorderPoint > 0 && variantStock <= variantReorderPoint) variantStatus = "At Reorder Point";
+                else if (
+                  variantReorderPoint > 0 &&
+                  variantStock <= variantReorderPoint
+                )
+                  variantStatus = "At Reorder Point";
                 else if (variantStock <= 10) variantStatus = "Critical";
 
+                const strikePrice = ItemsService._studentDisplayStrikePrice(
+                  variant,
+                  item.price,
+                );
                 if (sizeMap.has(variantSize)) {
                   const existing = sizeMap.get(variantSize);
                   existing.stock += variantStock;
                   // Update status based on new combined stock (use reorder_point when available)
-                  const rp = existing.reorderPoint != null ? existing.reorderPoint : variantReorderPoint;
+                  const rp =
+                    existing.reorderPoint != null
+                      ? existing.reorderPoint
+                      : variantReorderPoint;
                   if (existing.stock === 0) existing.status = "Out of Stock";
-                  else if (rp > 0 && existing.stock <= rp) existing.status = "At Reorder Point";
+                  else if (rp > 0 && existing.stock <= rp)
+                    existing.status = "At Reorder Point";
                   else if (existing.stock <= 10) existing.status = "Critical";
                   else existing.status = "Above Threshold";
-                  if (variantReorderPoint > 0) existing.reorderPoint = variantReorderPoint;
+                  if (variantReorderPoint > 0)
+                    existing.reorderPoint = variantReorderPoint;
+                  if (
+                    (existing.display_price == null ||
+                      Number(existing.display_price) <= 0) &&
+                    Number(strikePrice) > 0
+                  ) {
+                    existing.display_price = strikePrice;
+                  }
                 } else {
                   sizeMap.set(variantSize, {
                     size: variantSize,
@@ -1897,6 +2367,7 @@ class ItemsService {
                     reorderPoint: variantReorderPoint,
                     id: item.id, // Use parent item ID
                     price: Number(variant.price) || Number(item.price) || 0,
+                    display_price: strikePrice,
                     isJsonVariant: true, // Flag to indicate this is from JSON
                   });
                 }
@@ -1914,7 +2385,7 @@ class ItemsService {
 
           // Normalize size for consistent mapping (trim whitespace, but keep original case for display)
           const normalizedSize = item.size.trim();
-          
+
           // Check if we already have this size (case-insensitive check)
           let existingSizeKey = null;
           for (const [key] of sizeMap.entries()) {
@@ -1929,18 +2400,33 @@ class ItemsService {
             // Combine with existing size entry
             const existing = sizeMap.get(existingSizeKey);
             existing.stock += item.stock;
-            const rp = existing.reorderPoint != null ? existing.reorderPoint : itemReorderPoint;
+            const rp =
+              existing.reorderPoint != null
+                ? existing.reorderPoint
+                : itemReorderPoint;
             if (existing.stock === 0) existing.status = "Out of Stock";
-            else if (rp > 0 && existing.stock <= rp) existing.status = "At Reorder Point";
+            else if (rp > 0 && existing.stock <= rp)
+              existing.status = "At Reorder Point";
             else if (existing.stock <= 10) existing.status = "Critical";
             else existing.status = "Above Threshold";
             if (itemReorderPoint > 0) existing.reorderPoint = itemReorderPoint;
+            if (
+              (existing.display_price == null ||
+                Number(existing.display_price) <= 0) &&
+              item.price != null &&
+              Number(item.price) > 0
+            ) {
+              existing.display_price = Number(item.price);
+            }
           } else {
             // Determine status based on stock vs reorder_point (matches At Reorder Point table)
             let status = "Above Threshold";
             if (item.stock === 0) status = "Out of Stock";
-            else if (itemReorderPoint > 0 && item.stock <= itemReorderPoint) status = "At Reorder Point";
+            else if (itemReorderPoint > 0 && item.stock <= itemReorderPoint)
+              status = "At Reorder Point";
             else if (item.stock <= 10) status = "Critical";
+            const rowPrice =
+              item.price != null ? Number(item.price) || 0 : 0;
             // Add new size entry (use original size value for display)
             sizeMap.set(normalizedSize, {
               size: normalizedSize, // Keep original size format
@@ -1949,6 +2435,7 @@ class ItemsService {
               reorderPoint: itemReorderPoint,
               id: item.id,
               price: item.price,
+              display_price: rowPrice,
             });
           }
         }
@@ -2045,25 +2532,42 @@ class ItemsService {
         if (parenMatch) {
           sizeToMatch = parenMatch[1].trim();
         } else {
-          if (lower === "xsmall" || lower === "extrasmall" || lower === "xs") sizeToMatch = "XS";
+          if (lower === "xsmall" || lower === "extrasmall" || lower === "xs")
+            sizeToMatch = "XS";
           else if (lower === "small" || lower === "s") sizeToMatch = "S";
           else if (lower === "medium" || lower === "m") sizeToMatch = "M";
           else if (lower === "large" || lower === "l") sizeToMatch = "L";
-          else if (lower === "xlarge" || lower === "extralarge" || lower === "xl") sizeToMatch = "XL";
-          else if (lower === "2xlarge" || lower === "2xl" || lower === "xxl" || lower === "doubleextralarge") sizeToMatch = "XXL";
-          else if (lower === "3xlarge" || lower === "3xl" || lower === "tripleextralarge") sizeToMatch = "3XL";
+          else if (
+            lower === "xlarge" ||
+            lower === "extralarge" ||
+            lower === "xl"
+          )
+            sizeToMatch = "XL";
+          else if (
+            lower === "2xlarge" ||
+            lower === "2xl" ||
+            lower === "xxl" ||
+            lower === "doubleextralarge"
+          )
+            sizeToMatch = "XXL";
+          else if (
+            lower === "3xlarge" ||
+            lower === "3xl" ||
+            lower === "tripleextralarge"
+          )
+            sizeToMatch = "3XL";
         }
       }
 
       console.log(
-        `🔍 Matching against size: ${sizeToMatch} (Original: ${item.size})`
+        `🔍 Matching against size: ${sizeToMatch} (Original: ${item.size})`,
       );
 
       const studentsWithPreOrders =
         await NotificationService.findStudentsWithPendingPreOrders(
           item.name,
           item.education_level,
-          sizeToMatch || null
+          sizeToMatch || null,
         );
 
       if (studentsWithPreOrders.length === 0) {
@@ -2081,7 +2585,9 @@ class ItemsService {
       const notificationResults = [];
 
       // Import getStudentRowById for converting database UUID to Supabase Auth UID
-      const { getStudentRowById } = require("../../services/profileResolver.service");
+      const {
+        getStudentRowById,
+      } = require("../../services/profileResolver.service");
 
       for (const student of studentsWithPreOrders) {
         try {
@@ -2093,20 +2599,40 @@ class ItemsService {
             const studentRow = await getStudentRowById(student.studentId);
             if (studentRow && studentRow.user_id) {
               supabaseAuthUid = studentRow.user_id;
-              console.log(`✅ Found Supabase Auth UID for student ${student.studentId}: ${supabaseAuthUid}`);
+              console.log(
+                `✅ Found Supabase Auth UID for student ${student.studentId}: ${supabaseAuthUid}`,
+              );
             } else {
-              console.warn(`⚠️ Student ${student.studentId} not found or missing user_id. Student row:`, studentRow ? Object.keys(studentRow) : 'null');
+              console.warn(
+                `⚠️ Student ${student.studentId} not found or missing user_id. Student row:`,
+                studentRow ? Object.keys(studentRow) : "null",
+              );
               // Fallback: try using studentId as Supabase Auth UID if it looks like one
-              if (student.studentId && typeof student.studentId === 'string' && student.studentId.length > 20) {
-                console.log(`⚠️ Attempting to use studentId as Supabase Auth UID: ${student.studentId}`);
+              if (
+                student.studentId &&
+                typeof student.studentId === "string" &&
+                student.studentId.length > 20
+              ) {
+                console.log(
+                  `⚠️ Attempting to use studentId as Supabase Auth UID: ${student.studentId}`,
+                );
                 supabaseAuthUid = student.studentId;
               }
             }
           } catch (uidError) {
-            console.error(`❌ Error fetching Supabase Auth UID for student ${student.studentId}:`, uidError);
+            console.error(
+              `❌ Error fetching Supabase Auth UID for student ${student.studentId}:`,
+              uidError,
+            );
             // Fallback: try using studentId as Supabase Auth UID if it looks like one
-            if (student.studentId && typeof student.studentId === 'string' && student.studentId.length > 20) {
-              console.log(`⚠️ Fallback: Using studentId as Supabase Auth UID: ${student.studentId}`);
+            if (
+              student.studentId &&
+              typeof student.studentId === "string" &&
+              student.studentId.length > 20
+            ) {
+              console.log(
+                `⚠️ Fallback: Using studentId as Supabase Auth UID: ${student.studentId}`,
+              );
               supabaseAuthUid = student.studentId;
             }
           }
@@ -2146,11 +2672,15 @@ class ItemsService {
                 },
               });
               console.log(
-                `📡 Socket.IO: Emitted items:restocked to student ${supabaseAuthUid} (database UUID: ${student.studentId})`
+                `📡 Socket.IO: Emitted items:restocked to student ${supabaseAuthUid} (database UUID: ${student.studentId})`,
               );
             } else {
-              console.warn(`⚠️ Cannot emit items:restocked - Supabase Auth UID not found for student ${student.studentId}`);
-              console.warn(`⚠️ Notification was still created in database with userId: ${notificationUserId}`);
+              console.warn(
+                `⚠️ Cannot emit items:restocked - Supabase Auth UID not found for student ${student.studentId}`,
+              );
+              console.warn(
+                `⚠️ Notification was still created in database with userId: ${notificationUserId}`,
+              );
             }
           }
 
@@ -2164,7 +2694,7 @@ class ItemsService {
         } catch (error) {
           console.error(
             `Failed to create notification for student ${student.studentId}:`,
-            error
+            error,
           );
           notificationResults.push({
             studentId: student.studentId,
@@ -2179,10 +2709,10 @@ class ItemsService {
 
       const successCount = notificationResults.filter((r) => r.success).length;
       console.log(
-        `✅ Successfully notified ${successCount}/${studentsWithPreOrders.length} students`
+        `✅ Successfully notified ${successCount}/${studentsWithPreOrders.length} students`,
       );
       console.log(
-        `ℹ️ Students can now manually convert their pre-orders to regular orders when items are available`
+        `ℹ️ Students can now manually convert their pre-orders to regular orders when items are available`,
       );
 
       return {

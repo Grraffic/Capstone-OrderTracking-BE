@@ -97,7 +97,7 @@ router.post(
   "/",
   verifyToken,
   requireAdminOrPropertyCustodian,
-  itemsController.createItem
+  itemsController.createItem,
 );
 
 /**
@@ -108,7 +108,7 @@ router.put(
   "/:id",
   verifyToken,
   requireAdminOrPropertyCustodian,
-  itemsController.updateItem
+  itemsController.updateItem,
 );
 
 /**
@@ -119,7 +119,7 @@ router.patch(
   "/:id/adjust",
   verifyToken,
   requireAdminOrPropertyCustodian,
-  itemsController.adjustStock
+  itemsController.adjustStock,
 );
 
 /**
@@ -130,7 +130,7 @@ router.post(
   "/:id/add-stock",
   verifyToken,
   requireAdminOrPropertyCustodian,
-  itemsController.addStock
+  itemsController.addStock,
 );
 
 /**
@@ -150,7 +150,7 @@ router.post(
   "/:id/record-return",
   verifyToken,
   requireAdminOrPropertyCustodian,
-  itemsController.recordReturn
+  itemsController.recordReturn,
 );
 
 /**
@@ -161,7 +161,7 @@ router.post(
   "/:id/return-release-check",
   verifyToken,
   requireAdminOrPropertyCustodian,
-  itemsController.checkReturnReleaseHistory
+  itemsController.checkReturnReleaseHistory,
 );
 
 /**
@@ -172,7 +172,7 @@ router.post(
   "/:id/reset-beginning-inventory",
   verifyToken,
   requireAdminOrPropertyCustodian,
-  itemsController.resetBeginningInventory
+  itemsController.resetBeginningInventory,
 );
 
 /**
@@ -183,7 +183,7 @@ router.patch(
   "/:id/archive",
   verifyToken,
   requireAdminOrPropertyCustodian,
-  itemsController.archiveItem
+  itemsController.archiveItem,
 );
 
 /**
@@ -194,8 +194,7 @@ router.delete(
   "/:id",
   verifyToken,
   requireAdminOrPropertyCustodian,
-  itemsController.deleteItem
+  itemsController.deleteItem,
 );
 
 module.exports = router;
-

@@ -395,11 +395,9 @@ class InventoryService {
       if (filters.educationLevel) {
         query = query.eq("education_level", filters.educationLevel);
       }
-      if (hasDateRange) {
-        query = query
-          .gte("created_at", startDateTime)
-          .lte("created_at", endDateTime);
-      }
+      // Date range applies to purchase/return *transactions* merged below — not to
+      // which items appear. Filtering items by created_at hid older SKUs and new
+      // rows when dates did not line up; always list active items for inventory.
       // Do NOT chain a second .or() for search — PostgREST/Supabase can drop or
       // mis-apply the first .or() (is_archived), so search is applied after fetch.
 
@@ -467,20 +465,21 @@ class InventoryService {
         if (item.note) {
           try {
             const parsedNote = JSON.parse(item.note);
+            // Accessory: treat non-empty accessoryEntries as accessory (legacy may omit _type).
             if (
               parsedNote &&
-              parsedNote._type === "sizeVariations" &&
-              Array.isArray(parsedNote.sizeVariations)
-            ) {
-              hasJsonVariations = true;
-              sizeVariations = parsedNote.sizeVariations;
-            } else if (
-              parsedNote &&
-              parsedNote._type === "accessoryEntries" &&
-              Array.isArray(parsedNote.accessoryEntries)
+              Array.isArray(parsedNote.accessoryEntries) &&
+              parsedNote.accessoryEntries.length > 0
             ) {
               hasAccessoryEntries = true;
               accessoryEntries = parsedNote.accessoryEntries;
+            } else if (
+              parsedNote &&
+              Array.isArray(parsedNote.sizeVariations) &&
+              parsedNote.sizeVariations.length > 0
+            ) {
+              hasJsonVariations = true;
+              sizeVariations = parsedNote.sizeVariations;
             }
           } catch (e) {
             // Not JSON, continue with regular processing
@@ -495,9 +494,14 @@ class InventoryService {
           );
           const totalBeginningInventory =
             Number(accessoryEntries[0]?.beginning_inventory) || 0;
-          const totalPurchases = accessoryEntries
-            .slice(1)
-            .reduce((sum, e) => sum + (Number(e.purchases) || 0), 0);
+          // Layers after index 0 are purchase entries; row-level purchases catches
+          // addStock when JSON entries were not updated (same as Item details modal).
+          const totalPurchases = Math.max(
+            accessoryEntries
+              .slice(1)
+              .reduce((sum, e) => sum + (Number(e.purchases) || 0), 0),
+            Number(item.purchases) || 0,
+          );
           const begUnitPrice =
             Number(accessoryEntries[0]?.price) ?? Number(item.price) ?? 0;
           // Build valuation basis from beginning + purchases layers, then convert to WAC.
@@ -511,7 +515,10 @@ class InventoryService {
           // Display purchase unit price: last entry with purchases, or weighted fallback
           let purchUnitPrice = Number(item.price) || 0;
           for (let i = accessoryEntries.length - 1; i >= 1; i--) {
-            if ((Number(accessoryEntries[i].purchases) || 0) > 0) {
+            const layerQty =
+              (Number(accessoryEntries[i].purchases) || 0) ||
+              (Number(accessoryEntries[i].stock) || 0);
+            if (layerQty > 0) {
               purchUnitPrice =
                 Number(accessoryEntries[i].price) ?? purchUnitPrice;
               break;
@@ -547,7 +554,9 @@ class InventoryService {
             available: endingInventory,
             ending_inventory: endingInventory,
             unit_price: weightedUnitPrice,
-            purchase_unit_price: weightedUnitPrice,
+            // FIFO display when beginning is exhausted: last purchase layer’s price,
+            // not blended WAC (WAC stays on unit_price / total_amount valuation).
+            purchase_unit_price: purchUnitPrice,
             unit_price_beginning: begUnitPrice,
             price: Number(item.price) || 0,
             total_amount: totalAmount,
@@ -1095,12 +1104,18 @@ class InventoryService {
           .replace(/\([^)]*\)/g, "")
           .trim();
 
-      if (
+      // Treat as JSON size rows whenever sizeVariations[] exists (not only when _type is set).
+      // Legacy rows sometimes omitted _type; addStock must update note JSON, not only item.purchases.
+      const hasJsonSizeVariations =
         parsedNote &&
-        parsedNote._type === "sizeVariations" &&
+        parsedNote._type !== "accessoryEntries" &&
         Array.isArray(parsedNote.sizeVariations) &&
-        parsedNote.sizeVariations.length > 0
-      ) {
+        parsedNote.sizeVariations.length > 0;
+
+      if (hasJsonSizeVariations) {
+        if (!parsedNote._type) {
+          parsedNote._type = "sizeVariations";
+        }
         const sv = parsedNote.sizeVariations;
         const sizeTrim = size != null ? String(size).trim() : "";
 
@@ -1167,12 +1182,18 @@ class InventoryService {
         )
           ? [...parsedNote.sizeVariations[variantIndex].purchase_batches]
           : [];
+        // Regression: when unit price is omitted, keep the last list price
+        // (purchase_unit_price) on the new batch — do not use variant.price (WAC) alone,
+        // or student/custodian list unit price can drop (e.g. 100 → 75) after add stock.
+        const listPriceForBatch =
+          unitPrice != null && !isNaN(Number(unitPrice))
+            ? Number(unitPrice)
+            : Number(variant.purchase_unit_price) > 0
+              ? Number(variant.purchase_unit_price)
+              : Number(variant.price) || Number(item.price) || 0;
         const newBatch = {
           qty: quantity,
-          unit_price:
-            unitPrice != null && !isNaN(Number(unitPrice))
-              ? Number(unitPrice)
-              : Number(variant.price) || 0,
+          unit_price: listPriceForBatch,
         };
         purchaseBatches.push(newBatch);
         parsedNote.sizeVariations[variantIndex].purchase_batches =
@@ -1319,6 +1340,134 @@ class InventoryService {
           success: true,
           data,
           message: `Added ${quantity} units to ${size} size (purchases). New ${size} stock: ${newVariantStock}, Total stock: ${newTotalStock}. Beginning inventory unchanged.`,
+        };
+      } else if (
+        parsedNote &&
+        Array.isArray(parsedNote.accessoryEntries) &&
+        parsedNote.accessoryEntries.length > 0
+      ) {
+        // Accessory JSON note: mirror sizeVariations behavior — persist each add as a
+        // purchase layer in note. Otherwise addStock only bumps items.purchases/stock and
+        // a later Items save recomputes purchases from note.slice(1), resetting totals.
+        if (!parsedNote._type) {
+          parsedNote._type = "accessoryEntries";
+        }
+        const entries = [...parsedNote.accessoryEntries];
+        const currentStock = item.stock || 0;
+        const currentTotalPurchases = entries
+          .slice(1)
+          .reduce((sum, e) => sum + (Number(e.purchases) || 0), 0);
+        const unitPriceNum =
+          unitPrice != null && !isNaN(Number(unitPrice))
+            ? Number(unitPrice)
+            : Number(item.price) || 0;
+        entries.push({
+          stock: quantity,
+          price: unitPriceNum,
+          beginning_inventory: 0,
+          purchases: quantity,
+        });
+        parsedNote.accessoryEntries = entries;
+        const newTotalStock = entries.reduce(
+          (sum, e) => sum + (Number(e.stock) || 0),
+          0,
+        );
+        const newPurchasesFromNote = entries
+          .slice(1)
+          .reduce((sum, e) => sum + (Number(e.purchases) || 0), 0);
+        const totalBeginningInventory =
+          Number(entries[0]?.beginning_inventory) || 0;
+
+        if (!isProduction) {
+          console.log(
+            `[addStock] 📊 Accessory note update: adding=${quantity}, newTotalStock=${newTotalStock}, purchasesFromNote=${newPurchasesFromNote}, beginning=${totalBeginningInventory}`,
+          );
+        }
+
+        const updateData = {
+          stock: newTotalStock,
+          purchases: newPurchasesFromNote,
+          beginning_inventory: totalBeginningInventory,
+          note: JSON.stringify(parsedNote),
+        };
+
+        if (unitPrice !== null) {
+          const existingWac = Number(item.price) || 0;
+          updateData.price = this.calculateWeightedAverageCost(
+            currentStock,
+            existingWac,
+            quantity,
+            unitPrice,
+          );
+        }
+
+        const { data, error } = await supabase
+          .from("items")
+          .update(updateData)
+          .eq("id", itemId)
+          .select()
+          .single();
+
+        if (error) {
+          console.error(
+            `[addStock] ❌ Database update error (accessoryEntries):`,
+            error,
+          );
+          throw error;
+        }
+
+        if (!isProduction) {
+          console.log(
+            `[addStock] ✅ Update successful (accessoryEntries): updated_stock=${data?.stock}, updated_purchases=${data?.purchases}`,
+          );
+        }
+
+        try {
+          const TransactionService = require("../../services/transaction.service");
+          const itemName = data.name;
+          const itemSize = size || data.size || "N/A";
+          const details = `Purchase recorded: ${quantity} unit(s) of ${itemName}${itemSize !== "N/A" ? ` (Size: ${itemSize})` : ""}${unitPrice ? ` at ₱${unitPrice} per unit` : ""}`;
+          await TransactionService.logTransaction(
+            "Inventory",
+            "PURCHASE RECORDED",
+            userId,
+            details,
+            {
+              item_id: data.id,
+              item_name: itemName,
+              size: itemSize,
+              quantity: quantity,
+              unit_price: unitPrice,
+              previous_stock: currentStock,
+              new_stock: newTotalStock,
+              previous_purchases: currentTotalPurchases,
+              new_purchases: newPurchasesFromNote,
+            },
+            userEmail,
+          );
+        } catch (txError) {
+          console.error(
+            "Failed to log transaction for stock addition:",
+            txError,
+          );
+        }
+
+        if (io) {
+          io.emit("item:updated", {
+            id: data.id,
+            name: data.name,
+            stock: data.stock,
+            purchases: data.purchases,
+            beginning_inventory: data.beginning_inventory,
+            size: size || data.size,
+            updated_at: data.updated_at,
+          });
+        }
+
+        return {
+          success: true,
+          data,
+          message: `Added ${quantity} units to purchases (accessory). New total stock: ${newTotalStock}. Beginning inventory unchanged.`,
         };
       } else {
         // Regular item or size column item
