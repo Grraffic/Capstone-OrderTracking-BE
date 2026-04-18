@@ -28,6 +28,16 @@ function hasSizeVariationsNote(parsed) {
   );
 }
 
+/** Match education levels when spacing/spellings differ (e.g. Junior High School vs Junior Highschool). */
+function normalizeEducationLevelForMatch(level) {
+  if (level == null || level === "") return "";
+  return String(level)
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
 /** Align with getInventoryReport accessory row: max(sum of purchase layers, item.purchases). */
 function accessoryPurchaseDisplayTotal(entries, rowPurchases) {
   if (!entries || entries.length === 0) {
@@ -64,6 +74,150 @@ function normalizeSizeForPurchaseKey(s) {
     .replace(/\s*\([^)]*\)/g, "")
     .trim();
   return stripped || "N/A";
+}
+
+/** Same FIFO display rule as frontend `getInventoryDisplayUnitPrice` / custodian Unit Price column. */
+function displayUnitPriceLikeCustodianInventory(row) {
+  const beginningInventory = Number(row.beginningInventory) || 0;
+  const released = Number(row.released) || 0;
+  const endingInventory = Math.max(0, Number(row.endingInventory) || 0);
+  const unitPriceBeginning = Number(row.unitPriceBeginning);
+  const purchaseUnitPrice = Number(row.purchaseUnitPrice);
+  const itemPrice = row.price != null ? Number(row.price) : 0;
+
+  const beginningPoolLeft = Math.max(0, beginningInventory - released);
+  const beginningUnitsStillOnHand =
+    endingInventory > 0
+      ? Math.min(endingInventory, beginningPoolLeft)
+      : 0;
+
+  if (
+    beginningUnitsStillOnHand > 0 &&
+    Number.isFinite(unitPriceBeginning) &&
+    unitPriceBeginning > 0
+  ) {
+    return unitPriceBeginning;
+  }
+  if (Number.isFinite(purchaseUnitPrice) && purchaseUnitPrice > 0)
+    return purchaseUnitPrice;
+  return Number.isFinite(itemPrice) ? itemPrice : 0;
+}
+
+/**
+ * First chronological PURCHASE RECORDED unit_price per item+size (same keying as getInventoryReport).
+ */
+async function fetchFirstPurchaseUnitPricesForItemIds(itemIds) {
+  const map = new Map();
+  const idSet = new Set(
+    (itemIds || []).filter(Boolean).map((id) => String(id)),
+  );
+  if (idSet.size === 0) return map;
+  try {
+    const { data: purchaseTxList, error } = await supabase
+      .from("transactions")
+      .select("metadata,created_at")
+      .eq("type", "Inventory")
+      .eq("action", "PURCHASE RECORDED")
+      .order("created_at", { ascending: true });
+    if (error || !purchaseTxList) return map;
+    for (const tx of purchaseTxList) {
+      const meta = tx.metadata || {};
+      const itemId =
+        meta.item_id != null && meta.item_id !== ""
+          ? String(meta.item_id)
+          : null;
+      if (!itemId || !idSet.has(itemId)) continue;
+      const size = meta.size != null ? meta.size : "N/A";
+      const qty = Number(meta.quantity) || 0;
+      if (qty <= 0) continue;
+      const key = `${itemId}|${normalizeSizeForPurchaseKey(size)}`;
+      if (
+        meta.unit_price != null &&
+        !Number.isNaN(Number(meta.unit_price)) &&
+        !map.has(key)
+      ) {
+        map.set(key, Number(meta.unit_price));
+      }
+    }
+  } catch (e) {
+    if (!isProduction) {
+      console.warn(
+        "[getAvailableSizes] Could not load PURCHASE RECORDED for display price:",
+        e,
+      );
+    }
+  }
+  return map;
+}
+
+/**
+ * Per-variant beginning/purchase quantities and unit_price_beginning (mirrors getInventoryReport JSON branch).
+ */
+function sizeVariantReportLayersForDisplay(variant, item) {
+  const variantStock = Number(variant.stock) || 0;
+  let variantPurchasePrice =
+    variant.purchase_unit_price != null &&
+    !isNaN(Number(variant.purchase_unit_price))
+      ? Number(variant.purchase_unit_price)
+      : Number(variant.price) || Number(item.price) || 0;
+
+  const variantBeginningUnitPrice =
+    Number(variant.beginning_inventory_unit_price) ??
+    variantPurchasePrice;
+
+  let variantBeginningInventory;
+  if (
+    variant.beginning_inventory !== undefined &&
+    variant.beginning_inventory !== null
+  ) {
+    variantBeginningInventory = Number(variant.beginning_inventory) || 0;
+  } else {
+    variantBeginningInventory = Number(item.beginning_inventory) || 0;
+  }
+
+  let variantPurchases;
+  const hasPurchaseBatches =
+    Array.isArray(variant.purchase_batches) &&
+    variant.purchase_batches.length > 0;
+  if (
+    variant.purchases !== undefined &&
+    variant.purchases !== null &&
+    variant.purchases !== ""
+  ) {
+    variantPurchases = Number(variant.purchases) || 0;
+  } else if (hasPurchaseBatches) {
+    variantPurchases = variant.purchase_batches.reduce(
+      (sum, b) => sum + (Number(b.qty) || 0),
+      0,
+    );
+    const lastBatch =
+      variant.purchase_batches[variant.purchase_batches.length - 1];
+    if (
+      lastBatch &&
+      lastBatch.unit_price != null &&
+      !isNaN(Number(lastBatch.unit_price))
+    ) {
+      variantPurchasePrice = Number(lastBatch.unit_price);
+    }
+  } else if (variant.stock !== undefined && variant.stock !== null) {
+    variantPurchases = Math.max(
+      0,
+      variantStock - variantBeginningInventory,
+    );
+  } else {
+    variantPurchases = 0;
+  }
+
+  const endingInventory = variantBeginningInventory + variantPurchases;
+  const unitPriceBeginningForRow =
+    variantBeginningUnitPrice || Number(item.price) || 0;
+
+  return {
+    variantBeginningInventory,
+    variantPurchases,
+    endingInventory,
+    unitPriceBeginningForRow,
+  };
 }
 
 /**
@@ -709,6 +863,23 @@ class ItemsService {
           this.itemMatchesStudentGradeLevel(item, filters.userGradeLevel),
         );
         count = data.length;
+      }
+
+      // Per-size display prices for storefront / My Orders (aligned with custodian unit price logic).
+      if (Array.isArray(data) && data.length > 0) {
+        const itemIdsForPrices = [
+          ...new Set(data.map((row) => row.id).filter(Boolean)),
+        ];
+        const firstUnitPriceByItemSize =
+          await fetchFirstPurchaseUnitPricesForItemIds(itemIdsForPrices);
+        data = data.map((row) => {
+          const priceMap = ItemsService.buildStudentDisplayPricesBySize(
+            row,
+            firstUnitPriceByItemSize,
+          );
+          if (!priceMap || Object.keys(priceMap).length === 0) return row;
+          return { ...row, student_display_prices: priceMap };
+        });
       }
 
       return {
@@ -2261,20 +2432,123 @@ class ItemsService {
   }
 
   /**
+   * Per-size display unit prices for student/catalog UIs (matches getAvailableSizes /
+   * custodian inventory layering). Keys use {@link normalizeSizeForPurchaseKey}.
+   * @param {object} item - Raw items row from DB
+   * @param {Map<string, number>} firstUnitPriceByItemSize
+   * @returns {Record<string, number>|null}
+   */
+  static buildStudentDisplayPricesBySize(item, firstUnitPriceByItemSize) {
+    const map = firstUnitPriceByItemSize || new Map();
+    const out = {};
+    const parsed = parseItemNoteJson(item?.note);
+    if (hasSizeVariationsNote(parsed)) {
+      for (const variant of parsed.sizeVariations) {
+        let variantSize = variant.size;
+        if (variantSize && typeof variantSize === "string") {
+          const m = variantSize.match(/^(.+?)\s*\((.+?)\)$/);
+          if (m) variantSize = m[1].trim();
+        }
+        const strikePrice = ItemsService._studentDisplayStrikePrice(
+          variant,
+          item.price,
+        );
+        const purchaseKey = `${String(item.id)}|${normalizeSizeForPurchaseKey(variantSize)}`;
+        const firstTxUnit = map.get(purchaseKey);
+        const purchaseUnitForDisplay =
+          firstTxUnit != null && Number(firstTxUnit) > 0
+            ? Number(firstTxUnit)
+            : strikePrice;
+        const layers = sizeVariantReportLayersForDisplay(variant, item);
+        const custodianDisplay = displayUnitPriceLikeCustodianInventory({
+          beginningInventory: layers.variantBeginningInventory,
+          released: 0,
+          endingInventory: layers.endingInventory,
+          unitPriceBeginning: layers.unitPriceBeginningForRow,
+          purchaseUnitPrice: purchaseUnitForDisplay,
+          price: Number(item.price) || 0,
+        });
+        const displayPrice =
+          Number(custodianDisplay) > 0 ? custodianDisplay : strikePrice;
+        const key = normalizeSizeForPurchaseKey(variantSize);
+        if (Number(displayPrice) > 0) {
+          out[key] = Number(displayPrice);
+        }
+      }
+      return Object.keys(out).length ? out : null;
+    }
+
+    const rawSize = item?.size;
+    if (
+      rawSize == null ||
+      String(rawSize).trim() === "" ||
+      String(rawSize).trim().toUpperCase() === "N/A"
+    ) {
+      return null;
+    }
+    const normalizedSize = String(rawSize).trim();
+    const rowPrice = item.price != null ? Number(item.price) || 0 : 0;
+    const beg = Number(item.beginning_inventory) || 0;
+    const purch = Number(item.purchases) || 0;
+    const endingInv = beg + purch;
+    const stdKey = `${String(item.id)}|${normalizeSizeForPurchaseKey(normalizedSize)}`;
+    const firstStd = map.get(stdKey);
+    const pupStd =
+      firstStd != null && Number(firstStd) > 0 ? Number(firstStd) : rowPrice;
+    const upBegStd =
+      item.beginning_inventory_unit_price != null &&
+      !Number.isNaN(Number(item.beginning_inventory_unit_price)) &&
+      Number(item.beginning_inventory_unit_price) > 0
+        ? Number(item.beginning_inventory_unit_price)
+        : rowPrice;
+    const dispStd = displayUnitPriceLikeCustodianInventory({
+      beginningInventory: beg,
+      released: 0,
+      endingInventory: endingInv,
+      unitPriceBeginning: upBegStd,
+      purchaseUnitPrice: pupStd,
+      price: rowPrice,
+    });
+    const displayPriceStd = Number(dispStd) > 0 ? dispStd : rowPrice;
+    const key = normalizeSizeForPurchaseKey(normalizedSize);
+    if (Number(displayPriceStd) > 0) {
+      out[key] = Number(displayPriceStd);
+      return out;
+    }
+    return null;
+  }
+
+  /**
    * Get available sizes for a product by name and education level
    */
   async getAvailableSizes(name, educationLevel) {
     try {
-      // Use case-insensitive matching for name and education_level
-      // This ensures we find items regardless of case differences
-      const { data, error } = await supabase
+      // Match by name first; education_level is filtered in memory so "Junior High School"
+      // and "Junior Highschool" (and similar) still resolve to the same item row.
+      const { data: rawData, error } = await supabase
         .from("items")
-        .select("size, stock, status, id, note, price, reorder_point")
+        .select(
+          "size, stock, status, id, note, price, reorder_point, beginning_inventory, beginning_inventory_unit_price, purchases, education_level",
+        )
         .ilike("name", name) // Case-insensitive match
-        .ilike("education_level", educationLevel) // Case-insensitive match
         .eq("is_active", true)
         .or("is_archived.eq.false,is_archived.is.null")
         .order("size", { ascending: true });
+
+      if (error) throw error;
+
+      let data = rawData || [];
+      if (
+        educationLevel != null &&
+        String(educationLevel).trim() !== ""
+      ) {
+        const wantKey = normalizeEducationLevelForMatch(educationLevel);
+        const filtered = data.filter(
+          (row) =>
+            normalizeEducationLevelForMatch(row.education_level) === wantKey,
+        );
+        data = filtered;
+      }
 
       console.log(
         `🔍 getAvailableSizes: Found ${data?.length || 0} items for "${name}" (${educationLevel})`,
@@ -2286,7 +2560,11 @@ class ItemsService {
         );
       }
 
-      if (error) throw error;
+      const itemIdsForTx = [
+        ...new Set((data || []).map((row) => row.id).filter(Boolean)),
+      ];
+      const firstUnitPriceByItemSize =
+        await fetchFirstPurchaseUnitPricesForItemIds(itemIdsForTx);
 
       const sizeMap = new Map();
 
@@ -2296,11 +2574,8 @@ class ItemsService {
         if (item.note) {
           try {
             const parsedNote = JSON.parse(item.note);
-            if (
-              parsedNote &&
-              parsedNote._type === "sizeVariations" &&
-              Array.isArray(parsedNote.sizeVariations)
-            ) {
+            // Legacy notes may omit _type; use same rule as inventory (hasSizeVariationsNote).
+            if (hasSizeVariationsNote(parsedNote)) {
               hasJsonVariations = true;
 
               // Process each variation from the JSON
@@ -2337,6 +2612,28 @@ class ItemsService {
                   variant,
                   item.price,
                 );
+                const purchaseKey = `${String(item.id)}|${normalizeSizeForPurchaseKey(variantSize)}`;
+                const firstTxUnit = firstUnitPriceByItemSize.get(purchaseKey);
+                const purchaseUnitForDisplay =
+                  firstTxUnit != null && Number(firstTxUnit) > 0
+                    ? Number(firstTxUnit)
+                    : strikePrice;
+                const layers = sizeVariantReportLayersForDisplay(
+                  variant,
+                  item,
+                );
+                const custodianDisplay = displayUnitPriceLikeCustodianInventory(
+                  {
+                    beginningInventory: layers.variantBeginningInventory,
+                    released: 0,
+                    endingInventory: layers.endingInventory,
+                    unitPriceBeginning: layers.unitPriceBeginningForRow,
+                    purchaseUnitPrice: purchaseUnitForDisplay,
+                    price: Number(item.price) || 0,
+                  },
+                );
+                const displayPrice =
+                  Number(custodianDisplay) > 0 ? custodianDisplay : strikePrice;
                 if (sizeMap.has(variantSize)) {
                   const existing = sizeMap.get(variantSize);
                   existing.stock += variantStock;
@@ -2352,12 +2649,8 @@ class ItemsService {
                   else existing.status = "Above Threshold";
                   if (variantReorderPoint > 0)
                     existing.reorderPoint = variantReorderPoint;
-                  if (
-                    (existing.display_price == null ||
-                      Number(existing.display_price) <= 0) &&
-                    Number(strikePrice) > 0
-                  ) {
-                    existing.display_price = strikePrice;
+                  if (Number(displayPrice) > 0) {
+                    existing.display_price = displayPrice;
                   }
                 } else {
                   sizeMap.set(variantSize, {
@@ -2367,7 +2660,7 @@ class ItemsService {
                     reorderPoint: variantReorderPoint,
                     id: item.id, // Use parent item ID
                     price: Number(variant.price) || Number(item.price) || 0,
-                    display_price: strikePrice,
+                    display_price: displayPrice,
                     isJsonVariant: true, // Flag to indicate this is from JSON
                   });
                 }
@@ -2410,13 +2703,34 @@ class ItemsService {
             else if (existing.stock <= 10) existing.status = "Critical";
             else existing.status = "Above Threshold";
             if (itemReorderPoint > 0) existing.reorderPoint = itemReorderPoint;
-            if (
-              (existing.display_price == null ||
-                Number(existing.display_price) <= 0) &&
-              item.price != null &&
-              Number(item.price) > 0
-            ) {
-              existing.display_price = Number(item.price);
+            const beg = Number(item.beginning_inventory) || 0;
+            const purch = Number(item.purchases) || 0;
+            const endingInv = beg + purch;
+            const stdKey = `${String(item.id)}|${normalizeSizeForPurchaseKey(normalizedSize)}`;
+            const firstStd = firstUnitPriceByItemSize.get(stdKey);
+            const strikeStd = Number(item.price) || 0;
+            const pupStd =
+              firstStd != null && Number(firstStd) > 0
+                ? Number(firstStd)
+                : strikeStd;
+            const upBegStd =
+              item.beginning_inventory_unit_price != null &&
+              !Number.isNaN(Number(item.beginning_inventory_unit_price)) &&
+              Number(item.beginning_inventory_unit_price) > 0
+                ? Number(item.beginning_inventory_unit_price)
+                : strikeStd;
+            const dispStd = displayUnitPriceLikeCustodianInventory({
+              beginningInventory: beg,
+              released: 0,
+              endingInventory: endingInv,
+              unitPriceBeginning: upBegStd,
+              purchaseUnitPrice: pupStd,
+              price: strikeStd,
+            });
+            const displayPriceStd =
+              Number(dispStd) > 0 ? dispStd : strikeStd;
+            if (Number(displayPriceStd) > 0) {
+              existing.display_price = displayPriceStd;
             }
           } else {
             // Determine status based on stock vs reorder_point (matches At Reorder Point table)
@@ -2427,6 +2741,31 @@ class ItemsService {
             else if (item.stock <= 10) status = "Critical";
             const rowPrice =
               item.price != null ? Number(item.price) || 0 : 0;
+            const beg = Number(item.beginning_inventory) || 0;
+            const purch = Number(item.purchases) || 0;
+            const endingInv = beg + purch;
+            const stdKey = `${String(item.id)}|${normalizeSizeForPurchaseKey(normalizedSize)}`;
+            const firstStd = firstUnitPriceByItemSize.get(stdKey);
+            const pupStd =
+              firstStd != null && Number(firstStd) > 0
+                ? Number(firstStd)
+                : rowPrice;
+            const upBegStd =
+              item.beginning_inventory_unit_price != null &&
+              !Number.isNaN(Number(item.beginning_inventory_unit_price)) &&
+              Number(item.beginning_inventory_unit_price) > 0
+                ? Number(item.beginning_inventory_unit_price)
+                : rowPrice;
+            const dispStd = displayUnitPriceLikeCustodianInventory({
+              beginningInventory: beg,
+              released: 0,
+              endingInventory: endingInv,
+              unitPriceBeginning: upBegStd,
+              purchaseUnitPrice: pupStd,
+              price: rowPrice,
+            });
+            const displayPriceStd =
+              Number(dispStd) > 0 ? dispStd : rowPrice;
             // Add new size entry (use original size value for display)
             sizeMap.set(normalizedSize, {
               size: normalizedSize, // Keep original size format
@@ -2435,7 +2774,7 @@ class ItemsService {
               reorderPoint: itemReorderPoint,
               id: item.id,
               price: item.price,
-              display_price: rowPrice,
+              display_price: displayPriceStd,
             });
           }
         }

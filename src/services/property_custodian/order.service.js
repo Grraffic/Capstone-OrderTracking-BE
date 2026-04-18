@@ -4,6 +4,44 @@ const { getMaxQuantityForItem, normalizeItemName, resolveItemKey } = require("..
 const { getStudentRowById } = require("../profileResolver.service");
 const isProduction = process.env.NODE_ENV === "production";
 
+/** JSONB `orders.items` may arrive as an array or a JSON string depending on client/PostgREST. */
+function parseOrderItemsField(items) {
+  if (!items) return [];
+  if (Array.isArray(items)) return items;
+  if (typeof items === "string") {
+    try {
+      const parsed = JSON.parse(items);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+/** Orders may store `students.id` or auth `users.id` in `student_id`. */
+async function getStudentRowByOrderStudentId(orderStudentId) {
+  if (!orderStudentId) return null;
+  const { data: byStudentPk } = await supabase
+    .from("students")
+    .select("id, student_type, user_id")
+    .eq("id", orderStudentId)
+    .maybeSingle();
+  if (byStudentPk) return byStudentPk;
+  const { data: byUserId } = await supabase
+    .from("students")
+    .select("id, student_type, user_id")
+    .eq("user_id", orderStudentId)
+    .maybeSingle();
+  return byUserId || null;
+}
+
+/** `student_item_permissions.student_id` references `students.id`. */
+async function resolveStudentsTableIdFromOrderStudentId(studentId) {
+  const row = await getStudentRowByOrderStudentId(studentId);
+  return row?.id || null;
+}
+
 /**
  * Order Service
  * Handles all order-related database operations
@@ -1062,7 +1100,7 @@ class OrderService {
   async restoreInventoryForOrder(order) {
     if (!order || order.order_type === "pre-order") return;
 
-    const items = order.items || [];
+    const items = parseOrderItemsField(order.items);
     if (items.length === 0) return;
 
     // Include items for student's level OR "All Education Levels" (e.g. Logo Patch)
@@ -1248,7 +1286,11 @@ class OrderService {
         // When order is cancelled, re-enable permissions if student hasn't reached max from claimed items
         if (data.student_id) {
           try {
-            await this.reEnablePermissionsOnOrderCancellation(data, io);
+            const permPayload = {
+              ...data,
+              items: parseOrderItemsField(data.items),
+            };
+            await this.reEnablePermissionsOnOrderCancellation(permPayload, io);
           } catch (permErr) {
             console.error("Failed to re-enable permissions on order cancellation:", permErr);
             // Do not rethrow; order status was already updated
@@ -1309,16 +1351,12 @@ class OrderService {
    */
   async disablePermissionsOnOrderPlacement(order, io = null) {
     try {
-      if (!order || !order.student_id || !order.items || !Array.isArray(order.items)) {
+      const parsedItems = parseOrderItemsField(order?.items);
+      if (!order || !order.student_id || parsedItems.length === 0) {
         return;
       }
 
-      // Get student info to check student type
-      const { data: studentRow } = await supabase
-        .from("students")
-        .select("id, student_type")
-        .eq("id", order.student_id)
-        .maybeSingle();
+      const studentRow = await getStudentRowByOrderStudentId(order.student_id);
 
       // Process for both old and new students
       // For old students: disable permissions when max is reached after claim
@@ -1337,7 +1375,7 @@ class OrderService {
 
       // Get items that have enabled permissions (or should be enabled for new students) and are in this order
       const itemsToDisable = [];
-      const orderItems = Array.isArray(order.items) ? order.items : [];
+      const orderItems = parsedItems;
       const isNewStudent = String(studentRow.student_type || "").toLowerCase() === "new";
       
       for (const item of orderItems) {
@@ -1387,17 +1425,10 @@ class OrderService {
           // Emit Socket.IO event to notify admin modal of permission changes
           if (io) {
             try {
-              // Get student's user_id to emit event to the correct user
-              const { data: studentRow } = await supabase
-                .from("students")
-                .select("user_id")
-                .eq("id", order.student_id)
-                .maybeSingle();
-              
               if (studentRow?.user_id) {
-                console.log(`📡 [Order Service] Emitting student:permissions:updated event for student ${order.student_id} to user ${studentRow.user_id}`);
+                console.log(`📡 [Order Service] Emitting student:permissions:updated event for student ${studentRow.id} to user ${studentRow.user_id}`);
                 io.emit("student:permissions:updated", {
-                  studentId: order.student_id,
+                  studentId: studentRow.id,
                   userId: studentRow.user_id,
                   permissions: permissionsToDisable,
                 });
@@ -1427,16 +1458,12 @@ class OrderService {
    */
   async checkAndDisablePermissionsOnClaim(order) {
     try {
-      if (!order || !order.student_id || !order.items || !Array.isArray(order.items)) {
+      const parsedItems = parseOrderItemsField(order?.items);
+      if (!order || !order.student_id || parsedItems.length === 0) {
         return;
       }
 
-      // Get student info to check student type
-      const { data: studentRow } = await supabase
-        .from("students")
-        .select("id, student_type")
-        .eq("id", order.student_id)
-        .maybeSingle();
+      const studentRow = await getStudentRowByOrderStudentId(order.student_id);
 
       // Process for both old and new students
       // For old students: disable permissions when max is reached after claim
@@ -1472,7 +1499,7 @@ class OrderService {
       const { resolveItemKey } = require("../../config/itemMaxOrder");
       
       for (const claimedOrder of claimedOrders || []) {
-        const orderItems = Array.isArray(claimedOrder.items) ? claimedOrder.items : [];
+        const orderItems = parseOrderItemsField(claimedOrder.items);
         for (const item of orderItems) {
           const rawName = (item.name || "").trim();
           let key = resolveItemKey(rawName);
@@ -1489,9 +1516,7 @@ class OrderService {
 
       // Check each item in the order and disable if appropriate
       const itemsToDisable = [];
-      const orderItems = Array.isArray(order.items) ? order.items : [];
-      
-      for (const item of orderItems) {
+      for (const item of parsedItems) {
         const rawName = (item.name || "").trim();
         let key = resolveItemKey(rawName);
         if (!key && rawName) {
@@ -1563,16 +1588,18 @@ class OrderService {
    */
   async reEnablePermissionsOnOrderCancellation(order, io = null) {
     try {
-      if (!order || !order.student_id || !order.items || !Array.isArray(order.items)) {
+      const parsedItems = parseOrderItemsField(order?.items);
+      if (!order || !order.student_id || parsedItems.length === 0) {
+        if (order?.student_id && (!order.items || parseOrderItemsField(order.items).length === 0)) {
+          console.warn(
+            "[Order Service] reEnablePermissionsOnOrderCancellation: order has no parsable items; cannot restore eligibility rows",
+            { orderId: order.id, student_id: order.student_id },
+          );
+        }
         return;
       }
 
-      // Get student info to check student type
-      const { data: studentRow } = await supabase
-        .from("students")
-        .select("id, student_type")
-        .eq("id", order.student_id)
-        .maybeSingle();
+      const studentRow = await getStudentRowByOrderStudentId(order.student_id);
 
       // Process for both old and new students
       // For old students: disable permissions when max is reached after claim
@@ -1599,7 +1626,7 @@ class OrderService {
       // Calculate total claimed quantities per item
       const claimedQuantities = {};
       for (const claimedOrder of claimedOrders || []) {
-        const orderItems = Array.isArray(claimedOrder.items) ? claimedOrder.items : [];
+        const orderItems = parseOrderItemsField(claimedOrder.items);
         for (const item of orderItems) {
           const rawName = (item.name || "").trim();
           let key = resolveItemKey(rawName);
@@ -1628,7 +1655,7 @@ class OrderService {
         // Skip the cancelled order
         if (placedOrder.id && order.id && String(placedOrder.id) === String(order.id)) continue;
         
-        const orderItems = Array.isArray(placedOrder.items) ? placedOrder.items : [];
+        const orderItems = parseOrderItemsField(placedOrder.items);
         for (const item of orderItems) {
           const rawName = (item.name || "").trim();
           let key = resolveItemKey(rawName);
@@ -1643,15 +1670,17 @@ class OrderService {
         }
       }
 
-      // Get student's current permissions (including disabled ones)
-      const { getStudentItemPermissions } = require("../system_admin/student_item_permissions.service");
-      const permissionsResult = await getStudentItemPermissions(order.student_id);
-      
+      const studentsTableId = await resolveStudentsTableIdFromOrderStudentId(
+        order.student_id,
+      );
+
       // Also get all permissions (enabled and disabled) from database to check original max
-      const { data: allPermissions } = await supabase
-        .from("student_item_permissions")
-        .select("item_name, enabled, quantity")
-        .eq("student_id", order.student_id);
+      const { data: allPermissions } = studentsTableId
+        ? await supabase
+            .from("student_item_permissions")
+            .select("item_name, enabled, quantity")
+            .eq("student_id", studentsTableId)
+        : { data: [] };
 
       const permissionsMap = {};
       if (allPermissions) {
@@ -1665,9 +1694,7 @@ class OrderService {
 
       // Check each item in cancelled order and re-enable if appropriate
       const itemsToReEnable = [];
-      const orderItems = Array.isArray(order.items) ? order.items : [];
-      
-      for (const item of orderItems) {
+      for (const item of parsedItems) {
         const rawName = (item.name || "").trim();
         let key = resolveItemKey(rawName);
         if (!key && rawName) {
@@ -1753,17 +1780,11 @@ class OrderService {
           // Emit Socket.IO event so admin modal and student app refresh (same as on order placement)
           if (io) {
             try {
-              const { data: studentRowForEmit } = await supabase
-                .from("students")
-                .select("user_id")
-                .eq("id", order.student_id)
-                .maybeSingle();
-
-              if (studentRowForEmit?.user_id) {
-                console.log(`📡 [Order Service] Emitting student:permissions:updated event for student ${order.student_id} after order cancellation`);
+              if (studentRow?.user_id) {
+                console.log(`📡 [Order Service] Emitting student:permissions:updated event for student ${studentRow.id} after order cancellation`);
                 io.emit("student:permissions:updated", {
-                  studentId: order.student_id,
-                  userId: studentRowForEmit.user_id,
+                  studentId: studentRow.id,
+                  userId: studentRow.user_id,
                   permissions: permissionsToReEnable,
                 });
               } else {

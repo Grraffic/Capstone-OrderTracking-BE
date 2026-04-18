@@ -126,6 +126,36 @@ function resolveItemKey(name) {
   // "New Logo Patch" and "Logo Patch" are the SAME item - always normalize to "logo patch"
   // The "new" is just text, they're identical items
   if (n && (n.includes("new logo patch") || n.includes("logo patch"))) return "logo patch";
+  // Catalog / order line names may spell out level (e.g. "Junior High School blouse") while
+  // student_item_permissions and SEGMENT_RULES use shorthand keys (jhs blouse, shs skirt, …).
+  if (
+    n &&
+    (n.includes("jhs blouse") ||
+      (n.includes("junior high school") && n.includes("blouse")))
+  ) {
+    return "jhs blouse";
+  }
+  if (
+    n &&
+    (n.includes("jhs skirt") ||
+      (n.includes("junior high school") && n.includes("skirt")))
+  ) {
+    return "jhs skirt";
+  }
+  if (
+    n &&
+    (n.includes("shs blouse") ||
+      (n.includes("senior high school") && n.includes("blouse")))
+  ) {
+    return "shs blouse";
+  }
+  if (
+    n &&
+    (n.includes("shs skirt") ||
+      (n.includes("senior high school") && n.includes("skirt")))
+  ) {
+    return "shs skirt";
+  }
   if (ITEM_ALIASES[n]) return ITEM_ALIASES[n];
   return n;
 }
